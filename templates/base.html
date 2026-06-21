@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Asterism — Test PKCS#11 App{% endblock %}</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <a href="/">Asterism &middot; test-app-pkcs11</a>
+    </div>
+    <nav class="nav">
+      {% block nav %}{% endblock %}
+    </nav>
+  </header>
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <small>Dev build. Not for production. 3-of-3 HSM-backed customer wallets via emulated SoftHSM tokens.</small>
+  </footer>
+</body>
+</html>

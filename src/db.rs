@@ -1,0 +1,277 @@
+//! Thin `sqlx` query helpers wrapping the schema in `migrations/`.
+
+use serde_json::Value as JsonValue;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::models::{TransactionRow, UserRow, WalletRow};
+
+/// Run all `migrations/*.sql` against `pool`.
+///
+/// # Errors
+/// Propagates [`sqlx::migrate::MigrateError`] verbatim.
+pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
+    sqlx::migrate!("./migrations").run(pool).await
+}
+
+// ---------------------------------------------------------------------------
+// users
+// ---------------------------------------------------------------------------
+
+/// Insert a user if no row already exists with the same email.
+///
+/// Returns `true` if a row was inserted.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn upsert_user_if_absent(
+    pool: &PgPool,
+    email: &str,
+    password_hash: &str,
+) -> sqlx::Result<bool> {
+    let result = sqlx::query(
+        "INSERT INTO users (email, password_hash) VALUES ($1, $2) \
+         ON CONFLICT (email) DO NOTHING",
+    )
+    .bind(email)
+    .bind(password_hash)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Look up a user by email (case-insensitive on the indexed column).
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn find_user_by_email(pool: &PgPool, email: &str) -> sqlx::Result<Option<UserRow>> {
+    sqlx::query_as::<_, UserRow>(
+        "SELECT id, email, password_hash, created_at \
+         FROM users WHERE lower(email) = lower($1)",
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Look up a user by id.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn find_user_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<UserRow>> {
+    sqlx::query_as::<_, UserRow>(
+        "SELECT id, email, password_hash, created_at FROM users WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// wallets
+// ---------------------------------------------------------------------------
+
+/// Inputs for [`insert_wallet`].
+#[derive(Debug, Clone)]
+pub struct NewWallet<'a> {
+    /// Owning user.
+    pub user_id: Uuid,
+    /// Pre-allocated BIP-48 account index.
+    pub account_idx: i32,
+    /// Descriptor in BIP-389 multipath form.
+    pub descriptor: &'a str,
+    /// Initial JSON-encoded `bdk_wallet::ChangeSet`.
+    pub bdk_changeset: &'a JsonValue,
+    /// Initial chain tip (typically zero on a fresh BDK wallet).
+    pub chain_tip_height: i32,
+}
+
+/// Insert the wallet row created at first login.
+///
+/// # Errors
+/// Propagates any underlying SQL error. Notably, a duplicate `account_idx`
+/// or `user_id` triggers a unique-constraint violation that the caller is
+/// expected to handle (re-allocate the index and retry).
+pub async fn insert_wallet(pool: &PgPool, spec: &NewWallet<'_>) -> sqlx::Result<WalletRow> {
+    sqlx::query_as::<_, WalletRow>(
+        "INSERT INTO wallets \
+            (user_id, account_idx, descriptor, bdk_changeset, chain_tip_height) \
+         VALUES ($1, $2, $3, $4, $5) \
+         RETURNING id, user_id, account_idx, descriptor, bdk_changeset, \
+                   chain_tip_height, created_at",
+    )
+    .bind(spec.user_id)
+    .bind(spec.account_idx)
+    .bind(spec.descriptor)
+    .bind(spec.bdk_changeset)
+    .bind(spec.chain_tip_height)
+    .fetch_one(pool)
+    .await
+}
+
+/// Find the wallet for `user_id`, if any.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn find_wallet_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> sqlx::Result<Option<WalletRow>> {
+    sqlx::query_as::<_, WalletRow>(
+        "SELECT id, user_id, account_idx, descriptor, bdk_changeset, \
+                chain_tip_height, created_at \
+         FROM wallets WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Compute the next free `account_idx` (`max(account_idx) + 1`, or `0`
+/// if the table is empty).
+///
+/// Caller is responsible for serialising allocations: in this app, the
+/// boot path eager-seeds the three test users sequentially, and per-user
+/// allocation only ever happens once (idempotent first login).
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn next_account_idx(pool: &PgPool) -> sqlx::Result<i32> {
+    let next: Option<i32> =
+        sqlx::query_scalar("SELECT COALESCE(MAX(account_idx) + 1, 0) FROM wallets")
+            .fetch_one(pool)
+            .await?;
+    Ok(next.unwrap_or(0))
+}
+
+/// Persist the merged BDK changeset and chain tip.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn update_wallet_changeset(
+    pool: &PgPool,
+    wallet_id: Uuid,
+    changeset: &JsonValue,
+    tip_height: i32,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE wallets \
+         SET bdk_changeset = $1, chain_tip_height = $2 \
+         WHERE id = $3",
+    )
+    .bind(changeset)
+    .bind(tip_height)
+    .bind(wallet_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Update only the cached chain tip.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn update_wallet_tip_only(
+    pool: &PgPool,
+    wallet_id: Uuid,
+    tip_height: i32,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE wallets SET chain_tip_height = $1 WHERE id = $2")
+        .bind(tip_height)
+        .bind(wallet_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// transactions
+// ---------------------------------------------------------------------------
+
+/// Inputs for [`insert_transaction`].
+#[derive(Debug, Clone)]
+pub struct NewTransaction<'a> {
+    /// Owning wallet.
+    pub wallet_id: Uuid,
+    /// Bitcoin txid (hex).
+    pub txid: &'a str,
+    /// Canonical recipient address.
+    pub recipient: &'a str,
+    /// Amount paid to the recipient (sats).
+    pub amount_sat: i64,
+    /// Total fee paid (sats).
+    pub fee_sat: i64,
+    /// Hex-encoded raw tx.
+    pub raw_tx_hex: &'a str,
+    /// Optional label.
+    pub label: Option<&'a str>,
+}
+
+/// Insert one row per broadcast (idempotent on `(wallet_id, txid)`).
+///
+/// Returns `Some(_)` if the row was inserted, `None` if the conflict
+/// fired (caller has already broadcast this tx).
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn insert_transaction(
+    pool: &PgPool,
+    spec: &NewTransaction<'_>,
+) -> sqlx::Result<Option<TransactionRow>> {
+    sqlx::query_as::<_, TransactionRow>(
+        "INSERT INTO transactions \
+            (wallet_id, txid, recipient, amount_sat, fee_sat, raw_tx_hex, label) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+         ON CONFLICT (wallet_id, txid) DO NOTHING \
+         RETURNING id, wallet_id, txid, recipient, amount_sat, fee_sat, \
+                   raw_tx_hex, label, broadcast_at",
+    )
+    .bind(spec.wallet_id)
+    .bind(spec.txid)
+    .bind(spec.recipient)
+    .bind(spec.amount_sat)
+    .bind(spec.fee_sat)
+    .bind(spec.raw_tx_hex)
+    .bind(spec.label)
+    .fetch_optional(pool)
+    .await
+}
+
+/// All broadcast transactions for a wallet, newest first.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn list_transactions_for_wallet(
+    pool: &PgPool,
+    wallet_id: Uuid,
+) -> sqlx::Result<Vec<TransactionRow>> {
+    sqlx::query_as::<_, TransactionRow>(
+        "SELECT id, wallet_id, txid, recipient, amount_sat, fee_sat, \
+                raw_tx_hex, label, broadcast_at \
+         FROM transactions WHERE wallet_id = $1 \
+         ORDER BY broadcast_at DESC",
+    )
+    .bind(wallet_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Look up one transaction by `(wallet_id, txid)`.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn find_transaction(
+    pool: &PgPool,
+    wallet_id: Uuid,
+    txid: &str,
+) -> sqlx::Result<Option<TransactionRow>> {
+    sqlx::query_as::<_, TransactionRow>(
+        "SELECT id, wallet_id, txid, recipient, amount_sat, fee_sat, \
+                raw_tx_hex, label, broadcast_at \
+         FROM transactions WHERE wallet_id = $1 AND txid = $2",
+    )
+    .bind(wallet_id)
+    .bind(txid)
+    .fetch_optional(pool)
+    .await
+}

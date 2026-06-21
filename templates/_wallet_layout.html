@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}Wallet {{ header.account_idx }} &mdash; Asterism{% endblock %}
+
+{% block nav %}
+  <span class="user">{{ header.email }}</span>
+  <form method="post" action="/logout" class="inline-form">
+    <button type="submit" class="link">Log out</button>
+  </form>
+{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>
+    Wallet
+    <span class="badge {{ header.network }}">{{ header.network }}</span>
+  </h1>
+  <dl class="kv-grid">
+    <dt>Policy</dt>
+    <dd>3-of-3 (HSMs)</dd>
+
+    <dt>BIP-48 account</dt>
+    <dd><code>{{ header.account_idx }}</code></dd>
+
+    <dt>Chain tip</dt>
+    <dd>{{ header.tip_height }}</dd>
+
+    <dt>Descriptor</dt>
+    <dd><code class="break">{{ header.descriptor }}</code></dd>
+  </dl>
+</section>
+
+{% if let Some(f) = flash %}
+<section class="card">
+  <div class="alert {{ f.kind }}" role="status">{{ f.message }}</div>
+</section>
+{% endif %}
+
+<section class="card balance-card">
+  <h2>Balance</h2>
+  <div class="balance-headline">
+    <div class="balance-total">
+      <span class="balance-amount">{{ balance.total_btc }}</span>
+      <span class="balance-unit">BTC</span>
+    </div>
+    <div class="balance-rollups">
+      <div class="balance-spendable">
+        Spendable now: <strong>{{ balance.spendable_btc }} BTC</strong>
+      </div>
+    </div>
+  </div>
+  {% if balance.has_pending %}
+    <dl class="kv-grid balance-breakdown">
+      <dt>Confirmed</dt>
+      <dd>{{ balance.confirmed_btc }} BTC</dd>
+
+      <dt>Trusted pending</dt>
+      <dd>{{ balance.trusted_pending_btc }} BTC</dd>
+
+      <dt>Untrusted pending</dt>
+      <dd>{{ balance.untrusted_pending_btc }} BTC</dd>
+
+      <dt>Immature</dt>
+      <dd>{{ balance.immature_btc }} BTC</dd>
+    </dl>
+  {% endif %}
+</section>
+
+<nav class="tabs">
+  <a class="tab {% if header.active_tab == "receive" %}active{% endif %}"
+     href="/wallet/receive">Receive</a>
+  <a class="tab {% if header.active_tab == "send" %}active{% endif %}"
+     href="/wallet/send">Send</a>
+</nav>
+
+{% block tab_body %}{% endblock %}
+{% endblock %}

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}Log in &mdash; Asterism{% endblock %}
+
+{% block content %}
+<section class="card narrow">
+  <h1>Log in</h1>
+  <p class="muted">Use one of the seeded test accounts: <code>test1@test.com</code>, <code>test2@test.com</code>, or <code>test3@test.com</code>. Password is <code>test1234</code>.</p>
+
+  {% if let Some(msg) = error %}
+    <div class="alert alert-error" role="alert">{{ msg }}</div>
+  {% endif %}
+
+  <form method="post" action="/login" class="form">
+    <label>
+      <span>Email</span>
+      <input type="email" name="email" required autocomplete="username" value="{{ email }}">
+    </label>
+    <label>
+      <span>Password</span>
+      <input type="password" name="password" required autocomplete="current-password">
+    </label>
+    <button type="submit" class="btn btn-primary">Log in</button>
+  </form>
+</section>
+{% endblock %}

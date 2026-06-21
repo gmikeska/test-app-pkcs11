@@ -1,0 +1,22 @@
+# Dev shim seed configuration for `test-app-pkcs11`.
+#
+# `libasterism_dev_hsm.so` reads this file when `DEV_HSM_CONFIG` points at
+# it (set in `.env`). Each entry maps a SoftHSM token (selected by label)
+# to the BIP-39 mnemonic the shim stretches into a 64-byte seed before the
+# intercepted `C_DeriveKey(CKM_DEV_BIP32_MASTER_DERIVE)` runs.
+#
+# Mnemonics here are the standard BIP-39 test vectors so the dev keys are
+# well-known and reproducible across machines. Replace with private values
+# if you intend to fund these wallets in any way.
+
+[[slots]]
+label = "asterism-pkcs11-app-1"
+mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+
+[[slots]]
+label = "asterism-pkcs11-app-2"
+mnemonic = "legal winner thank year wave sausage worth useful legal winner thank yellow"
+
+[[slots]]
+label = "asterism-pkcs11-app-3"
+mnemonic = "letter advice cage absurd amount doctor acoustic avoid letter advice cage above"

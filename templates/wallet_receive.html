@@ -1,0 +1,36 @@
+{% extends "_wallet_layout.html" %}
+
+{% block tab_body %}
+<section class="card">
+  <h2>Receive addresses</h2>
+  <p class="muted">First {{ addresses.len() }} addresses on the external keychain (BIP-48 multisig). Click any address to view receipts.</p>
+  {% if addresses.is_empty() %}
+    <p class="muted">No addresses derived yet.</p>
+  {% else %}
+    <table class="data">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Address</th>
+          <th>Received (BTC)</th>
+          <th>Unspent (BTC)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in addresses %}
+          <tr>
+            <td>{{ a.index }}</td>
+            <td>
+              <a href="/wallet/addresses/{{ a.address }}">
+                <code>{{ a.address }}</code>
+              </a>
+            </td>
+            <td>{{ a.received_btc }}</td>
+            <td>{{ a.unspent_btc }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+{% endblock %}

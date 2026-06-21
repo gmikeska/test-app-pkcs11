@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block title %}{{ address.address }} &mdash; Asterism{% endblock %}
+
+{% block nav %}
+  <span class="user">{{ email }}</span>
+  <form method="post" action="/logout" class="inline-form">
+    <button type="submit" class="link">Log out</button>
+  </form>
+{% endblock %}
+
+{% block content %}
+<section class="card">
+  <div class="crumbs">
+    <a href="/wallet/receive">&larr; Back to receive</a>
+  </div>
+  <h1>
+    Address detail
+    <span class="badge {{ header.network }}">{{ header.network }}</span>
+  </h1>
+  <p><code class="break">{{ address.address }}</code></p>
+</section>
+
+<section class="card">
+  <div class="split">
+    <div class="qr">
+      {{ address.qr_svg|safe }}
+    </div>
+    <dl class="kv-grid">
+      {% match address.derivation_index %}
+        {% when Some with (idx) %}
+          <dt>Derivation index</dt><dd><code>{{ idx }}</code></dd>
+        {% when None %}
+          <dt>Derivation index</dt><dd>&mdash;</dd>
+      {% endmatch %}
+      <dt>Keychain</dt><dd>{{ address.keychain }}</dd>
+      <dt>Total received</dt><dd>{{ address.total_received_btc }} BTC</dd>
+      <dt>Unspent</dt><dd>{{ address.unspent_btc }} BTC</dd>
+      <dt>Receipts</dt><dd>{{ address.receipt_count }}</dd>
+      <dt>BIP-21 URI</dt><dd><code class="break">{{ address.qr_uri }}</code></dd>
+      <dt>Chain tip</dt><dd>{{ header.tip_height }}</dd>
+    </dl>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Receipts</h2>
+  {% if receipts.is_empty() %}
+    <p class="muted">No transactions have paid this address yet. Send to <code>{{ address.address }}</code> from your regtest node (e.g. <code>bitcoin-cli sendtoaddress {{ address.address }} 0.001</code>), mine a block, and reload.</p>
+  {% else %}
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Txid</th>
+          <th>Vout</th>
+          <th>Amount (BTC)</th>
+          <th>Status</th>
+          <th>Height</th>
+          <th>State</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in receipts %}
+          <tr>
+            <td><code class="break">{{ r.txid }}</code></td>
+            <td>{{ r.vout }}</td>
+            <td>{{ r.amount_btc }}</td>
+            <td>{{ r.status }}</td>
+            <td>{{ r.height }}</td>
+            <td>
+              {% if r.is_spent %}
+                <span class="tag-spent">spent</span>
+              {% else %}
+                <span class="tag-unspent">unspent</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+{% endblock %}

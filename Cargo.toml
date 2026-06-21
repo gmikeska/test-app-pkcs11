@@ -2,5 +2,88 @@
 name = "test-app-pkcs11"
 version = "0.1.0"
 edition = "2024"
+description = "Test web app exercising asterism-pkcs11: customer-facing wallets backed by a 3-of-3 federation of emulated HSMs."
+license = "MIT OR Apache-2.0"
+publish = false
 
 [dependencies]
+# Asterism — Federation/Signer/SigningCoordinator + Pkcs11Signer.
+asterism-core = { path = "../asterism-core" }
+asterism-pkcs11 = { path = "../asterism-pkcs11" }
+# Dev-only HSM helpers (DevBackend, init_dev_token). The `setup_dev_federation`
+# helper is bypassed on purpose — see src/hsm.rs for the regtest-aware path.
+asterism-dev-signer = { path = "../asterism-dev-signer" }
+
+bitcoin = "0.32"
+miniscript = "12"
+
+# BDK — per-user wallet (address derivation, UTXO/tx tracking, descriptor
+# persistence via ChangeSet). Bitcoin Core RPC sync via the bdk_bitcoind_rpc
+# Emitter against the local regtest node.
+bdk_wallet = { version = "3.1", features = ["std"] }
+bdk_bitcoind_rpc = "0.22"
+bitcoincore-rpc = "0.19"
+
+# Server-side QR rendering for the address detail page.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
+# Web stack
+axum = "0.8.9"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal"] }
+tower = "0.5"
+tower-http = { version = "0.6.11", features = ["fs", "trace"] }
+
+# Sessions (cookie-backed, Postgres-stored).
+#
+# Version pairing: tower-sessions 0.14 + tower-sessions-sqlx-store 0.15 share
+# `tower-sessions-core 0.14`. tower-sessions 0.15 bumped its core to 0.15 but
+# tower-sessions-sqlx-store hasn't followed yet (matches test-app-xpub).
+tower-sessions = { version = "0.14", features = ["signed"] }
+tower-sessions-sqlx-store = { version = "0.15", features = ["postgres"] }
+time = "0.3"
+
+# Templating
+askama = { version = "0.16", features = ["serde_json"] }
+askama_web = { version = "0.16", features = ["axum-0.8"] }
+
+# Database
+sqlx = { version = "0.8.6", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "macros",
+    "migrate",
+    "uuid",
+    "chrono",
+    "json",
+] }
+
+# Auth
+argon2 = "0.5.3"
+password-hash = { version = "0.5", features = ["std"] }
+rand_core = { version = "0.6", features = ["std"] }
+
+# Misc
+uuid = { version = "1.23", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dotenvy = "0.15"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+axum-extra = { version = "0.12.6", features = ["form"] }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Web-handler signatures naturally collect many extractors and many fields.
+too_many_arguments = "allow"
+module_name_repetitions = "allow"
+# Async handlers commonly take owned types by value (axum extractors).
+needless_pass_by_value = "allow"
+# Background text refers to PostgreSQL — backtick noise hurts readability.
+doc_markdown = "allow"
+# A list-item continuation indented to align with prose reads better than
+# rewriting the source for clippy.
+doc_overindented_list_items = "allow"
