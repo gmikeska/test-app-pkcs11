@@ -1,0 +1,64 @@
+{% extends "_elements_wallet_layout.html" %}
+
+{% block tab_body %}
+<section class="card">
+  <h2>Current Federation</h2>
+  <dl class="kv-grid">
+    <dt>Threshold</dt>
+    <dd>{{ current.threshold }}-of-{{ current.signer_count }}</dd>
+
+    <dt>Version</dt>
+    <dd>{{ current.version_index }} (of {{ version_count }} total)</dd>
+  </dl>
+
+  <h3>Signers</h3>
+  <table class="data">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Signer ID</th>
+        <th>Label</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in current.signers %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td><code>{{ s.id }}</code></td>
+          <td>{{ s.label }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+{% if versions.len() > 1 %}
+<section class="card">
+  <h2>Version History</h2>
+  <p class="muted">All historical federation compositions, oldest first.</p>
+  {% for v in versions %}
+    <div class="card {% if v.is_current %}current-version{% endif %}" style="margin-bottom: 0.75rem;">
+      <dl class="kv-grid">
+        <dt>Version</dt>
+        <dd>{{ v.version_index }}{% if v.is_current %} <span class="badge regtest">current</span>{% endif %}</dd>
+
+        <dt>Policy</dt>
+        <dd>{{ v.threshold }}-of-{{ v.signer_count }}</dd>
+
+        <dt>Wallet Handle</dt>
+        <dd><code>{{ v.wallet_handle }}</code></dd>
+
+        <dt>Blinding Key Rotated</dt>
+        <dd>{{ v.blinding_key_rotated }}</dd>
+
+        <dt>Descriptor</dt>
+        <dd><code class="break">{{ v.descriptor_short }}</code></dd>
+
+        <dt>Created</dt>
+        <dd>{{ v.created_at }}</dd>
+      </dl>
+    </div>
+  {% endfor %}
+</section>
+{% endif %}
+{% endblock %}

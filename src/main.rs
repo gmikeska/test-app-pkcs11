@@ -151,6 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/wallet/send",
             get(handlers::wallet::send_get).post(handlers::wallet::send_post),
         )
+        .route("/wallet/federation", get(handlers::wallet::federation))
         .route(
             "/wallet/addresses/{address}",
             get(handlers::wallet::address_show),
@@ -171,6 +172,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/elements/wallet/send",
             get(handlers::elements_wallet::send_get).post(handlers::elements_wallet::send_post),
+        )
+        .route(
+            "/elements/wallet/federation",
+            get(handlers::elements_wallet::federation),
         )
         .route(
             "/elements/wallet/addresses/{address}",

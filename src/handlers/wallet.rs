@@ -138,6 +138,41 @@ struct AddressTemplate {
     receipts: Vec<ReceiptView>,
 }
 
+#[derive(Template, WebTemplate)]
+#[template(path = "wallet_federation.html")]
+struct FederationTemplate {
+    header: WalletHeader,
+    balance: BalanceView,
+    current: FederationVersionView,
+    versions: Vec<FederationHistoryView>,
+    version_count: usize,
+    flash: Option<FlashBanner>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SignerView {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FederationVersionView {
+    pub version_index: i32,
+    pub threshold: i32,
+    pub signer_count: i32,
+    pub signers: Vec<SignerView>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FederationHistoryView {
+    pub version_index: i32,
+    pub threshold: i32,
+    pub signer_count: i32,
+    pub descriptor_short: String,
+    pub created_at: String,
+    pub is_current: bool,
+}
+
 /// Row for the recent-transactions table on the send tab.
 #[derive(Debug, Serialize, Clone)]
 pub struct TransactionListView {
@@ -445,9 +480,102 @@ pub async fn address_show(
     .into_response())
 }
 
+/// `GET /wallet/federation`
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+pub async fn federation(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user): AuthUser,
+) -> Result<Response, AppError> {
+    let uw = state.wallet_manager.load_or_init(user.id).await?;
+    uw.sync().await?;
+    let balance = uw.balance().await;
+    let tip_height = uw.tip_height().await;
+    let descriptor = lookup_descriptor(&state, user.id).await?;
+
+    let versions = db::list_federation_versions_for_wallet(&state.db, uw.wallet_id()).await?;
+    let version_count = versions.len();
+
+    let current_fed = uw.federation();
+    let current = FederationVersionView {
+        version_index: version_count.saturating_sub(1) as i32,
+        threshold: current_fed.threshold() as i32,
+        signer_count: current_fed.total_signers() as i32,
+        signers: build_signer_views(current_fed, &state),
+    };
+
+    let history: Vec<FederationHistoryView> = versions
+        .iter()
+        .map(|v| {
+            let is_current = v.version_index == (version_count.saturating_sub(1) as i32);
+            FederationHistoryView {
+                version_index: v.version_index,
+                threshold: v.threshold,
+                signer_count: v.signer_count,
+                descriptor_short: truncate_descriptor(&v.descriptor, 40),
+                created_at: v.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                is_current,
+            }
+        })
+        .collect();
+
+    Ok(FederationTemplate {
+        header: WalletHeader {
+            email: user.email,
+            account_idx: uw.account_idx(),
+            network: state.config.network.to_string(),
+            descriptor,
+            tip_height,
+            active_tab: "federation",
+            policy: policy_label(&state),
+        },
+        balance: BalanceView::from(balance),
+        current,
+        versions: history,
+        version_count,
+        flash: None,
+    }
+    .into_response())
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn build_signer_views(
+    federation: &asterism_core::Federation<crate::wallet::NetworkPatchedSigner>,
+    state: &AppState,
+) -> Vec<SignerView> {
+    use asterism_core::signer::Signer;
+    federation
+        .signers()
+        .iter()
+        .map(|s| {
+            let id_str = s.id().as_str().to_string();
+            let label = s
+                .label()
+                .map(String::from)
+                .or_else(|| {
+                    state
+                        .config
+                        .hsm_tokens
+                        .iter()
+                        .find(|t| t.label == id_str)
+                        .map(|t| t.label.clone())
+                })
+                .unwrap_or_default();
+            SignerView { id: id_str, label }
+        })
+        .collect()
+}
+
+fn truncate_descriptor(desc: &str, max_len: usize) -> String {
+    if desc.len() <= max_len {
+        desc.to_string()
+    } else {
+        let half = max_len / 2;
+        format!("{}...{}", &desc[..half], &desc[desc.len() - half..])
+    }
+}
 
 fn policy_label(state: &AppState) -> String {
     let t = state.config.fed_threshold;

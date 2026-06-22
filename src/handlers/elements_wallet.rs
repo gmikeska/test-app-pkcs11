@@ -163,6 +163,43 @@ impl From<ElementsAddressReceipt> for ElementsReceiptView {
     }
 }
 
+#[derive(Template, WebTemplate)]
+#[template(path = "elements_wallet_federation.html")]
+struct ElementsFederationTemplate {
+    header: ElementsWalletHeader,
+    balance: ElementsBalanceView,
+    current: ElementsFederationVersionView,
+    versions: Vec<ElementsFederationHistoryView>,
+    version_count: usize,
+    flash: Option<FlashBanner>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ElementsSignerView {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ElementsFederationVersionView {
+    pub version_index: i32,
+    pub threshold: i32,
+    pub signer_count: i32,
+    pub signers: Vec<ElementsSignerView>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ElementsFederationHistoryView {
+    pub version_index: i32,
+    pub threshold: i32,
+    pub signer_count: i32,
+    pub wallet_handle: String,
+    pub blinding_key_rotated: String,
+    pub descriptor_short: String,
+    pub created_at: String,
+    pub is_current: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -383,6 +420,111 @@ pub async fn address_show(
         receipts,
     }
     .into_response())
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+pub async fn federation(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user): AuthUser,
+) -> Result<Response, AppError> {
+    let uw = state.elements_wallet_manager.load_or_init(user.id).await?;
+    let tip_height = uw.tip_height().await?;
+    let balances = uw.balance().await?;
+
+    let versions =
+        db::list_federation_versions_for_elements_wallet(&state.db, uw.wallet_id()).await?;
+    let version_count = versions.len();
+
+    let current_signers: Vec<ElementsSignerView> = state
+        .config
+        .hsm_tokens
+        .iter()
+        .enumerate()
+        .take(
+            versions
+                .last()
+                .map_or(state.config.hsm_tokens.len(), |v| {
+                    usize::try_from(v.signer_count).unwrap_or(0)
+                }),
+        )
+        .map(|(_, t)| ElementsSignerView {
+            id: t.label.clone(),
+            label: t.label.clone(),
+        })
+        .collect();
+
+    let current = ElementsFederationVersionView {
+        version_index: version_count.saturating_sub(1) as i32,
+        threshold: state.config.fed_threshold as i32,
+        signer_count: current_signers.len() as i32,
+        signers: current_signers,
+    };
+
+    let history: Vec<ElementsFederationHistoryView> = versions
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let is_current = v.version_index == (version_count.saturating_sub(1) as i32);
+            let blinding_key_rotated = if i == 0 {
+                "N/A (initial)".to_string()
+            } else {
+                let prev = &versions[i - 1];
+                if v.blinding_key == prev.blinding_key {
+                    "No".to_string()
+                } else {
+                    "Yes".to_string()
+                }
+            };
+            ElementsFederationHistoryView {
+                version_index: v.version_index,
+                threshold: v.threshold,
+                signer_count: v.signer_count,
+                wallet_handle: v.wallet_handle.clone(),
+                blinding_key_rotated,
+                descriptor_short: truncate_descriptor(&v.descriptor, 40),
+                created_at: v.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                is_current,
+            }
+        })
+        .collect();
+
+    let total = balances.trusted + balances.untrusted_pending + balances.immature;
+    let has_pending = (balances.untrusted_pending + balances.immature) > 0.000_000_01;
+    let balance_view = ElementsBalanceView {
+        total_btc: format!("{total:.8}"),
+        spendable_btc: format!("{:.8}", balances.trusted),
+        confirmed_btc: format!("{:.8}", balances.trusted),
+        pending_btc: format!("{:.8}", balances.untrusted_pending),
+        immature_btc: format!("{:.8}", balances.immature),
+        has_pending,
+    };
+
+    Ok(ElementsFederationTemplate {
+        header: ElementsWalletHeader {
+            email: user.email,
+            account_idx: uw.account_idx(),
+            network: uw.network().to_string(),
+            descriptor: uw.descriptor().to_string(),
+            tip_height,
+            active_tab: "federation",
+            policy: elements_policy_label(&state),
+        },
+        balance: balance_view,
+        current,
+        versions: history,
+        version_count,
+        flash: None,
+    }
+    .into_response())
+}
+
+fn truncate_descriptor(desc: &str, max_len: usize) -> String {
+    if desc.len() <= max_len {
+        desc.to_string()
+    } else {
+        let half = max_len / 2;
+        format!("{}...{}", &desc[..half], &desc[desc.len() - half..])
+    }
 }
 
 fn elements_policy_label(state: &AppState) -> String {
