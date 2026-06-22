@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use asterism_elements::ElementsNetwork;
 use asterism_elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
 use asterism_elements::signer::ElementsSigner;
-use asterism_elements::ElementsNetwork;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use elements::encode::{deserialize as consensus_deserialize, serialize as consensus_serialize};
@@ -24,7 +24,9 @@ use asterism_elements::elements_miniscript::slip77::MasterBlindingKey;
 
 use crate::config::AppConfig;
 use crate::db;
-use crate::elements_rpc::{ElementsBalances, ElementsRpc, ElementsRpcError, ElementsUtxo, ImportDescriptorRequest};
+use crate::elements_rpc::{
+    ElementsBalances, ElementsRpc, ElementsRpcError, ElementsUtxo, ImportDescriptorRequest,
+};
 use crate::hsm::{HsmError, HsmFleet};
 use crate::models::ElementsWalletRow;
 use crate::wallet::NetworkPatchedSigner;
@@ -84,11 +86,7 @@ pub struct ElementsWalletManager {
 
 #[allow(dead_code)]
 impl ElementsWalletManager {
-    pub fn new(
-        pool: PgPool,
-        config: &AppConfig,
-        hsm: Arc<HsmFleet>,
-    ) -> Self {
+    pub fn new(pool: PgPool, config: &AppConfig, hsm: Arc<HsmFleet>) -> Self {
         let rpc = Arc::new(ElementsRpc::new(
             &config.elements_rpc_url,
             &config.elements_rpc_user,
@@ -108,7 +106,10 @@ impl ElementsWalletManager {
         self.network
     }
 
-    fn derivation_path_for(&self, account_idx: u32) -> Result<bitcoin::bip32::DerivationPath, ElementsWalletError> {
+    fn derivation_path_for(
+        &self,
+        account_idx: u32,
+    ) -> Result<bitcoin::bip32::DerivationPath, ElementsWalletError> {
         let parts = [
             bitcoin::bip32::ChildNumber::from_hardened_idx(48)
                 .map_err(|e| ElementsWalletError::Sign(format!("48': {e}")))?,
@@ -122,7 +123,10 @@ impl ElementsWalletManager {
         Ok(bitcoin::bip32::DerivationPath::from(parts.to_vec()))
     }
 
-    pub async fn load_or_init(&self, user_id: Uuid) -> Result<Arc<UserElementsWallet>, ElementsWalletError> {
+    pub async fn load_or_init(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Arc<UserElementsWallet>, ElementsWalletError> {
         if let Some(uw) = self.cache.lock().await.get(&user_id).cloned() {
             return Ok(uw);
         }
@@ -135,14 +139,20 @@ impl ElementsWalletManager {
         Ok(cache.entry(user_id).or_insert(uw).clone())
     }
 
-    pub async fn ensure_wallet_for_user(&self, user_id: Uuid) -> Result<ElementsWalletRow, ElementsWalletError> {
+    pub async fn ensure_wallet_for_user(
+        &self,
+        user_id: Uuid,
+    ) -> Result<ElementsWalletRow, ElementsWalletError> {
         if let Some(row) = db::find_elements_wallet_for_user(&self.pool, user_id).await? {
             return Ok(row);
         }
         self.create_wallet_for_user(user_id).await
     }
 
-    async fn create_wallet_for_user(&self, user_id: Uuid) -> Result<ElementsWalletRow, ElementsWalletError> {
+    async fn create_wallet_for_user(
+        &self,
+        user_id: Uuid,
+    ) -> Result<ElementsWalletRow, ElementsWalletError> {
         let account_idx = db::next_elements_account_idx(&self.pool).await?;
         let account_idx_u32 = u32::try_from(account_idx).unwrap_or(0);
         let path = self.derivation_path_for(account_idx_u32)?;
@@ -175,10 +185,11 @@ impl ElementsWalletManager {
         // BIP-389 multipath syntax (/<0;1>/*). Extract the inner
         // wsh(sortedmulti(...)) and import receive (/0/*) and change (/1/*)
         // as separate descriptors with checksums.
-        let inner_multipath = extract_inner_wsh(&multipath)
-            .ok_or_else(|| ElementsWalletError::Descriptor(
+        let inner_multipath = extract_inner_wsh(&multipath).ok_or_else(|| {
+            ElementsWalletError::Descriptor(
                 "could not extract inner wsh() from CT descriptor".into(),
-            ))?;
+            )
+        })?;
         let inner_receive = inner_multipath.replace("/<0;1>/*", "/0/*");
         let inner_change = inner_multipath.replace("/<0;1>/*", "/1/*");
 
@@ -197,13 +208,14 @@ impl ElementsWalletManager {
                 let info = rpc.get_descriptor_info(desc)?;
                 let desc_with_checksum = format!("{desc}#{}", info.checksum);
 
-                let results = rpc.import_descriptors(&wallet_name, &[
-                    ImportDescriptorRequest {
+                let results = rpc.import_descriptors(
+                    &wallet_name,
+                    &[ImportDescriptorRequest {
                         descriptor: desc_with_checksum,
                         active: true,
                         internal: is_internal,
-                    },
-                ])?;
+                    }],
+                )?;
                 for r in &results {
                     if let (false, Some(err)) = (r.success, &r.error) {
                         tracing::warn!(
@@ -218,7 +230,8 @@ impl ElementsWalletManager {
 
             // Import blinding keys for the first batch of receive addresses.
             let slip77_mbk = MasterBlindingKey::from(mbk_for_blinding);
-            let secp = asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new();
+            let secp =
+                asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new();
             for idx in 0..REVEAL_COUNT {
                 if let Ok(definite) = ct_desc_clone.at_derivation_index(idx) {
                     let addr = match definite.address(&secp, network.address_params()) {
@@ -231,7 +244,9 @@ impl ElementsWalletManager {
                     let spk = definite.descriptor.script_pubkey();
                     let bk = slip77_mbk.blinding_private_key(&spk);
                     let bk_hex = hex_encode(&bk.secret_bytes());
-                    if let Err(e) = rpc.import_blinding_key(&wallet_name, &addr.to_string(), &bk_hex) {
+                    if let Err(e) =
+                        rpc.import_blinding_key(&wallet_name, &addr.to_string(), &bk_hex)
+                    {
                         tracing::warn!(idx, error = %e, "importblindingkey failed");
                     }
                 }
@@ -397,9 +412,10 @@ impl UserElementsWallet {
         let ct_desc = asterism_elements::elements_miniscript::confidential::Descriptor::<
             asterism_elements::elements_miniscript::descriptor::DescriptorPublicKey,
         >::from_str(&desc_str)
-            .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+        .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
 
-        let secp = asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new();
+        let secp =
+            asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new();
         let network = self.network;
         // Derive both confidential and unconfidential addresses.
         // Elements Core returns unconfidential addresses in listunspent
@@ -417,9 +433,7 @@ impl UserElementsWallet {
                 None,
                 network.address_params(),
             );
-            let unconf_str = unconf_addr
-                .map(|a| a.to_string())
-                .unwrap_or_default();
+            let unconf_str = unconf_addr.map(|a| a.to_string()).unwrap_or_default();
             addr_pairs.push((conf_addr.to_string(), unconf_str));
         }
 
@@ -463,18 +477,19 @@ impl UserElementsWallet {
         let wallet = self.daemon_wallet_name.clone();
         let addr = address.to_string();
 
-        let (utxos, tip) = tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
-            let mut utxos = rpc.list_received_by_address(&wallet, &addr)?;
-            if utxos.is_empty() {
-                if let Some(ref uc) = unconf {
-                    utxos = rpc.list_received_by_address(&wallet, uc)?;
+        let (utxos, tip) =
+            tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
+                let mut utxos = rpc.list_received_by_address(&wallet, &addr)?;
+                if utxos.is_empty() {
+                    if let Some(ref uc) = unconf {
+                        utxos = rpc.list_received_by_address(&wallet, uc)?;
+                    }
                 }
-            }
-            let tip = rpc.get_block_count()?;
-            Ok((utxos, tip))
-        })
-        .await
-        .expect("spawn_blocking join")?;
+                let tip = rpc.get_block_count()?;
+                Ok((utxos, tip))
+            })
+            .await
+            .expect("spawn_blocking join")?;
 
         let mut total_received = 0.0;
         let mut unspent = 0.0;
@@ -526,7 +541,8 @@ impl UserElementsWallet {
             let funded = rpc.wallet_create_funded_psbt(&wallet, &outputs, fee_rate_btc_kb)?;
 
             // Step 2: Decode PSET.
-            let pset_bytes = BASE64.decode(funded.psbt.as_bytes())
+            let pset_bytes = BASE64
+                .decode(funded.psbt.as_bytes())
                 .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
             let mut pset: Pset = consensus_deserialize(&pset_bytes)
                 .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
@@ -534,7 +550,8 @@ impl UserElementsWallet {
             // Step 3: Sign with all 3 HSMs.
             let mut total_signed = 0usize;
             for signer in &signers {
-                let n = signer.sign_pset(&mut pset)
+                let n = signer
+                    .sign_pset(&mut pset)
                     .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
                 total_signed += n;
             }
@@ -630,8 +647,7 @@ fn derive_master_blinding_key(user_id: Uuid, account_idx: i32) -> [u8; 32] {
 fn confidential_to_unconfidential(address: &str, network: ElementsNetwork) -> Option<String> {
     let parsed = elements::Address::from_str(address).ok()?;
     let spk = parsed.script_pubkey();
-    elements::Address::from_script(&spk, None, network.address_params())
-        .map(|a| a.to_string())
+    elements::Address::from_script(&spk, None, network.address_params()).map(|a| a.to_string())
 }
 
 /// Extract the inner `wsh(sortedmulti(...))` descriptor from a

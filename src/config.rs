@@ -63,7 +63,6 @@ pub struct AppConfig {
     pub fed_threshold: u32,
 
     // -- Elements chain config --
-
     /// Elements daemon JSON-RPC base URL.
     pub elements_rpc_url: String,
     /// Elements daemon RPC username.
@@ -120,10 +119,12 @@ impl AppConfig {
         })?;
 
         let bip48_coin_index = match optional("APP_BIP48_COIN_INDEX") {
-            Some(s) => s.parse().map_err(|e: std::num::ParseIntError| ConfigError::Parse {
-                var: "APP_BIP48_COIN_INDEX",
-                reason: e.to_string(),
-            })?,
+            Some(s) => s
+                .parse()
+                .map_err(|e: std::num::ParseIntError| ConfigError::Parse {
+                    var: "APP_BIP48_COIN_INDEX",
+                    reason: e.to_string(),
+                })?,
             None => default_bip48_coin_index(network),
         };
 
@@ -143,17 +144,15 @@ impl AppConfig {
 
         let pkcs11_library_path = PathBuf::from(require("PKCS11_LIB")?);
 
-        let hsm_tokens = [
-            load_hsm_token(1)?,
-            load_hsm_token(2)?,
-            load_hsm_token(3)?,
-        ];
+        let hsm_tokens = [load_hsm_token(1)?, load_hsm_token(2)?, load_hsm_token(3)?];
 
         let fed_threshold: u32 = match optional("APP_FED_THRESHOLD") {
-            Some(s) => s.parse().map_err(|e: std::num::ParseIntError| ConfigError::Parse {
-                var: "APP_FED_THRESHOLD",
-                reason: e.to_string(),
-            })?,
+            Some(s) => s
+                .parse()
+                .map_err(|e: std::num::ParseIntError| ConfigError::Parse {
+                    var: "APP_FED_THRESHOLD",
+                    reason: e.to_string(),
+                })?,
             None => 3,
         };
         if fed_threshold != 3 {
@@ -164,12 +163,13 @@ impl AppConfig {
         }
 
         let elements_rpc_host = require("ELEMENTS_RPC_HOST")?;
-        let elements_rpc_port: u16 = require("ELEMENTS_RPC_PORT")?
-            .parse()
-            .map_err(|e: std::num::ParseIntError| ConfigError::Parse {
-                var: "ELEMENTS_RPC_PORT",
-                reason: e.to_string(),
-            })?;
+        let elements_rpc_port: u16 =
+            require("ELEMENTS_RPC_PORT")?
+                .parse()
+                .map_err(|e: std::num::ParseIntError| ConfigError::Parse {
+                    var: "ELEMENTS_RPC_PORT",
+                    reason: e.to_string(),
+                })?;
         let elements_rpc_url = format!("http://{elements_rpc_host}:{elements_rpc_port}");
         let elements_rpc_user = require("ELEMENTS_RPC_USER")?;
         let elements_rpc_password = require("ELEMENTS_RPC_PASSWORD")?;
@@ -181,9 +181,7 @@ impl AppConfig {
             other => {
                 return Err(ConfigError::Parse {
                     var: "ELEMENTS_NETWORK",
-                    reason: format!(
-                        "expected liquid|liquidtestnet|elementsregtest, got `{other}`"
-                    ),
+                    reason: format!("expected liquid|liquidtestnet|elementsregtest, got `{other}`"),
                 });
             }
         };

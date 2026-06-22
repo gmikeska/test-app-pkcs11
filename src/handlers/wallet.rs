@@ -430,10 +430,7 @@ pub async fn address_show(
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn lookup_descriptor(
-    state: &Arc<AppState>,
-    user_id: uuid::Uuid,
-) -> Result<String, AppError> {
+async fn lookup_descriptor(state: &Arc<AppState>, user_id: uuid::Uuid) -> Result<String, AppError> {
     let row = db::find_wallet_for_user(&state.db, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("wallet for user {user_id}")))?;

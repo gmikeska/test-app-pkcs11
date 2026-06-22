@@ -16,8 +16,8 @@ use tower_sessions::Session;
 use uuid::Uuid;
 
 use crate::db;
-use crate::state::AppState;
 use crate::models::UserRow;
+use crate::state::AppState;
 
 /// Session-storage key for the logged-in user's id.
 pub const USER_ID_KEY: &str = "user_id";

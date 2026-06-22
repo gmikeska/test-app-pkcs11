@@ -169,8 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route(
             "/elements/wallet/send",
-            get(handlers::elements_wallet::send_get)
-                .post(handlers::elements_wallet::send_post),
+            get(handlers::elements_wallet::send_get).post(handlers::elements_wallet::send_post),
         )
         .route(
             "/elements/wallet/addresses/{address}",

@@ -20,9 +20,7 @@ use std::sync::Arc;
 use asterism_core::descriptor::{KeyMode, to_multipath_string};
 use asterism_core::network::NetworkType;
 use asterism_core::psbt::{SigningCoordinator, UnsignedPsbt};
-use asterism_core::signer::{
-    Signer, SignerCapabilities, SignerHealth, SignerId, SignerType,
-};
+use asterism_core::signer::{Signer, SignerCapabilities, SignerHealth, SignerId, SignerType};
 use asterism_core::{Federation, error::SignerError};
 use asterism_pkcs11::Pkcs11Signer;
 use bdk_bitcoind_rpc::{Emitter, NO_EXPECTED_MEMPOOL_TXS};
@@ -266,8 +264,8 @@ impl WalletManager {
             config.bitcoin_rpc_user.clone(),
             config.bitcoin_rpc_password.clone(),
         );
-        let rpc = RpcClient::new(&config.bitcoin_rpc_url, auth)
-            .map_err(WalletError::RpcClientInit)?;
+        let rpc =
+            RpcClient::new(&config.bitcoin_rpc_url, auth).map_err(WalletError::RpcClientInit)?;
         Ok(Self {
             pool,
             rpc: Arc::new(rpc),
@@ -438,7 +436,11 @@ impl WalletManager {
         // for both keychains does not double the open session count.
         for s in signers_arc.iter() {
             let arc: Arc<Pkcs11Signer> = Arc::new(s.clone());
-            wallet.add_signer(KeychainKind::External, SignerOrdering::default(), arc.clone());
+            wallet.add_signer(
+                KeychainKind::External,
+                SignerOrdering::default(),
+                arc.clone(),
+            );
             wallet.add_signer(KeychainKind::Internal, SignerOrdering::default(), arc);
         }
 
@@ -589,8 +591,7 @@ impl UserWallet {
             let mut wallet = self.inner.lock().await;
             let cp = wallet.latest_checkpoint();
             let start_height = cp.height();
-            let mut emitter =
-                Emitter::new(&*self.rpc, cp, start_height, NO_EXPECTED_MEMPOOL_TXS);
+            let mut emitter = Emitter::new(&*self.rpc, cp, start_height, NO_EXPECTED_MEMPOOL_TXS);
 
             let mut new_blocks: u32 = 0;
             while let Some(block_event) = emitter.next_block()? {
@@ -740,10 +741,7 @@ impl UserWallet {
     }
 
     /// Return every wallet transaction that pays into `address`.
-    pub async fn address_history(
-        &self,
-        address: &Address,
-    ) -> Result<AddressActivity, WalletError> {
+    pub async fn address_history(&self, address: &Address) -> Result<AddressActivity, WalletError> {
         let target_spk: ScriptBuf = address.script_pubkey();
 
         let wallet = self.inner.lock().await;
@@ -920,12 +918,11 @@ impl UserWallet {
         // failure (the spend never landed in our tx graph).
         let raw_clone = raw_tx.clone();
         let rpc = self.rpc.clone();
-        let txid_after_broadcast = tokio::task::spawn_blocking(move || {
-            rpc.send_raw_transaction(&raw_clone[..])
-        })
-        .await
-        .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?
-        .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?;
+        let txid_after_broadcast =
+            tokio::task::spawn_blocking(move || rpc.send_raw_transaction(&raw_clone[..]))
+                .await
+                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?
+                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?;
         debug_assert_eq!(txid_after_broadcast, txid);
 
         let recipient_str = recipient.to_string();

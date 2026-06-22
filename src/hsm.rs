@@ -221,8 +221,7 @@ fn derive_user_signers(
             derivation_path.clone(),
             Box::new(DevBackend),
         );
-        let session =
-            Pkcs11Session::open(&cfg, &SlotIdentifier::label(&token.label), &token.pin)?;
+        let session = Pkcs11Session::open(&cfg, &SlotIdentifier::label(&token.label), &token.pin)?;
 
         let signer = match Pkcs11Signer::load(
             session,
@@ -283,8 +282,7 @@ fn delete_keys(
             DerivationPath::default(),
             Box::new(DevBackend),
         );
-        let session =
-            Pkcs11Session::open(&cfg, &SlotIdentifier::label(&token.label), &token.pin)?;
+        let session = Pkcs11Session::open(&cfg, &SlotIdentifier::label(&token.label), &token.pin)?;
         asterism_pkcs11::key_ops::delete_key(&session, label)?;
     }
     Ok(())

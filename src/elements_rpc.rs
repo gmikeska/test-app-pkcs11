@@ -6,7 +6,7 @@
 
 use bitcoincore_rpc::{Auth, Client as RpcClient, RpcApi};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ElementsRpcError {
@@ -104,7 +104,10 @@ impl ElementsRpc {
         self.create_wallet(name)
     }
 
-    pub fn get_descriptor_info(&self, descriptor: &str) -> Result<DescriptorInfo, ElementsRpcError> {
+    pub fn get_descriptor_info(
+        &self,
+        descriptor: &str,
+    ) -> Result<DescriptorInfo, ElementsRpcError> {
         let client = self.base_client()?;
         Ok(client.call("getdescriptorinfo", &[json!(descriptor)])?)
     }
@@ -115,14 +118,17 @@ impl ElementsRpc {
         descriptors: &[ImportDescriptorRequest],
     ) -> Result<Vec<ImportDescriptorResult>, ElementsRpcError> {
         let client = self.client_for_wallet(wallet)?;
-        let descs_json: Vec<Value> = descriptors.iter().map(|d| {
-            json!({
-                "desc": d.descriptor,
-                "timestamp": "now",
-                "active": d.active,
-                "internal": d.internal,
+        let descs_json: Vec<Value> = descriptors
+            .iter()
+            .map(|d| {
+                json!({
+                    "desc": d.descriptor,
+                    "timestamp": "now",
+                    "active": d.active,
+                    "internal": d.internal,
+                })
             })
-        }).collect();
+            .collect();
         let results: Vec<ImportDescriptorResult> =
             client.call("importdescriptors", &[json!(descs_json)])?;
         Ok(results)
@@ -135,7 +141,10 @@ impl ElementsRpc {
         blinding_key_hex: &str,
     ) -> Result<(), ElementsRpcError> {
         let client = self.client_for_wallet(wallet)?;
-        let _: Value = client.call("importblindingkey", &[json!(address), json!(blinding_key_hex)])?;
+        let _: Value = client.call(
+            "importblindingkey",
+            &[json!(address), json!(blinding_key_hex)],
+        )?;
         Ok(())
     }
 
@@ -146,10 +155,8 @@ impl ElementsRpc {
         range: [u32; 2],
     ) -> Result<Vec<String>, ElementsRpcError> {
         let client = self.client_for_wallet(wallet)?;
-        let addrs: Vec<String> = client.call(
-            "deriveaddresses",
-            &[json!(descriptor), json!(range)],
-        )?;
+        let addrs: Vec<String> =
+            client.call("deriveaddresses", &[json!(descriptor), json!(range)])?;
         Ok(addrs)
     }
 
@@ -169,15 +176,9 @@ impl ElementsRpc {
         })
     }
 
-    pub fn list_unspent(
-        &self,
-        wallet: &str,
-    ) -> Result<Vec<ElementsUtxo>, ElementsRpcError> {
+    pub fn list_unspent(&self, wallet: &str) -> Result<Vec<ElementsUtxo>, ElementsRpcError> {
         let client = self.client_for_wallet(wallet)?;
-        let utxos: Vec<ElementsUtxo> = client.call(
-            "listunspent",
-            &[json!(0), json!(9_999_999)],
-        )?;
+        let utxos: Vec<ElementsUtxo> = client.call("listunspent", &[json!(0), json!(9_999_999)])?;
         Ok(utxos)
     }
 
@@ -191,33 +192,34 @@ impl ElementsRpc {
         let result: FundedPsbt = client.call(
             "walletcreatefundedpsbt",
             &[
-                json!([]),       // inputs (auto-select)
+                json!([]), // inputs (auto-select)
                 json!(outputs),
-                json!(0),        // locktime
+                json!(0), // locktime
                 json!({
                     "feeRate": fee_rate_btc_per_kb,
                 }),
-                json!(true),     // bip32derivs
+                json!(true), // bip32derivs
             ],
         )?;
         Ok(result)
     }
 
-    pub fn finalize_psbt(&self, wallet: &str, psbt_b64: &str) -> Result<FinalizedPsbt, ElementsRpcError> {
+    pub fn finalize_psbt(
+        &self,
+        wallet: &str,
+        psbt_b64: &str,
+    ) -> Result<FinalizedPsbt, ElementsRpcError> {
         let client = self.client_for_wallet(wallet)?;
-        let result: FinalizedPsbt = client.call(
-            "finalizepsbt",
-            &[json!(psbt_b64)],
-        )?;
+        let result: FinalizedPsbt = client.call("finalizepsbt", &[json!(psbt_b64)])?;
         Ok(result)
     }
 
     pub fn send_raw_transaction(&self, hex: &str) -> Result<String, ElementsRpcError> {
         let client = self.base_client()?;
         let txid: Value = client.call("sendrawtransaction", &[json!(hex)])?;
-        txid.as_str()
-            .map(str::to_string)
-            .ok_or_else(|| ElementsRpcError::BadResponse("sendrawtransaction returned non-string".into()))
+        txid.as_str().map(str::to_string).ok_or_else(|| {
+            ElementsRpcError::BadResponse("sendrawtransaction returned non-string".into())
+        })
     }
 
     pub fn list_received_by_address(
@@ -226,7 +228,10 @@ impl ElementsRpc {
         address: &str,
     ) -> Result<Vec<ElementsUtxo>, ElementsRpcError> {
         let all = self.list_unspent(wallet)?;
-        Ok(all.into_iter().filter(|u| u.address.as_deref() == Some(address)).collect())
+        Ok(all
+            .into_iter()
+            .filter(|u| u.address.as_deref() == Some(address))
+            .collect())
     }
 }
 

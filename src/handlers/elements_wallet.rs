@@ -144,7 +144,11 @@ impl From<ElementsAddressReceipt> for ElementsReceiptView {
         let status = if r.confirmations == 0 {
             "Mempool".to_string()
         } else {
-            let plural = if r.confirmations == 1 { "conf" } else { "confs" };
+            let plural = if r.confirmations == 1 {
+                "conf"
+            } else {
+                "confs"
+            };
             format!("{} {plural}", r.confirmations)
         };
         Self {
@@ -318,7 +322,10 @@ pub async fn address_show(
     let tip_height = uw.tip_height().await?;
 
     let revealed = uw.reveal_addresses(REVEAL_COUNT).await?;
-    let derivation_index = revealed.iter().find(|a| a.address == address_raw).map(|a| a.index);
+    let derivation_index = revealed
+        .iter()
+        .find(|a| a.address == address_raw)
+        .map(|a| a.index);
 
     let activity = uw.address_history(&address_raw).await?;
 
@@ -335,7 +342,11 @@ pub async fn address_show(
     let receipt_count = activity.receipts.len();
     let total_received = activity.total_received;
     let unspent = activity.unspent;
-    let receipts: Vec<ElementsReceiptView> = activity.receipts.into_iter().map(ElementsReceiptView::from).collect();
+    let receipts: Vec<ElementsReceiptView> = activity
+        .receipts
+        .into_iter()
+        .map(ElementsReceiptView::from)
+        .collect();
 
     Ok(AddressTemplate {
         header: ElementsWalletHeader {
@@ -370,5 +381,9 @@ fn abbreviate_address(addr: &str, prefix_len: usize, suffix_len: usize) -> Strin
     if addr.len() <= prefix_len + suffix_len + 3 {
         return addr.to_string();
     }
-    format!("{}…{}", &addr[..prefix_len], &addr[addr.len() - suffix_len..])
+    format!(
+        "{}…{}",
+        &addr[..prefix_len],
+        &addr[addr.len() - suffix_len..]
+    )
 }

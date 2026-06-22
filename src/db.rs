@@ -115,10 +115,7 @@ pub async fn insert_wallet(pool: &PgPool, spec: &NewWallet<'_>) -> sqlx::Result<
 ///
 /// # Errors
 /// Propagates any underlying SQL error.
-pub async fn find_wallet_for_user(
-    pool: &PgPool,
-    user_id: Uuid,
-) -> sqlx::Result<Option<WalletRow>> {
+pub async fn find_wallet_for_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Option<WalletRow>> {
     sqlx::query_as::<_, WalletRow>(
         "SELECT id, user_id, account_idx, descriptor, bdk_changeset, \
                 chain_tip_height, created_at \
