@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 
-{% block title %}Wallet {{ header.account_idx }} &mdash; Asterism{% endblock %}
+{% block title %}Elements Wallet {{ header.account_idx }} &mdash; Asterism{% endblock %}
 
 {% block nav %}
   <span class="user">{{ header.email }}</span>
-  <a href="/elements/wallet/receive" class="link chain-switch">Elements Wallet</a>
+  <a href="/wallet/receive" class="link chain-switch">BTC Wallet</a>
   <form method="post" action="/logout" class="inline-form">
     <button type="submit" class="link">Log out</button>
   </form>
@@ -13,7 +13,7 @@
 {% block content %}
 <section class="card">
   <h1>
-    Wallet
+    Elements Wallet
     <span class="badge {{ header.network }}">{{ header.network }}</span>
   </h1>
   <dl class="kv-grid">
@@ -26,7 +26,7 @@
     <dt>Chain tip</dt>
     <dd>{{ header.tip_height }}</dd>
 
-    <dt>Descriptor</dt>
+    <dt>CT Descriptor</dt>
     <dd><code class="break">{{ header.descriptor }}</code></dd>
   </dl>
 </section>
@@ -38,40 +38,37 @@
 {% endif %}
 
 <section class="card balance-card">
-  <h2>Balance</h2>
+  <h2>Balance (L-BTC)</h2>
   <div class="balance-headline">
     <div class="balance-total">
       <span class="balance-amount">{{ balance.total_btc }}</span>
-      <span class="balance-unit">BTC</span>
+      <span class="balance-unit">L-BTC</span>
     </div>
     <div class="balance-rollups">
       <div class="balance-spendable">
-        Spendable now: <strong>{{ balance.spendable_btc }} BTC</strong>
+        Spendable now: <strong>{{ balance.spendable_btc }} L-BTC</strong>
       </div>
     </div>
   </div>
   {% if balance.has_pending %}
     <dl class="kv-grid balance-breakdown">
       <dt>Confirmed</dt>
-      <dd>{{ balance.confirmed_btc }} BTC</dd>
+      <dd>{{ balance.confirmed_btc }} L-BTC</dd>
 
-      <dt>Trusted pending</dt>
-      <dd>{{ balance.trusted_pending_btc }} BTC</dd>
-
-      <dt>Untrusted pending</dt>
-      <dd>{{ balance.untrusted_pending_btc }} BTC</dd>
+      <dt>Pending</dt>
+      <dd>{{ balance.pending_btc }} L-BTC</dd>
 
       <dt>Immature</dt>
-      <dd>{{ balance.immature_btc }} BTC</dd>
+      <dd>{{ balance.immature_btc }} L-BTC</dd>
     </dl>
   {% endif %}
 </section>
 
 <nav class="tabs">
   <a class="tab {% if header.active_tab == "receive" %}active{% endif %}"
-     href="/wallet/receive">Receive</a>
+     href="/elements/wallet/receive">Receive</a>
   <a class="tab {% if header.active_tab == "send" %}active{% endif %}"
-     href="/wallet/send">Send</a>
+     href="/elements/wallet/send">Send</a>
 </nav>
 
 {% block tab_body %}{% endblock %}

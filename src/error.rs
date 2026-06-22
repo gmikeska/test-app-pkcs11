@@ -5,6 +5,7 @@ use axum::response::{IntoResponse, Response};
 
 use asterism_core::DescriptorError;
 
+use crate::elements_wallet::ElementsWalletError;
 use crate::hsm::HsmError;
 use crate::wallet::WalletError;
 
@@ -38,6 +39,10 @@ pub enum AppError {
     /// `asterism-core` descriptor builder rejected the federation.
     #[error("descriptor builder rejected federation: {0}")]
     DescriptorBuilderRejected(#[from] DescriptorError),
+
+    /// Elements wallet-layer error.
+    #[error("elements wallet error: {0}")]
+    ElementsWallet(#[from] ElementsWalletError),
 
     /// Resource not found (404).
     #[error("not found: {0}")]

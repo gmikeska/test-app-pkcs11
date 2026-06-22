@@ -14,6 +14,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use asterism_elements::ElementsNetwork;
 use bitcoin::Network;
 use bitcoin::bip32::{ChildNumber, DerivationPath};
 
@@ -60,6 +61,17 @@ pub struct AppConfig {
     pub hsm_tokens: [HsmTokenConfig; 3],
     /// Federation threshold. Always 3 in v1; surfaced for templates.
     pub fed_threshold: u32,
+
+    // -- Elements chain config --
+
+    /// Elements daemon JSON-RPC base URL.
+    pub elements_rpc_url: String,
+    /// Elements daemon RPC username.
+    pub elements_rpc_user: String,
+    /// Elements daemon RPC password.
+    pub elements_rpc_password: String,
+    /// Elements network (liquid / liquidtestnet / elementsregtest).
+    pub elements_network: ElementsNetwork,
 }
 
 impl AppConfig {
@@ -68,6 +80,7 @@ impl AppConfig {
     /// # Errors
     /// Returns [`ConfigError`] if any required variable is missing or any
     /// value fails to parse.
+    #[allow(clippy::too_many_lines)]
     pub fn from_env() -> Result<Self, ConfigError> {
         let host = require("APP_HOST")?;
         let port: u16 = require("APP_PORT")?
@@ -150,6 +163,31 @@ impl AppConfig {
             });
         }
 
+        let elements_rpc_host = require("ELEMENTS_RPC_HOST")?;
+        let elements_rpc_port: u16 = require("ELEMENTS_RPC_PORT")?
+            .parse()
+            .map_err(|e: std::num::ParseIntError| ConfigError::Parse {
+                var: "ELEMENTS_RPC_PORT",
+                reason: e.to_string(),
+            })?;
+        let elements_rpc_url = format!("http://{elements_rpc_host}:{elements_rpc_port}");
+        let elements_rpc_user = require("ELEMENTS_RPC_USER")?;
+        let elements_rpc_password = require("ELEMENTS_RPC_PASSWORD")?;
+        let elements_network_str = require("ELEMENTS_NETWORK")?;
+        let elements_network = match elements_network_str.as_str() {
+            "liquid" => ElementsNetwork::Liquid,
+            "liquidtestnet" => ElementsNetwork::LiquidTestnet,
+            "elementsregtest" => ElementsNetwork::ElementsRegtest,
+            other => {
+                return Err(ConfigError::Parse {
+                    var: "ELEMENTS_NETWORK",
+                    reason: format!(
+                        "expected liquid|liquidtestnet|elementsregtest, got `{other}`"
+                    ),
+                });
+            }
+        };
+
         Ok(Self {
             bind: SocketAddr::new(host_ip, port),
             session_secret,
@@ -163,6 +201,10 @@ impl AppConfig {
             pkcs11_library_path,
             hsm_tokens,
             fed_threshold,
+            elements_rpc_url,
+            elements_rpc_user,
+            elements_rpc_password,
+            elements_network,
         })
     }
 

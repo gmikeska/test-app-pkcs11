@@ -39,3 +39,8 @@ pub async fn root(
 pub async fn wallet_root() -> Response {
     Redirect::to("/wallet/receive").into_response()
 }
+
+/// `GET /elements/wallet` — redirect to `/elements/wallet/receive`.
+pub async fn elements_wallet_root() -> Response {
+    Redirect::to("/elements/wallet/receive").into_response()
+}

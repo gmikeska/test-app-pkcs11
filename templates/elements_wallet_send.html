@@ -1,0 +1,66 @@
+{% extends "_elements_wallet_layout.html" %}
+
+{% block tab_body %}
+<section class="card">
+  <h2>Send L-BTC</h2>
+  <p class="muted">Build a PSET, sign with all 3 emulated HSMs, and broadcast in one click. Confidential transactions preserve amount privacy on the Elements sidechain.</p>
+  <form method="post" action="/elements/wallet/send" class="stack-form">
+    <label>
+      <span>Recipient address (confidential)</span>
+      <input type="text" name="recipient_address" required autocomplete="off" spellcheck="false"
+             placeholder="el1qq&hellip; / ert1q&hellip;">
+    </label>
+    <label>
+      <span>Amount (L-BTC)</span>
+      <input type="text" name="amount_btc" required autocomplete="off"
+             placeholder="0.0005" pattern="^\d+(\.\d{1,8})?$">
+    </label>
+    <label>
+      <span>Fee rate (sat/vB)</span>
+      <input type="number" name="fee_rate_sat_vb" required min="1" value="2" step="1">
+    </label>
+    <label>
+      <span>Label (optional)</span>
+      <input type="text" name="label" autocomplete="off" maxlength="120"
+             placeholder="e.g. sidechain peg-out">
+    </label>
+    <div class="action-row">
+      <button type="submit" class="primary">Sign &amp; broadcast</button>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Recent transactions</h2>
+  {% if transactions.is_empty() %}
+    <p class="muted">No transactions yet.</p>
+  {% else %}
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>Recipient</th>
+          <th>Amount</th>
+          <th>Fee</th>
+          <th>Broadcast</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in transactions %}
+          <tr>
+            <td>
+              <a href="/elements/wallet/transactions/{{ t.txid }}">
+                {% if t.label.is_empty() %}{{ t.txid }}{% else %}{{ t.label }}{% endif %}
+              </a>
+            </td>
+            <td><code class="break">{{ t.recipient }}</code></td>
+            <td>{{ t.amount_btc }}</td>
+            <td>{{ t.fee_btc }}</td>
+            <td>{{ t.broadcast_at }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+{% endblock %}

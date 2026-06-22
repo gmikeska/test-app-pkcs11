@@ -1,0 +1,36 @@
+{% extends "_elements_wallet_layout.html" %}
+
+{% block tab_body %}
+<section class="card">
+  <h2>Receive addresses (Confidential)</h2>
+  <p class="muted">First {{ addresses.len() }} confidential addresses on the external keychain. Click any address to view receipts.</p>
+  {% if addresses.is_empty() %}
+    <p class="muted">No addresses derived yet.</p>
+  {% else %}
+    <table class="data">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Address</th>
+          <th>Received (L-BTC)</th>
+          <th>Unspent (L-BTC)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in addresses %}
+          <tr>
+            <td>{{ a.index }}</td>
+            <td>
+              <a href="/elements/wallet/addresses/{{ a.address }}" title="{{ a.address }}">
+                <code>{{ a.address_short }}</code>
+              </a>
+            </td>
+            <td>{{ a.received_btc }}</td>
+            <td>{{ a.unspent_btc }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+{% endblock %}

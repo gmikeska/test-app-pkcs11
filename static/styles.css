@@ -229,6 +229,18 @@ h2 { margin: 0 0 12px; font-size: 1.15rem; color: var(--text); }
 .badge.regtest { background: #2a1f33; border-color: #5b3d6f; color: #d6b2ee; }
 .badge.testnet { background: #1d2d3f; border-color: #2c5588; color: #b6d4ff; }
 .badge.bitcoin { background: #2d2516; border-color: #6f5723; color: #f1cf86; }
+.badge.elementsregtest { background: #1a2f2a; border-color: #2d6b5a; color: #a8e6cf; }
+.badge.liquid { background: #1a2533; border-color: #2d5a6b; color: #a8d8e6; }
+.badge.liquidtestnet { background: #1d2d3f; border-color: #2c5588; color: #b6d4ff; }
+
+.chain-switch {
+  font-size: 0.85rem;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+}
+.chain-switch:hover { color: var(--accent); border-color: var(--accent); text-decoration: none; }
 
 .kv-grid {
   display: grid;

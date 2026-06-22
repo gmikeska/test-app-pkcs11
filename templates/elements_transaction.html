@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Tx {{ transaction.txid }} &mdash; Elements &mdash; Asterism{% endblock %}
+
+{% block nav %}
+  <span class="user">{{ email }}</span>
+  <form method="post" action="/logout" class="inline-form">
+    <button type="submit" class="link">Log out</button>
+  </form>
+{% endblock %}
+
+{% block content %}
+<section class="card">
+  <div class="crumbs">
+    <a href="/elements/wallet/send">&larr; Back to send</a>
+  </div>
+  <h1>
+    Elements Transaction
+    <span class="badge {{ header.network }}">{{ header.network }}</span>
+  </h1>
+  <dl class="kv-grid">
+    <dt>Txid</dt><dd><code class="break">{{ transaction.txid }}</code></dd>
+    <dt>Recipient</dt><dd><code class="break">{{ transaction.recipient }}</code></dd>
+    <dt>Amount sent</dt><dd>{{ transaction.amount_btc }} L-BTC</dd>
+    <dt>Fee</dt><dd>{{ transaction.fee_btc }} L-BTC</dd>
+    {% if transaction.label.is_empty() %}{% else %}
+      <dt>Label</dt><dd>{{ transaction.label }}</dd>
+    {% endif %}
+    <dt>Broadcast</dt><dd>{{ transaction.broadcast_at }}</dd>
+    <dt>Account index</dt><dd><code>{{ header.account_idx }}</code></dd>
+  </dl>
+</section>
+
+<section class="card">
+  <h2>Raw transaction</h2>
+  <p class="muted">Hex-encoded, exactly as broadcast to the Elements daemon via <code>sendrawtransaction</code>.</p>
+  <pre class="code-block break"><code>{{ transaction.raw_tx_hex }}</code></pre>
+</section>
+{% endblock %}

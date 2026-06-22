@@ -4,7 +4,9 @@ use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::{TransactionRow, UserRow, WalletRow};
+use crate::models::{
+    ElementsTransactionRow, ElementsWalletRow, TransactionRow, UserRow, WalletRow,
+};
 
 /// Run all `migrations/*.sql` against `pool`.
 ///
@@ -269,6 +271,142 @@ pub async fn find_transaction(
         "SELECT id, wallet_id, txid, recipient, amount_sat, fee_sat, \
                 raw_tx_hex, label, broadcast_at \
          FROM transactions WHERE wallet_id = $1 AND txid = $2",
+    )
+    .bind(wallet_id)
+    .bind(txid)
+    .fetch_optional(pool)
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// elements_wallets
+// ---------------------------------------------------------------------------
+
+pub struct NewElementsWallet<'a> {
+    pub user_id: Uuid,
+    pub account_idx: i32,
+    pub descriptor: &'a str,
+    pub master_blinding_key: &'a str,
+    pub daemon_wallet_name: &'a str,
+}
+
+pub async fn insert_elements_wallet(
+    pool: &PgPool,
+    spec: &NewElementsWallet<'_>,
+) -> sqlx::Result<ElementsWalletRow> {
+    sqlx::query_as::<_, ElementsWalletRow>(
+        "INSERT INTO elements_wallets \
+            (user_id, account_idx, descriptor, master_blinding_key, daemon_wallet_name) \
+         VALUES ($1, $2, $3, $4, $5) \
+         RETURNING id, user_id, account_idx, descriptor, master_blinding_key, \
+                   daemon_wallet_name, chain_tip_height, created_at",
+    )
+    .bind(spec.user_id)
+    .bind(spec.account_idx)
+    .bind(spec.descriptor)
+    .bind(spec.master_blinding_key)
+    .bind(spec.daemon_wallet_name)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn find_elements_wallet_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> sqlx::Result<Option<ElementsWalletRow>> {
+    sqlx::query_as::<_, ElementsWalletRow>(
+        "SELECT id, user_id, account_idx, descriptor, master_blinding_key, \
+                daemon_wallet_name, chain_tip_height, created_at \
+         FROM elements_wallets WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn next_elements_account_idx(pool: &PgPool) -> sqlx::Result<i32> {
+    let next: Option<i32> =
+        sqlx::query_scalar("SELECT COALESCE(MAX(account_idx) + 1, 0) FROM elements_wallets")
+            .fetch_one(pool)
+            .await?;
+    Ok(next.unwrap_or(0))
+}
+
+#[allow(dead_code)]
+pub async fn update_elements_wallet_tip(
+    pool: &PgPool,
+    wallet_id: Uuid,
+    tip_height: i32,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE elements_wallets SET chain_tip_height = $1 WHERE id = $2")
+        .bind(tip_height)
+        .bind(wallet_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// elements_transactions
+// ---------------------------------------------------------------------------
+
+pub struct NewElementsTransaction<'a> {
+    pub wallet_id: Uuid,
+    pub txid: &'a str,
+    pub recipient: &'a str,
+    pub amount_sat: i64,
+    pub fee_sat: i64,
+    pub raw_tx_hex: &'a str,
+    pub label: Option<&'a str>,
+}
+
+pub async fn insert_elements_transaction(
+    pool: &PgPool,
+    spec: &NewElementsTransaction<'_>,
+) -> sqlx::Result<Option<ElementsTransactionRow>> {
+    sqlx::query_as::<_, ElementsTransactionRow>(
+        "INSERT INTO elements_transactions \
+            (wallet_id, txid, recipient, amount_sat, fee_sat, raw_tx_hex, label) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+         ON CONFLICT (wallet_id, txid) DO NOTHING \
+         RETURNING id, wallet_id, txid, recipient, amount_sat, fee_sat, \
+                   raw_tx_hex, label, broadcast_at",
+    )
+    .bind(spec.wallet_id)
+    .bind(spec.txid)
+    .bind(spec.recipient)
+    .bind(spec.amount_sat)
+    .bind(spec.fee_sat)
+    .bind(spec.raw_tx_hex)
+    .bind(spec.label)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn list_elements_transactions_for_wallet(
+    pool: &PgPool,
+    wallet_id: Uuid,
+) -> sqlx::Result<Vec<ElementsTransactionRow>> {
+    sqlx::query_as::<_, ElementsTransactionRow>(
+        "SELECT id, wallet_id, txid, recipient, amount_sat, fee_sat, \
+                raw_tx_hex, label, broadcast_at \
+         FROM elements_transactions WHERE wallet_id = $1 \
+         ORDER BY broadcast_at DESC",
+    )
+    .bind(wallet_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn find_elements_transaction(
+    pool: &PgPool,
+    wallet_id: Uuid,
+    txid: &str,
+) -> sqlx::Result<Option<ElementsTransactionRow>> {
+    sqlx::query_as::<_, ElementsTransactionRow>(
+        "SELECT id, wallet_id, txid, recipient, amount_sat, fee_sat, \
+                raw_tx_hex, label, broadcast_at \
+         FROM elements_transactions WHERE wallet_id = $1 AND txid = $2",
     )
     .bind(wallet_id)
     .bind(txid)

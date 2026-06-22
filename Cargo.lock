@@ -165,13 +165,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "asterism-elements"
+version = "0.1.0"
+dependencies = [
+ "asterism-core",
+ "bitcoin",
+ "elements",
+ "elements-miniscript",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "asterism-pkcs11"
 version = "0.1.0"
 dependencies = [
  "asterism-core",
+ "asterism-elements",
  "bdk_wallet",
  "bitcoin",
  "cryptoki",
+ "elements",
  "hex",
  "miniscript",
  "secrecy",
@@ -408,6 +421,12 @@ name = "bitcoin-io"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dee39a0ee5b4095224a0cfc6bf4cc1baf0f9624b96b367e53b66d974e51d953"
+
+[[package]]
+name = "bitcoin-private"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73290177011694f38ec25e165d0387ab7ea749a4b81cd4c80dae5988229f7a57"
 
 [[package]]
 name = "bitcoin-units"
@@ -784,6 +803,31 @@ version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "elements"
+version = "0.25.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83c63a04238f4b7f3564fe9705921452c2900efd00982545e5c634fac9024fe2"
+dependencies = [
+ "bech32",
+ "bitcoin",
+ "secp256k1-zkp",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "elements-miniscript"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "571fa105690f83c7833df2109eb2e14ca0e62d633d2624ffcb166ff18a3da870"
+dependencies = [
+ "bitcoin",
+ "elements",
+ "miniscript",
  "serde",
 ]
 
@@ -1979,6 +2023,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "secp256k1-zkp"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52a44aed3002b5ae975f8624c5df3a949cfbf00479e18778b6058fcd213b76e3"
+dependencies = [
+ "bitcoin-private",
+ "rand",
+ "secp256k1",
+ "secp256k1-zkp-sys",
+ "serde",
+]
+
+[[package]]
+name = "secp256k1-zkp-sys"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57f08b2d0b143a22e07f798ae4f0ab20d5590d7c68e0d090f2088a48a21d1654"
+dependencies = [
+ "cc",
+ "secp256k1-sys",
+]
+
+[[package]]
 name = "secrecy"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2478,16 +2545,20 @@ dependencies = [
  "askama_web",
  "asterism-core",
  "asterism-dev-signer",
+ "asterism-elements",
  "asterism-pkcs11",
  "async-trait",
  "axum",
  "axum-extra",
+ "base64 0.22.1",
  "bdk_bitcoind_rpc",
  "bdk_wallet",
  "bitcoin",
  "bitcoincore-rpc",
  "chrono",
  "dotenvy",
+ "elements",
+ "elements-miniscript",
  "miniscript",
  "password-hash",
  "qrcode",

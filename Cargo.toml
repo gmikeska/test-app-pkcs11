@@ -8,14 +8,18 @@ publish = false
 
 [dependencies]
 # Asterism — Federation/Signer/SigningCoordinator + Pkcs11Signer.
-asterism-core = { path = "../asterism-core" }
-asterism-pkcs11 = { path = "../asterism-pkcs11" }
+asterism-core = { path = "../asterism-core", features = ["elements"] }
+asterism-pkcs11 = { path = "../asterism-pkcs11", features = ["elements"] }
+asterism-elements = { path = "../asterism-elements" }
 # Dev-only HSM helpers (DevBackend, init_dev_token). The `setup_dev_federation`
 # helper is bypassed on purpose — see src/hsm.rs for the regtest-aware path.
 asterism-dev-signer = { path = "../asterism-dev-signer" }
 
 bitcoin = "0.32"
 miniscript = "12"
+elements = { version = "0.25", features = ["serde"] }
+elements-miniscript = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
 
 # BDK — per-user wallet (address derivation, UTXO/tx tracking, descriptor
 # persistence via ChangeSet). Bitcoin Core RPC sync via the bdk_bitcoind_rpc

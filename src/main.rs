@@ -15,6 +15,8 @@
 mod auth;
 mod config;
 mod db;
+mod elements_rpc;
+mod elements_wallet;
 mod error;
 mod handlers;
 mod hsm;
@@ -43,6 +45,7 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
 use crate::config::AppConfig;
+use crate::elements_wallet::ElementsWalletManager;
 use crate::hsm::HsmFleet;
 use crate::state::AppState;
 use crate::wallet::WalletManager;
@@ -107,16 +110,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Bitcoin Core RPC client ready"
     );
 
+    let elements_wallet_manager = Arc::new(ElementsWalletManager::new(
+        pool.clone(),
+        &config,
+        hsm.clone(),
+    ));
+    tracing::info!(
+        rpc = %config.elements_rpc_url,
+        network = %config.elements_network,
+        "Elements RPC client ready"
+    );
+
     // Eager-seed wallets for the three seeded users so the first request
     // is responsive (cryptoki BIP-32 derivation across 3 tokens for a
     // fresh user is several seconds).
     seed_test_wallets(&pool, &wallet_manager).await;
+    seed_test_elements_wallets(&pool, &elements_wallet_manager).await;
 
     let state = Arc::new(AppState {
         config: config.clone(),
         db: pool,
         hsm,
         wallet_manager,
+        elements_wallet_manager,
     });
 
     let static_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
@@ -141,6 +157,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/wallet/transactions/{txid}",
             get(handlers::transactions::show),
+        )
+        // -- Elements wallet routes --
+        .route(
+            "/elements/wallet",
+            get(handlers::home::elements_wallet_root),
+        )
+        .route(
+            "/elements/wallet/receive",
+            get(handlers::elements_wallet::receive),
+        )
+        .route(
+            "/elements/wallet/send",
+            get(handlers::elements_wallet::send_get)
+                .post(handlers::elements_wallet::send_post),
+        )
+        .route(
+            "/elements/wallet/addresses/{address}",
+            get(handlers::elements_wallet::address_show),
+        )
+        .route(
+            "/elements/wallet/transactions/{txid}",
+            get(handlers::elements_transactions::show),
         )
         .nest_service("/static", ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http())
@@ -189,6 +227,35 @@ async fn seed_test_wallets(pool: &sqlx::PgPool, wallet_manager: &WalletManager) 
                 %email,
                 error = %e,
                 "failed to eager-seed user wallet (continuing — first request will retry)"
+            ),
+        }
+    }
+}
+
+async fn seed_test_elements_wallets(pool: &sqlx::PgPool, manager: &ElementsWalletManager) {
+    const EMAILS: &[&str] = &["test1@test.com", "test2@test.com", "test3@test.com"];
+    for email in EMAILS {
+        let user = match db::find_user_by_email(pool, email).await {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                tracing::warn!(%email, "seeded user missing during Elements wallet eager-init");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(%email, error = %e, "lookup failed during Elements wallet eager-init");
+                continue;
+            }
+        };
+        match manager.ensure_wallet_for_user(user.id).await {
+            Ok(row) => tracing::info!(
+                %email,
+                account_idx = row.account_idx,
+                "eager-seeded Elements user wallet"
+            ),
+            Err(e) => tracing::warn!(
+                %email,
+                error = %e,
+                "failed to eager-seed Elements user wallet (continuing)"
             ),
         }
     }

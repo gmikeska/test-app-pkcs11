@@ -9,6 +9,7 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use crate::config::AppConfig;
+use crate::elements_wallet::ElementsWalletManager;
 use crate::hsm::HsmFleet;
 use crate::wallet::WalletManager;
 
@@ -28,4 +29,6 @@ pub struct AppState {
     pub hsm: Arc<HsmFleet>,
     /// Per-user BDK wallet cache + sign/broadcast pipeline.
     pub wallet_manager: Arc<WalletManager>,
+    /// Per-user Elements/Liquid wallet cache + PSET sign/broadcast pipeline.
+    pub elements_wallet_manager: Arc<ElementsWalletManager>,
 }

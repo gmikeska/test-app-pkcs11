@@ -60,3 +60,30 @@ pub struct TransactionRow {
     /// `sendrawtransaction` timestamp.
     pub broadcast_at: DateTime<Utc>,
 }
+
+/// `elements_wallets` row.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ElementsWalletRow {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub account_idx: i32,
+    pub descriptor: String,
+    pub master_blinding_key: String,
+    pub daemon_wallet_name: String,
+    pub chain_tip_height: Option<i32>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `elements_transactions` row.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ElementsTransactionRow {
+    pub id: Uuid,
+    pub wallet_id: Uuid,
+    pub txid: String,
+    pub recipient: String,
+    pub amount_sat: i64,
+    pub fee_sat: i64,
+    pub raw_tx_hex: String,
+    pub label: Option<String>,
+    pub broadcast_at: DateTime<Utc>,
+}
