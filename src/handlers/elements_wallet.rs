@@ -75,6 +75,7 @@ struct ReceiveTemplate {
     header: ElementsWalletHeader,
     balance: ElementsBalanceView,
     addresses: Vec<ElementsAddressView>,
+    change_addresses: Vec<ElementsAddressView>,
     flash: Option<FlashBanner>,
 }
 
@@ -172,20 +173,25 @@ pub async fn receive(
     let uw = state.elements_wallet_manager.load_or_init(user.id).await?;
     let tip_height = uw.tip_height().await?;
     let revealed = uw.reveal_addresses(REVEAL_COUNT).await?;
+    let change = uw.change_addresses(REVEAL_COUNT).await?;
     let balances = uw.balance().await?;
 
-    let addresses = revealed
+    let to_view = |a: crate::elements_wallet::ElementsRevealedAddress| {
+        let address_short = abbreviate_address(&a.address, 12, 8);
+        ElementsAddressView {
+            index: a.index,
+            address: a.address,
+            address_short,
+            received_btc: format!("{:.8}", if a.received <= 0.0 { 0.0 } else { a.received }),
+            unspent_btc: format!("{:.8}", if a.unspent <= 0.0 { 0.0 } else { a.unspent }),
+        }
+    };
+
+    let addresses: Vec<_> = revealed.into_iter().map(to_view).collect();
+    let change_addresses: Vec<_> = change
         .into_iter()
-        .map(|a| {
-            let address_short = abbreviate_address(&a.address, 12, 8);
-            ElementsAddressView {
-                index: a.index,
-                address: a.address,
-                address_short,
-                received_btc: format!("{:.8}", a.received),
-                unspent_btc: format!("{:.8}", a.unspent),
-            }
-        })
+        .filter(|a| a.unspent > 0.000_000_01)
+        .map(to_view)
         .collect();
 
     let total = balances.trusted + balances.untrusted_pending + balances.immature;
@@ -210,6 +216,7 @@ pub async fn receive(
         },
         balance: balance_view,
         addresses,
+        change_addresses,
         flash: None,
     }
     .into_response())
@@ -322,8 +329,10 @@ pub async fn address_show(
     let tip_height = uw.tip_height().await?;
 
     let revealed = uw.reveal_addresses(REVEAL_COUNT).await?;
+    let change = uw.change_addresses(REVEAL_COUNT).await?;
     let derivation_index = revealed
         .iter()
+        .chain(change.iter())
         .find(|a| a.address == address_raw)
         .map(|a| a.index);
 
@@ -363,8 +372,8 @@ pub async fn address_show(
             qr_uri,
             qr_svg,
             derivation_index,
-            total_received_btc: format!("{total_received:.8}"),
-            unspent_btc: format!("{unspent:.8}"),
+            total_received_btc: format!("{:.8}", if total_received <= 0.0 { 0.0 } else { total_received }),
+            unspent_btc: format!("{:.8}", if unspent <= 0.0 { 0.0 } else { unspent }),
             receipt_count,
         },
         receipts,

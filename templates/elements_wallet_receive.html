@@ -12,7 +12,7 @@
         <tr>
           <th>#</th>
           <th>Address</th>
-          <!-- <th>Received (L-BTC)</th> -->
+          <th>Received (L-BTC)</th>
           <th>Unspent (L-BTC)</th>
         </tr>
       </thead>
@@ -25,7 +25,7 @@
                 <code>{{ a.address_short }}</code>
               </a>
             </td>
-            <!-- <td>{{ a.received_btc }}</td> -->
+            <td>{{ a.received_btc }}</td>
             <td>{{ a.unspent_btc }}</td>
           </tr>
         {% endfor %}
@@ -33,4 +33,33 @@
     </table>
   {% endif %}
 </section>
+
+{% if !change_addresses.is_empty() %}
+<section class="card">
+  <h2>Change addresses</h2>
+  <p class="muted">Internal keychain addresses with unspent change. Click any address to view receipts.</p>
+  <table class="data">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Address</th>
+        <th>Unspent (L-BTC)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in change_addresses %}
+        <tr>
+          <td>{{ a.index }}</td>
+          <td>
+            <a href="/elements/wallet/addresses/{{ a.address }}" title="{{ a.address }}">
+              <code>{{ a.address_short }}</code>
+            </a>
+          </td>
+          <td>{{ a.unspent_btc }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
 {% endblock %}

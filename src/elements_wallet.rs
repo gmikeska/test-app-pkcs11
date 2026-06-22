@@ -201,6 +201,10 @@ impl ElementsWalletManager {
         let network = self.network;
         let ct_desc_clone = ct_desc.clone();
         tokio::task::spawn_blocking(move || -> Result<(), ElementsWalletError> {
+            type CtDesc = asterism_elements::elements_miniscript::confidential::Descriptor<
+                asterism_elements::elements_miniscript::descriptor::DescriptorPublicKey,
+            >;
+
             rpc.ensure_wallet_loaded(&wallet_name)?;
 
             // Import receive and change descriptors separately.
@@ -228,26 +232,34 @@ impl ElementsWalletManager {
                 }
             }
 
-            // Import blinding keys for the first batch of receive addresses.
+            // Import blinding keys for both receive (/0/*) and change (/1/*).
             let slip77_mbk = MasterBlindingKey::from(mbk_for_blinding);
             let secp =
                 asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new();
-            for idx in 0..REVEAL_COUNT {
-                if let Ok(definite) = ct_desc_clone.at_derivation_index(idx) {
-                    let addr = match definite.address(&secp, network.address_params()) {
-                        Ok(a) => a,
-                        Err(e) => {
-                            tracing::warn!(idx, error = %e, "skipping blinding key import");
+
+            let multipath_str = ct_desc_clone.to_string();
+            let receive_str = multipath_str.replace("/<0;1>/*", "/0/*");
+            let change_str = multipath_str.replace("/<0;1>/*", "/1/*");
+
+            let descs: Vec<CtDesc> = [&receive_str, &change_str]
+                .iter()
+                .filter_map(|s| CtDesc::from_str(s).ok())
+                .collect();
+
+            for desc in &descs {
+                for idx in 0..REVEAL_COUNT {
+                    if let Ok(definite) = desc.at_derivation_index(idx) {
+                        let Ok(addr) = definite.address(&secp, network.address_params()) else {
                             continue;
+                        };
+                        let spk = definite.descriptor.script_pubkey();
+                        let bk = slip77_mbk.blinding_private_key(&spk);
+                        let bk_hex = hex_encode(&bk.secret_bytes());
+                        if let Err(e) =
+                            rpc.import_blinding_key(&wallet_name, &addr.to_string(), &bk_hex)
+                        {
+                            tracing::warn!(idx, error = %e, "importblindingkey failed");
                         }
-                    };
-                    let spk = definite.descriptor.script_pubkey();
-                    let bk = slip77_mbk.blinding_private_key(&spk);
-                    let bk_hex = hex_encode(&bk.secret_bytes());
-                    if let Err(e) =
-                        rpc.import_blinding_key(&wallet_name, &addr.to_string(), &bk_hex)
-                    {
-                        tracing::warn!(idx, error = %e, "importblindingkey failed");
                     }
                 }
             }
@@ -402,25 +414,39 @@ impl UserElementsWallet {
         &self,
         count: u32,
     ) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
+        self.derive_addresses(count, "/0/*").await
+    }
+
+    pub async fn change_addresses(
+        &self,
+        count: u32,
+    ) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
+        self.derive_addresses(count, "/1/*").await
+    }
+
+    async fn derive_addresses(
+        &self,
+        count: u32,
+        keychain_suffix: &str,
+    ) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
+        type CtDesc = asterism_elements::elements_miniscript::confidential::Descriptor<
+            asterism_elements::elements_miniscript::descriptor::DescriptorPublicKey,
+        >;
+
         if count == 0 {
             return Ok(Vec::new());
         }
 
-        // Derive confidential addresses locally from the CT descriptor
-        // (Elements Core RPC doesn't understand ct()/elwsh() descriptors).
-        let desc_str = self.descriptor.replace("/<0;1>/*", "/0/*");
-        let ct_desc = asterism_elements::elements_miniscript::confidential::Descriptor::<
-            asterism_elements::elements_miniscript::descriptor::DescriptorPublicKey,
-        >::from_str(&desc_str)
-        .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+        let desc_str = self.descriptor.replace("/<0;1>/*", keychain_suffix);
+        let ct_desc = CtDesc::from_str(&desc_str)
+            .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
 
         let secp =
             asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new();
         let network = self.network;
-        // Derive both confidential and unconfidential addresses.
-        // Elements Core returns unconfidential addresses in listunspent
-        // (since we import wsh() not ct()), so we need both forms for matching.
-        let mut addr_pairs: Vec<(String, String)> = Vec::with_capacity(count as usize);
+
+        // Derive addresses and their script pubkeys for matching.
+        let mut addr_info: Vec<(String, elements::Script)> = Vec::with_capacity(count as usize);
         for idx in 0..count {
             let definite = ct_desc
                 .at_derivation_index(idx)
@@ -428,32 +454,30 @@ impl UserElementsWallet {
             let conf_addr = definite
                 .address(&secp, network.address_params())
                 .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
-            let unconf_addr = elements::Address::from_script(
-                &definite.descriptor.script_pubkey(),
-                None,
-                network.address_params(),
-            );
-            let unconf_str = unconf_addr.map(|a| a.to_string()).unwrap_or_default();
-            addr_pairs.push((conf_addr.to_string(), unconf_str));
+            let spk = definite.descriptor.script_pubkey();
+            addr_info.push((conf_addr.to_string(), spk));
         }
 
         let rpc = self.rpc.clone();
         let wallet = self.daemon_wallet_name.clone();
-        let utxos = tokio::task::spawn_blocking(move || rpc.list_unspent(&wallet))
-            .await
-            .expect("spawn_blocking join")?;
+        let (utxos, txs) = tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
+            let utxos = rpc.list_unspent(&wallet)?;
+            let txs = rpc.list_transactions(&wallet)?;
+            Ok((utxos, txs))
+        })
+        .await
+        .expect("spawn_blocking join")?;
 
-        let utxo_map = build_utxo_map(&utxos);
+        // Build script-pubkey maps for unspent and total received.
+        let spk_unspent = build_spk_utxo_map(&utxos);
+        let spk_received = build_spk_received_map(&txs);
 
-        let results = addr_pairs
+        let results = addr_info
             .into_iter()
             .enumerate()
-            .map(|(i, (conf_addr, unconf_addr))| {
-                let (received, unspent) = utxo_map
-                    .get(conf_addr.as_str())
-                    .or_else(|| utxo_map.get(unconf_addr.as_str()))
-                    .copied()
-                    .unwrap_or((0.0, 0.0));
+            .map(|(i, (conf_addr, spk))| {
+                let unspent = spk_unspent.get(&spk).copied().unwrap_or(0.0);
+                let received = spk_received.get(&spk).copied().unwrap_or(0.0);
                 ElementsRevealedAddress {
                     index: u32::try_from(i).unwrap_or(0),
                     address: conf_addr,
@@ -469,45 +493,82 @@ impl UserElementsWallet {
         &self,
         address: &str,
     ) -> Result<ElementsAddressActivity, ElementsWalletError> {
-        // Derive the unconfidential address to also match against, since
-        // Elements Core returns unconfidential addresses in listunspent.
-        let unconf = confidential_to_unconfidential(address, self.network);
+        let target_spk = elements::Address::from_str(address)
+            .map(|a| a.script_pubkey())
+            .map_err(|e| ElementsWalletError::Descriptor(format!("invalid address: {e}")))?;
 
         let rpc = self.rpc.clone();
         let wallet = self.daemon_wallet_name.clone();
-        let addr = address.to_string();
+        let spk = target_spk.clone();
 
-        let (utxos, tip) =
+        let (txs, unspent_utxos, tip) =
             tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
-                let mut utxos = rpc.list_received_by_address(&wallet, &addr)?;
-                if utxos.is_empty() && let Some(ref uc) = unconf {
-                    utxos = rpc.list_received_by_address(&wallet, uc)?;
-                }
+                let txs = rpc.list_transactions(&wallet)?;
+                let utxos = rpc.list_unspent(&wallet)?;
                 let tip = rpc.get_block_count()?;
-                Ok((utxos, tip))
+
+                let addr_matches = |addr_str: &str| -> bool {
+                    elements::Address::from_str(addr_str)
+                        .ok()
+                        .is_some_and(|a| a.script_pubkey() == spk)
+                };
+
+                let matched_txs: Vec<_> = txs
+                    .into_iter()
+                    .filter(|t| {
+                        t.address.as_deref().is_some_and(addr_matches)
+                    })
+                    .collect();
+
+                let matched_utxos: Vec<_> = utxos
+                    .into_iter()
+                    .filter(|u| {
+                        u.address.as_deref().is_some_and(addr_matches)
+                    })
+                    .collect();
+
+                Ok((matched_txs, matched_utxos, tip))
             })
             .await
             .expect("spawn_blocking join")?;
 
-        let mut total_received = 0.0;
-        let mut unspent = 0.0;
-        let mut receipts = Vec::new();
+        // Total received = sum of positive-amount "receive" transactions.
+        let total_received: f64 = txs
+            .iter()
+            .filter(|t| t.category == "receive")
+            .filter_map(|t| t.amount)
+            .filter(|a| *a > 0.0)
+            .sum();
 
-        for utxo in &utxos {
-            let amount = utxo.amount.unwrap_or(0.0);
-            total_received += amount;
-            let is_spent = !utxo.spendable;
-            if !is_spent {
-                unspent += amount;
-            }
-            receipts.push(ElementsAddressReceipt {
-                txid: utxo.txid.clone(),
-                vout: utxo.vout,
-                amount,
-                confirmations: utxo.confirmations,
-                is_spent,
-            });
-        }
+        // Unspent = sum of current UTXOs at this address (clamped to zero).
+        let unspent: f64 = unspent_utxos
+            .iter()
+            .filter_map(|u| u.amount)
+            .filter(|a| *a > 0.0)
+            .sum();
+
+        // Build receipts from transaction history (shows both spent and unspent).
+        let unspent_set: std::collections::HashSet<(String, u32)> = unspent_utxos
+            .iter()
+            .map(|u| (u.txid.clone(), u.vout))
+            .collect();
+
+        let receipts: Vec<_> = txs
+            .iter()
+            .filter(|t| t.category == "receive")
+            .map(|t| {
+                let vout = t.vout.unwrap_or(0);
+                let is_spent = !unspent_set.contains(&(t.txid.clone(), vout));
+                ElementsAddressReceipt {
+                    txid: t.txid.clone(),
+                    vout,
+                    amount: t.amount.unwrap_or(0.0),
+                    confirmations: u32::try_from(t.confirmations.unwrap_or(0).max(0))
+                        .unwrap_or(0),
+                    is_spent,
+                }
+            })
+            .collect();
 
         Ok(ElementsAddressActivity {
             tip_height: tip,
@@ -532,20 +593,36 @@ impl UserElementsWallet {
         let wallet = self.daemon_wallet_name.clone();
         let recipient_owned = recipient.to_string();
         let signers: Vec<_> = self.signers.iter().cloned().collect();
+        let mbk_bytes = derive_master_blinding_key(self.user_id, self.account_idx);
 
         let result = tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
-            // Step 1: Build unsigned PSET via Elements daemon.
+            // Step 1: Build unsigned PSET via Elements daemon (UTXO selection).
             let outputs = vec![serde_json::json!({ recipient_owned.clone(): amount_btc })];
             let funded = rpc.wallet_create_funded_psbt(&wallet, &outputs, fee_rate_btc_kb)?;
 
-            // Step 2: Decode PSET.
+            // Step 2: Decode and wrap as UnsignedPset.
             let pset_bytes = BASE64
                 .decode(funded.psbt.as_bytes())
                 .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
-            let mut pset: Pset = consensus_deserialize(&pset_bytes)
+            let pset: Pset = consensus_deserialize(&pset_bytes)
+                .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
+            let unsigned = asterism_elements::UnsignedPset::new(pset)
                 .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
 
-            // Step 3: Sign with all 3 HSMs.
+            // Step 3: Blind using the library (replaces walletprocesspsbt RPC).
+            // The PSET's witness_utxo may lack range proofs for confidential
+            // inputs (Elements Core strips them in walletcreatefundedpsbt).
+            // For those inputs, fetch the full previous transaction to get
+            // the complete output with range proof for unblinding.
+            let mbk = MasterBlindingKey::from(mbk_bytes);
+            let inp_secrets = derive_input_secrets_with_rpc(
+                unsigned.as_pset(), &mbk, &rpc, &wallet,
+            )?;
+            let blinded = asterism_elements::blind_pset(unsigned, &inp_secrets)
+                .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
+
+            // Step 4: Sign with all 3 HSMs.
+            let mut pset = blinded.into_pset();
             let mut total_signed = 0usize;
             for signer in &signers {
                 let n = signer
@@ -555,20 +632,21 @@ impl UserElementsWallet {
             }
             tracing::debug!(total_signed, "PSET signed by HSM federation");
 
-            // Step 4: Serialize signed PSET back to base64.
-            let signed_bytes = consensus_serialize(&pset);
-            let signed_b64 = BASE64.encode(&signed_bytes);
-
-            // Step 5: Finalize via Elements daemon.
-            let finalized = rpc.finalize_psbt(&wallet, &signed_b64)?;
-            if !finalized.complete {
-                return Err(ElementsWalletError::Finalize(
-                    "finalizepsbt returned complete=false".into(),
-                ));
-            }
-            let raw_hex = finalized.hex.ok_or_else(|| {
-                ElementsWalletError::Finalize("finalizepsbt returned no hex".into())
-            })?;
+            // Step 5: Finalize using the library (replaces finalizepsbt RPC).
+            asterism_elements::finalize_p2wsh_pset(&mut pset)
+                .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
+            let tx = pset
+                .extract_tx()
+                .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
+            let raw_hex = {
+                let bytes = consensus_serialize(&tx);
+                let mut hex = String::with_capacity(bytes.len() * 2);
+                for b in &bytes {
+                    use std::fmt::Write;
+                    let _ = write!(hex, "{b:02x}");
+                }
+                hex
+            };
 
             // Step 6: Broadcast.
             let txid = rpc.send_raw_transaction(&raw_hex)?;
@@ -607,15 +685,108 @@ impl UserElementsWallet {
     }
 }
 
-fn build_utxo_map(utxos: &[ElementsUtxo]) -> HashMap<&str, (f64, f64)> {
-    let mut map: HashMap<&str, (f64, f64)> = HashMap::new();
+fn derive_input_secrets_with_rpc(
+    pset: &Pset,
+    master_blinding_key: &MasterBlindingKey,
+    rpc: &ElementsRpc,
+    wallet: &str,
+) -> Result<HashMap<usize, elements::TxOutSecrets>, ElementsWalletError> {
+    use elements::confidential;
+
+    let mut secrets = HashMap::new();
+    for (i, input) in pset.inputs().iter().enumerate() {
+        let utxo = input.witness_utxo.as_ref().ok_or_else(|| {
+            ElementsWalletError::Sign(format!("input {i} missing witness_utxo"))
+        })?;
+
+        if let (confidential::Value::Explicit(value), confidential::Asset::Explicit(asset)) =
+            (utxo.value, utxo.asset)
+        {
+            secrets.insert(i, asterism_elements::explicit_txout_secrets(asset, value));
+        } else {
+            let prev_txid = &input.previous_txid;
+            let prev_vout = input.previous_output_index;
+            let raw_hex = rpc.get_wallet_transaction_hex(wallet, &prev_txid.to_string())
+                .map_err(|e| ElementsWalletError::Sign(format!(
+                    "failed to fetch prev tx {prev_txid}: {e}"
+                )))?;
+            let tx_bytes = hex_decode(&raw_hex)
+                .map_err(|e| ElementsWalletError::Sign(format!(
+                    "bad hex from getrawtransaction: {e}"
+                )))?;
+            let prev_tx: elements::Transaction = consensus_deserialize(&tx_bytes)
+                .map_err(|e| ElementsWalletError::Sign(format!(
+                    "failed to decode prev tx: {e}"
+                )))?;
+            let full_output = &prev_tx.output[prev_vout as usize];
+            let slip77_key = asterism_elements::slip77_blinding_key(
+                master_blinding_key,
+                &full_output.script_pubkey,
+            );
+            // Try SLIP-77 key first; fall back to the daemon's blinding
+            // key for legacy change outputs blinded before we imported
+            // our own keys.
+            let txout_secrets = if let Ok(s) =
+                asterism_elements::unblind_input(full_output, slip77_key)
+            {
+                s
+            } else {
+                let addr = elements::Address::from_script(
+                    &full_output.script_pubkey,
+                    None,
+                    &elements::AddressParams::ELEMENTS,
+                )
+                .ok_or_else(|| ElementsWalletError::Sign(format!(
+                    "input {i}: cannot derive address from script_pubkey"
+                )))?;
+                let key_hex = rpc.dump_blinding_key(wallet, &addr.to_string())
+                    .map_err(|e| ElementsWalletError::Sign(format!(
+                        "input {i}: dumpblindingkey failed: {e}"
+                    )))?;
+                let key_bytes = hex_decode(&key_hex)
+                    .map_err(|e| ElementsWalletError::Sign(format!(
+                        "input {i}: bad blinding key hex: {e}"
+                    )))?;
+                let daemon_key = elements::secp256k1_zkp::SecretKey::from_slice(&key_bytes)
+                    .map_err(|e| ElementsWalletError::Sign(format!(
+                        "input {i}: invalid blinding key: {e}"
+                    )))?;
+                asterism_elements::unblind_input(full_output, daemon_key)
+                    .map_err(|e| ElementsWalletError::Sign(e.to_string()))?
+            };
+            secrets.insert(i, txout_secrets);
+        }
+    }
+    Ok(secrets)
+}
+
+fn build_spk_utxo_map(utxos: &[ElementsUtxo]) -> HashMap<elements::Script, f64> {
+    let mut map: HashMap<elements::Script, f64> = HashMap::new();
     for utxo in utxos {
-        if let Some(addr) = utxo.address.as_deref() {
+        if let Some(addr_str) = utxo.address.as_deref() {
             let amount = utxo.amount.unwrap_or(0.0);
-            let entry = map.entry(addr).or_insert((0.0, 0.0));
-            entry.0 += amount;
-            if utxo.spendable {
-                entry.1 += amount;
+            if let Ok(addr) = elements::Address::from_str(addr_str) {
+                let spk = addr.script_pubkey();
+                *map.entry(spk).or_insert(0.0) += amount;
+            }
+        }
+    }
+    map
+}
+
+fn build_spk_received_map(
+    txs: &[crate::elements_rpc::WalletTransaction],
+) -> HashMap<elements::Script, f64> {
+    let mut map: HashMap<elements::Script, f64> = HashMap::new();
+    for tx in txs {
+        if tx.category != "receive" {
+            continue;
+        }
+        if let Some(addr_str) = tx.address.as_deref() {
+            let amount = tx.amount.unwrap_or(0.0);
+            if let Ok(addr) = elements::Address::from_str(addr_str) {
+                let spk = addr.script_pubkey();
+                *map.entry(spk).or_insert(0.0) += amount;
             }
         }
     }
@@ -640,12 +811,6 @@ fn derive_master_blinding_key(user_id: Uuid, account_idx: i32) -> [u8; 32] {
     key[16..24].copy_from_slice(&h1.to_be_bytes());
     key[24..32].copy_from_slice(&h2.to_be_bytes());
     key
-}
-
-fn confidential_to_unconfidential(address: &str, network: ElementsNetwork) -> Option<String> {
-    let parsed = elements::Address::from_str(address).ok()?;
-    let spk = parsed.script_pubkey();
-    elements::Address::from_script(&spk, None, network.address_params()).map(|a| a.to_string())
 }
 
 /// Extract the inner `wsh(sortedmulti(...))` descriptor from a
@@ -675,4 +840,14 @@ fn hex_encode(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+    if !s.len().is_multiple_of(2) {
+        return Err("odd-length hex string".into());
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
 }

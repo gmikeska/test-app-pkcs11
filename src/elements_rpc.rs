@@ -148,6 +148,16 @@ impl ElementsRpc {
         Ok(())
     }
 
+    pub fn dump_blinding_key(
+        &self,
+        wallet: &str,
+        address: &str,
+    ) -> Result<String, ElementsRpcError> {
+        let client = self.client_for_wallet(wallet)?;
+        let key: String = client.call("dumpblindingkey", &[json!(address)])?;
+        Ok(key)
+    }
+
     pub fn get_balances(&self, wallet: &str) -> Result<ElementsBalances, ElementsRpcError> {
         let client = self.client_for_wallet(wallet)?;
         let raw: Value = client.call("getbalances", &[])?;
@@ -192,14 +202,29 @@ impl ElementsRpc {
         Ok(result)
     }
 
-    pub fn finalize_psbt(
+    pub fn list_transactions(
         &self,
         wallet: &str,
-        psbt_b64: &str,
-    ) -> Result<FinalizedPsbt, ElementsRpcError> {
+    ) -> Result<Vec<WalletTransaction>, ElementsRpcError> {
         let client = self.client_for_wallet(wallet)?;
-        let result: FinalizedPsbt = client.call("finalizepsbt", &[json!(psbt_b64)])?;
-        Ok(result)
+        let txs: Vec<WalletTransaction> = client.call(
+            "listtransactions",
+            &[json!("*"), json!(9999), json!(0), json!(true)],
+        )?;
+        Ok(txs)
+    }
+
+    pub fn get_wallet_transaction_hex(
+        &self,
+        wallet: &str,
+        txid: &str,
+    ) -> Result<String, ElementsRpcError> {
+        let client = self.client_for_wallet(wallet)?;
+        let result: serde_json::Value = client.call("gettransaction", &[json!(txid)])?;
+        result["hex"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| ElementsRpcError::BadResponse("gettransaction returned no hex".into()))
     }
 
     pub fn send_raw_transaction(&self, hex: &str) -> Result<String, ElementsRpcError> {
@@ -210,17 +235,6 @@ impl ElementsRpc {
         })
     }
 
-    pub fn list_received_by_address(
-        &self,
-        wallet: &str,
-        address: &str,
-    ) -> Result<Vec<ElementsUtxo>, ElementsRpcError> {
-        let all = self.list_unspent(wallet)?;
-        Ok(all
-            .into_iter()
-            .filter(|u| u.address.as_deref() == Some(address))
-            .collect())
-    }
 }
 
 fn extract_btc_balance(v: Option<&Value>) -> f64 {
@@ -283,6 +297,17 @@ pub struct ElementsUtxo {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct WalletTransaction {
+    pub txid: String,
+    pub address: Option<String>,
+    pub category: String,
+    pub amount: Option<f64>,
+    pub confirmations: Option<i64>,
+    pub vout: Option<u32>,
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct FundedPsbt {
     pub psbt: String,
@@ -290,9 +315,3 @@ pub struct FundedPsbt {
     pub changepos: i32,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-pub struct FinalizedPsbt {
-    pub hex: Option<String>,
-    pub complete: bool,
-}

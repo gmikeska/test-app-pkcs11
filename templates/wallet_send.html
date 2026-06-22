@@ -48,7 +48,7 @@
       <tbody>
         {% for t in transactions %}
           <tr>
-            <td>
+            <td style="font-size:small">
               <a href="/wallet/transactions/{{ t.txid }}">
                 {% if t.label.is_empty() %}{{ t.txid }}{% else %}{{ t.label }}{% endif %}
               </a>

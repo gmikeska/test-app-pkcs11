@@ -32,8 +32,10 @@
 </section>
 
 <section class="card">
-  <h2>Raw transaction</h2>
-  <p class="muted">Hex-encoded, exactly as broadcast to bitcoind via <code>sendrawtransaction</code>.</p>
-  <pre class="code-block break"><code>{{ transaction.raw_tx_hex }}</code></pre>
+  <details>
+    <summary>Raw transaction</summary>
+    <p class="muted">Hex-encoded, exactly as broadcast to bitcoind via <code>sendrawtransaction</code>.</p>
+    <code class="break">{{ transaction.raw_tx_hex }}</code>
+  </details>
 </section>
 {% endblock %}
