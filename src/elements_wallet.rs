@@ -480,10 +480,8 @@ impl UserElementsWallet {
         let (utxos, tip) =
             tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
                 let mut utxos = rpc.list_received_by_address(&wallet, &addr)?;
-                if utxos.is_empty() {
-                    if let Some(ref uc) = unconf {
-                        utxos = rpc.list_received_by_address(&wallet, uc)?;
-                    }
+                if utxos.is_empty() && let Some(ref uc) = unconf {
+                    utxos = rpc.list_received_by_address(&wallet, uc)?;
                 }
                 let tip = rpc.get_block_count()?;
                 Ok((utxos, tip))

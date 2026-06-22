@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let deletion_task = tokio::task::spawn(
         session_store
             .clone()
-            .continuously_delete_expired(StdDuration::from_secs(60)),
+            .continuously_delete_expired(StdDuration::from_mins(1)),
     );
 
     let cookie_key = Key::try_from(config.session_secret.as_slice())

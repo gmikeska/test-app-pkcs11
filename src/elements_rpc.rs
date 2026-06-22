@@ -148,18 +148,6 @@ impl ElementsRpc {
         Ok(())
     }
 
-    pub fn derive_addresses(
-        &self,
-        wallet: &str,
-        descriptor: &str,
-        range: [u32; 2],
-    ) -> Result<Vec<String>, ElementsRpcError> {
-        let client = self.client_for_wallet(wallet)?;
-        let addrs: Vec<String> =
-            client.call("deriveaddresses", &[json!(descriptor), json!(range)])?;
-        Ok(addrs)
-    }
-
     pub fn get_balances(&self, wallet: &str) -> Result<ElementsBalances, ElementsRpcError> {
         let client = self.client_for_wallet(wallet)?;
         let raw: Value = client.call("getbalances", &[])?;
