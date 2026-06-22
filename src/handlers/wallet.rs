@@ -114,6 +114,7 @@ struct ReceiveTemplate {
     header: WalletHeader,
     balance: BalanceView,
     addresses: Vec<AddressView>,
+    change_addresses: Vec<AddressView>,
     flash: Option<FlashBanner>,
 }
 
@@ -249,6 +250,18 @@ pub async fn receive(
         })
         .collect();
 
+    let change_addresses = uw
+        .change_addresses()
+        .await
+        .into_iter()
+        .map(|a| AddressView {
+            index: a.index,
+            address: a.address,
+            received_btc: format_btc(a.received),
+            unspent_btc: format_btc(a.unspent),
+        })
+        .collect();
+
     Ok(ReceiveTemplate {
         header: WalletHeader {
             email: user.email,
@@ -260,6 +273,7 @@ pub async fn receive(
         },
         balance: BalanceView::from(balance),
         addresses,
+        change_addresses,
         flash: None,
     }
     .into_response())

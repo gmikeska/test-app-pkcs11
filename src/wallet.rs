@@ -710,6 +710,36 @@ impl UserWallet {
         Ok(results)
     }
 
+    /// List Internal (change) keychain addresses that have ever received funds.
+    pub async fn change_addresses(&self) -> Vec<RevealedAddress> {
+        let wallet = self.inner.lock().await;
+        let outputs: Vec<_> = wallet.list_output().collect();
+        let mut seen = std::collections::BTreeMap::<u32, (Amount, Amount)>::new();
+        for utxo in &outputs {
+            if let Some((KeychainKind::Internal, idx)) =
+                wallet.derivation_of_spk(utxo.txout.script_pubkey.clone())
+            {
+                let entry = seen.entry(idx).or_insert((Amount::ZERO, Amount::ZERO));
+                entry.0 += utxo.txout.value;
+                if !utxo.is_spent {
+                    entry.1 += utxo.txout.value;
+                }
+            }
+        }
+        seen.into_iter()
+            .map(|(index, (received, unspent))| {
+                let info = wallet.peek_address(KeychainKind::Internal, index);
+                RevealedAddress {
+                    index,
+                    keychain: info.keychain,
+                    address: info.address.to_string(),
+                    received,
+                    unspent,
+                }
+            })
+            .collect()
+    }
+
     /// Resolve a user-supplied address string into a [`Address`] tied
     /// to this wallet's network.
     ///
