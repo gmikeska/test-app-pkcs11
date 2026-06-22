@@ -1,17 +1,16 @@
-//! [`HsmFleet`] — manager for the three federation HSMs backing every user
-//! wallet in this app.
+//! [`HsmFleet`] — manager for the federation HSMs backing every user wallet.
 //!
 //! ## Token initialization
 //!
 //! At startup, [`HsmFleet::new`] calls [`asterism_dev_signer::init_dev_token`]
-//! for each of the three tokens. The helper is idempotent — already
+//! for each discovered token. The helper is idempotent — already
 //! initialized tokens are left alone.
 //!
 //! ## Per-user signer derivation
 //!
-//! Each customer's BIP-48 federation lives on the same three tokens, but
+//! Each customer's BIP-48 federation lives on the same set of tokens, but
 //! at a different *Asterism label*: `user-{short_id}`. The first time
-//! [`HsmFleet::signers_for`] is called for a user, the fleet opens three
+//! [`HsmFleet::signers_for`] is called for a user, the fleet opens
 //! authenticated sessions and either:
 //!
 //! 1. Loads pre-existing keys (`Pkcs11Signer::load`) if the master has
@@ -26,8 +25,8 @@
 //! `Network::Regtest`).
 //!
 //! Cloned [`Pkcs11Signer`]s share the inner `Arc<Mutex<...>>`, so caching
-//! a single triple per user keeps the open session count to
-//! `3 × distinct users with cached wallets` instead of growing unbounded.
+//! per user keeps the open session count to
+//! `n × distinct users with cached wallets` instead of growing unbounded.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,19 +62,19 @@ pub enum HsmError {
     },
 }
 
-/// A user-scoped triple of [`Pkcs11Signer`]s — one per HSM token — that
-/// together implement the user's 3-of-3 federation.
+/// A user-scoped set of [`Pkcs11Signer`]s — one per HSM token — that
+/// together form the user's federation.
 ///
-/// The triple is `Arc`'d so it can be cheaply cloned to handlers without
-/// duplicating sessions.
-pub type UserSigners = Arc<[Pkcs11Signer; 3]>;
+/// `Arc`'d so it can be cheaply cloned to handlers without duplicating
+/// sessions.
+pub type UserSigners = Arc<Vec<Pkcs11Signer>>;
 
-/// Owns the three federation HSMs: token labels/PINs, plus a per-user
-/// signer cache.
+/// Owns the federation HSMs: token labels/PINs, plus a per-user signer
+/// cache.
 pub struct HsmFleet {
     library_path: std::path::PathBuf,
     network: Network,
-    tokens: [HsmTokenConfig; 3],
+    tokens: Vec<HsmTokenConfig>,
     cache: AsyncMutex<HashMap<Uuid, UserSigners>>,
 }
 
@@ -84,7 +83,7 @@ impl HsmFleet {
     /// Initialize the fleet:
     ///
     /// 1. Verify `PKCS11_LIB` exists.
-    /// 2. Run `init_dev_token` for each of the three tokens (idempotent).
+    /// 2. Run `init_dev_token` for each discovered token (idempotent).
     /// 3. Stash configuration; defer session opening to first per-user use.
     ///
     /// # Errors
@@ -128,16 +127,15 @@ impl HsmFleet {
         format!("user-{}", &s[..8])
     }
 
-    /// Retrieve (or lazily build) the user's three [`Pkcs11Signer`]s.
+    /// Retrieve (or lazily build) the user's [`Pkcs11Signer`]s.
     ///
-    /// Cache-miss path opens three sessions in series (3 token labels
-    /// resolved against `SoftHSM`; one session per token), and either
-    /// loads pre-existing keys or derives a fresh master via the dev
-    /// shim. Each call after that hits the cache.
+    /// Cache-miss path opens sessions in series (one per token),
+    /// and either loads pre-existing keys or derives a fresh master via
+    /// the dev shim. Each call after that hits the cache.
     ///
     /// Concurrent first-use calls for the same user race the cache
     /// mutex; whichever wins runs the derivation, the rest see the
-    /// cached triple.
+    /// cached result.
     ///
     /// # Errors
     /// Surfaces every PKCS#11-layer failure (`HsmError::Pkcs11`).
@@ -208,11 +206,11 @@ impl HsmFleet {
 fn derive_user_signers(
     library_path: &std::path::Path,
     network: Network,
-    tokens: &[HsmTokenConfig; 3],
+    tokens: &[HsmTokenConfig],
     label: &str,
     derivation_path: &DerivationPath,
-) -> Result<[Pkcs11Signer; 3], HsmError> {
-    let mut out: Vec<Pkcs11Signer> = Vec::with_capacity(3);
+) -> Result<Vec<Pkcs11Signer>, HsmError> {
+    let mut out: Vec<Pkcs11Signer> = Vec::with_capacity(tokens.len());
     for token in tokens {
         let cfg = Pkcs11Config::new(
             library_path,
@@ -236,7 +234,6 @@ fn derive_user_signers(
             }
             Err(Pkcs11Error::ObjectNotFound(_)) => {
                 tracing::info!(%label, token = %token.label, "deriving fresh HSM key");
-                // Re-open: `load` consumed the session.
                 let session =
                     Pkcs11Session::open(&cfg, &SlotIdentifier::label(&token.label), &token.pin)?;
                 Pkcs11Signer::derive_from_seed(
@@ -245,9 +242,6 @@ fn derive_user_signers(
                     derivation_path,
                     network,
                     Box::new(DevBackend),
-                    // Empty seed: dev shim looks up the slot's
-                    // preconfigured BIP-39 mnemonic via
-                    // DEV_HSM_SLOT_*_MNEMONIC env vars.
                     &[],
                 )?
             }
@@ -255,21 +249,13 @@ fn derive_user_signers(
         };
         out.push(signer);
     }
-
-    // SAFETY: pushed exactly 3 elements above.
-    let arr: [Pkcs11Signer; 3] = out
-        .try_into()
-        .map_err(|v: Vec<Pkcs11Signer>| {
-            unreachable!("derive_user_signers built {} signers, expected 3", v.len())
-        })
-        .expect("3 signers");
-    Ok(arr)
+    Ok(out)
 }
 
 #[allow(dead_code)] // invoked from `delete_keys_for_user`
 fn delete_keys(
     library_path: &std::path::Path,
-    tokens: &[HsmTokenConfig; 3],
+    tokens: &[HsmTokenConfig],
     label: &str,
 ) -> Result<(), HsmError> {
     for token in tokens {

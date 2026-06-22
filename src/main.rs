@@ -1,5 +1,5 @@
 //! `test-app-pkcs11` — Axum web app exercising `asterism-pkcs11` with
-//! customer wallets backed by a 3-of-3 federation of emulated HSMs.
+//! customer wallets backed by an m-of-n federation of emulated HSMs.
 //!
 //! Boot sequence:
 //!
@@ -7,7 +7,7 @@
 //! 2. Connect to `PostgreSQL`, run domain migrations.
 //! 3. Initialise `tower-sessions` Postgres store + run its own migration.
 //! 4. Seed the three test users (idempotent).
-//! 5. Verify `PKCS11_LIB`, init the 3 dev tokens (idempotent).
+//! 5. Verify `PKCS11_LIB`, init discovered dev tokens (idempotent).
 //! 6. Construct the [`WalletManager`].
 //! 7. Eager-seed wallets for `test1/2/3`.
 //! 8. Build the router and serve on `APP_HOST:APP_PORT`.
@@ -64,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         network = %config.network,
         bip48_coin_index = config.bip48_coin_index,
         threshold = config.fed_threshold,
+        hsm_count = config.hsm_tokens.len(),
         "starting test-app-pkcs11"
     );
 

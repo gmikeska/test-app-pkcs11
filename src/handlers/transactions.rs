@@ -76,6 +76,12 @@ pub async fn show(
         None => String::new(),
     };
 
+    let policy = {
+        let t = state.config.fed_threshold;
+        let n = state.config.hsm_tokens.len();
+        format!("{t}-of-{n} (HSMs)")
+    };
+
     Ok(TransactionTemplate {
         header: WalletHeader {
             email: user.email.clone(),
@@ -84,6 +90,7 @@ pub async fn show(
             descriptor,
             tip_height: uw.tip_height().await,
             active_tab: "send",
+            policy,
         },
         email: user.email,
         transaction: TransactionDetailView::from(row),

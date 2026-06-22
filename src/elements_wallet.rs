@@ -80,6 +80,7 @@ pub struct ElementsWalletManager {
     rpc: Arc<ElementsRpc>,
     network: ElementsNetwork,
     bip48_coin_index: u32,
+    fed_threshold: u32,
     hsm: Arc<HsmFleet>,
     cache: AsyncMutex<HashMap<Uuid, Arc<UserElementsWallet>>>,
 }
@@ -97,6 +98,7 @@ impl ElementsWalletManager {
             rpc,
             network: config.elements_network,
             bip48_coin_index: config.bip48_coin_index,
+            fed_threshold: config.fed_threshold,
             hsm,
             cache: AsyncMutex::new(HashMap::new()),
         }
@@ -168,7 +170,7 @@ impl ElementsWalletManager {
         let mbk = derive_master_blinding_key(user_id, account_idx);
         let mbk_hex = hex_encode(&mbk);
 
-        let mut builder = CtDescriptorBuilder::new(3, &mbk)
+        let mut builder = CtDescriptorBuilder::new(self.fed_threshold, &mbk)
             .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?
             .key_mode(CtKeyMode::Ranged);
         for signer in &patched {
@@ -312,6 +314,8 @@ impl ElementsWalletManager {
         )
         .await
         .unwrap_or(0);
+        let signer_count = i32::try_from(signers_arc.len()).unwrap_or(0);
+        let threshold = i32::try_from(self.fed_threshold).unwrap_or(0);
         if version_count == 0 {
             let snapshot = serde_json::json!({
                 "descriptor": row.descriptor,
@@ -324,8 +328,8 @@ impl ElementsWalletManager {
                     elements_wallet_id: Some(row.id),
                     version_index: 0,
                     descriptor: &row.descriptor,
-                    threshold: 3,
-                    signer_count: 3,
+                    threshold,
+                    signer_count,
                     federation_snapshot: &snapshot,
                     wallet_handle: &row.daemon_wallet_name,
                     blinding_key: Some(&row.master_blinding_key),
@@ -657,7 +661,7 @@ impl UserElementsWallet {
             let blinded = asterism_elements::blind_pset(unsigned, &inp_secrets)
                 .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
 
-            // Step 4: Sign with all 3 HSMs.
+            // Step 4: Sign with all HSMs.
             let mut pset = blinded.into_pset();
             let mut total_signed = 0usize;
             for signer in &signers {

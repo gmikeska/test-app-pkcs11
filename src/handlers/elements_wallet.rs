@@ -38,6 +38,7 @@ pub struct ElementsWalletHeader {
     pub descriptor: String,
     pub tip_height: u64,
     pub active_tab: &'static str,
+    pub policy: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -213,6 +214,7 @@ pub async fn receive(
             descriptor: uw.descriptor().to_string(),
             tip_height,
             active_tab: "receive",
+            policy: elements_policy_label(&state),
         },
         balance: balance_view,
         addresses,
@@ -255,6 +257,7 @@ pub async fn send_get(
             descriptor: uw.descriptor().to_string(),
             tip_height,
             active_tab: "send",
+            policy: elements_policy_label(&state),
         },
         balance: balance_view,
         transactions: txs,
@@ -365,6 +368,7 @@ pub async fn address_show(
             descriptor: uw.descriptor().to_string(),
             tip_height,
             active_tab: "receive",
+            policy: elements_policy_label(&state),
         },
         email: user.email,
         address: ElementsAddressDetailView {
@@ -379,6 +383,12 @@ pub async fn address_show(
         receipts,
     }
     .into_response())
+}
+
+fn elements_policy_label(state: &AppState) -> String {
+    let t = state.config.fed_threshold;
+    let n = state.config.hsm_tokens.len();
+    format!("{t}-of-{n} (HSMs)")
 }
 
 fn format_btc_sats(sat: i64) -> String {

@@ -3,7 +3,7 @@
 //! `WalletManager` owns the Bitcoin Core RPC client and a cache of
 //! `UserWallet`s. Each `UserWallet` ties a `bdk_wallet::Wallet` to one
 //! user via that user's BIP-48 account index, and bundles the per-user
-//! 3-of-3 federation built from `HsmFleet` signers.
+//! m-of-n federation built from `HsmFleet` signers.
 //!
 //! Concurrency model mirrors test-app-xpub:
 //!
@@ -249,6 +249,7 @@ pub struct WalletManager {
     rpc: Arc<RpcClient>,
     network: Network,
     bip48_coin_index: u32,
+    fed_threshold: u32,
     hsm: Arc<HsmFleet>,
     cache: AsyncMutex<HashMap<Uuid, Arc<UserWallet>>>,
 }
@@ -272,6 +273,7 @@ impl WalletManager {
             rpc: Arc::new(rpc),
             network: config.network,
             bip48_coin_index: config.bip48_coin_index,
+            fed_threshold: config.fed_threshold,
             hsm,
             cache: AsyncMutex::new(HashMap::new()),
         })
@@ -348,7 +350,7 @@ impl WalletManager {
             .map(|s| NetworkPatchedSigner::new(s, self.network))
             .collect();
         let fed = Federation::with_key_mode(
-            3,
+            self.fed_threshold,
             patched,
             NetworkType::Bitcoin(self.network),
             KeyMode::Ranged,
@@ -358,8 +360,6 @@ impl WalletManager {
                 .expect("Bitcoin federation has a descriptor"),
         );
 
-        // Probe-create a BDK wallet to harvest the initial changeset so
-        // first load doesn't repeat descriptor parse + checkpoint init.
         let mut probe = Wallet::create_from_two_path_descriptor(multipath.clone())
             .network(self.network)
             .create_wallet_no_persist()
@@ -506,7 +506,7 @@ impl WalletManager {
             .map(|s| NetworkPatchedSigner::new(s, self.network))
             .collect();
         let federation = Federation::with_key_mode(
-            3,
+            self.fed_threshold,
             patched_owned,
             NetworkType::Bitcoin(self.network),
             KeyMode::Ranged,
@@ -533,9 +533,7 @@ impl WalletManager {
             (w, ChangeSet::default())
         };
 
-        // Register all 3 Pkcs11Signers on both keychains. Cloning a
-        // Pkcs11Signer is cheap (shared Arc<Mutex<...>>), so registering
-        // for both keychains does not double the open session count.
+        // Register all Pkcs11Signers on both keychains.
         for s in signers_arc.iter() {
             let arc: Arc<Pkcs11Signer> = Arc::new(s.clone());
             wallet.add_signer(
@@ -684,7 +682,7 @@ impl UserWallet {
         self.account_idx
     }
 
-    /// Borrow the per-user federation (3-of-3 of HSM signers).
+    /// Borrow the per-user federation (m-of-n HSM signers).
     #[must_use]
     pub fn federation(&self) -> &Federation<NetworkPatchedSigner> {
         &self.federation
@@ -976,7 +974,7 @@ impl UserWallet {
         self.inner.lock().await.balance()
     }
 
-    /// Build → sign (3-of-3) → finalize → broadcast → persist.
+    /// Build → sign (m-of-n) → finalize → broadcast → persist.
     ///
     /// # Errors
     /// See [`WalletError`].

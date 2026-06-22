@@ -60,6 +60,12 @@ pub async fn show(
 
     let tip_height = uw.tip_height().await?;
 
+    let policy = {
+        let t = state.config.fed_threshold;
+        let n = state.config.hsm_tokens.len();
+        format!("{t}-of-{n} (HSMs)")
+    };
+
     Ok(TransactionTemplate {
         header: ElementsWalletHeader {
             email: user.email.clone(),
@@ -68,6 +74,7 @@ pub async fn show(
             descriptor: uw.descriptor().to_string(),
             tip_height,
             active_tab: "send",
+            policy,
         },
         email: user.email,
         transaction: ElementsTransactionDetailView::from(row),

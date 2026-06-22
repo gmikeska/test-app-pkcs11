@@ -7,8 +7,8 @@
 //!   `DATABASE_URL`.
 //! - **Bitcoin Core RPC.** `BITCOIN_RPC_*`, `BITCOIN_NETWORK`,
 //!   `BITCOIN_WALLET_NAME`.
-//! - **HSM federation.** `PKCS11_LIB`, three `APP_HSM_{1,2,3}_LABEL`/`_PIN`/
-//!   `_SO_PIN` triples, and `APP_FED_THRESHOLD` (defaulted to 3).
+//! - **HSM federation.** `PKCS11_LIB`, `APP_HSM_{N}_LABEL`/`_PIN`/`_SO_PIN`
+//!   (scanned sequentially from N=1), and `APP_FED_THRESHOLD`.
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -18,7 +18,7 @@ use asterism_elements::ElementsNetwork;
 use bitcoin::Network;
 use bitcoin::bip32::{ChildNumber, DerivationPath};
 
-/// Configuration for one of the three federation HSM tokens.
+/// Configuration for a single federation HSM token.
 #[derive(Clone, Debug)]
 pub struct HsmTokenConfig {
     /// Human-readable token label. Doubles as the `SlotIdentifier::Label`
@@ -56,10 +56,10 @@ pub struct AppConfig {
     /// Path to `libasterism_dev_hsm.so` (or, in production, the vendor
     /// PKCS#11 library).
     pub pkcs11_library_path: PathBuf,
-    /// The three token configs, in HSM index order (1, 2, 3 → indices 0,
-    /// 1, 2).
-    pub hsm_tokens: [HsmTokenConfig; 3],
-    /// Federation threshold. Always 3 in v1; surfaced for templates.
+    /// Token configs, discovered sequentially from `APP_HSM_{1,2,...}_*`
+    /// env vars at startup.
+    pub hsm_tokens: Vec<HsmTokenConfig>,
+    /// Federation threshold (m in m-of-n). Must satisfy `1 ≤ t ≤ n`.
     pub fed_threshold: u32,
 
     // -- Elements chain config --
@@ -144,8 +144,14 @@ impl AppConfig {
 
         let pkcs11_library_path = PathBuf::from(require("PKCS11_LIB")?);
 
-        let hsm_tokens = [load_hsm_token(1)?, load_hsm_token(2)?, load_hsm_token(3)?];
+        let hsm_tokens = discover_hsm_tokens()?;
+        if hsm_tokens.is_empty() {
+            return Err(ConfigError::Missing {
+                var: "APP_HSM_1_LABEL",
+            });
+        }
 
+        let n = u32::try_from(hsm_tokens.len()).unwrap_or(u32::MAX);
         let fed_threshold: u32 = match optional("APP_FED_THRESHOLD") {
             Some(s) => s
                 .parse()
@@ -153,12 +159,14 @@ impl AppConfig {
                     var: "APP_FED_THRESHOLD",
                     reason: e.to_string(),
                 })?,
-            None => 3,
+            None => n,
         };
-        if fed_threshold != 3 {
+        if fed_threshold < 1 || fed_threshold > n {
             return Err(ConfigError::Parse {
                 var: "APP_FED_THRESHOLD",
-                reason: format!("v1 only supports threshold = 3 (got {fed_threshold})"),
+                reason: format!(
+                    "threshold must satisfy 1 ≤ t ≤ {n} (got {fed_threshold})"
+                ),
             });
         }
 
@@ -242,15 +250,25 @@ fn hardened(index: u32, label: &'static str) -> Result<ChildNumber, ConfigError>
     })
 }
 
-fn load_hsm_token(idx: u32) -> Result<HsmTokenConfig, ConfigError> {
-    let label_var: &'static str = Box::leak(format!("APP_HSM_{idx}_LABEL").into_boxed_str());
-    let pin_var: &'static str = Box::leak(format!("APP_HSM_{idx}_PIN").into_boxed_str());
-    let so_pin_var: &'static str = Box::leak(format!("APP_HSM_{idx}_SO_PIN").into_boxed_str());
-    Ok(HsmTokenConfig {
-        label: require(label_var)?,
-        pin: require(pin_var)?,
-        so_pin: require(so_pin_var)?,
-    })
+fn discover_hsm_tokens() -> Result<Vec<HsmTokenConfig>, ConfigError> {
+    let mut tokens = Vec::new();
+    for idx in 1u32.. {
+        let label_var: &'static str =
+            Box::leak(format!("APP_HSM_{idx}_LABEL").into_boxed_str());
+        let Some(label) = optional(label_var) else {
+            break;
+        };
+        let pin_var: &'static str =
+            Box::leak(format!("APP_HSM_{idx}_PIN").into_boxed_str());
+        let so_pin_var: &'static str =
+            Box::leak(format!("APP_HSM_{idx}_SO_PIN").into_boxed_str());
+        tokens.push(HsmTokenConfig {
+            label,
+            pin: require(pin_var)?,
+            so_pin: require(so_pin_var)?,
+        });
+    }
+    Ok(tokens)
 }
 
 fn require(var: &'static str) -> Result<String, ConfigError> {

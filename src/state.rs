@@ -19,7 +19,7 @@ pub struct AppState {
     pub config: AppConfig,
     /// Postgres connection pool.
     pub db: PgPool,
-    /// HSM fleet (3 dev tokens + per-user signer cache).
+    /// HSM fleet (discovered dev tokens + per-user signer cache).
     ///
     /// Currently consumed transitively via [`WalletManager`]. Kept as a
     /// top-level handle so future routes (e.g. an HSM-admin page that

@@ -44,6 +44,8 @@ pub struct WalletHeader {
     pub tip_height: u32,
     /// Currently-active tab ("receive" / "send").
     pub active_tab: &'static str,
+    /// Federation policy label, e.g. "3-of-5 (HSMs)".
+    pub policy: String,
 }
 
 /// Pretty-formatted balance card values.
@@ -270,6 +272,7 @@ pub async fn receive(
             descriptor,
             tip_height,
             active_tab: "receive",
+            policy: policy_label(&state),
         },
         balance: BalanceView::from(balance),
         addresses,
@@ -307,6 +310,7 @@ pub async fn send_get(
             descriptor,
             tip_height,
             active_tab: "send",
+            policy: policy_label(&state),
         },
         balance: BalanceView::from(balance),
         transactions: txs,
@@ -423,6 +427,7 @@ pub async fn address_show(
             descriptor,
             tip_height,
             active_tab: "receive",
+            policy: policy_label(&state),
         },
         email: user.email,
         address: AddressDetailView {
@@ -443,6 +448,12 @@ pub async fn address_show(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn policy_label(state: &AppState) -> String {
+    let t = state.config.fed_threshold;
+    let n = state.config.hsm_tokens.len();
+    format!("{t}-of-{n} (HSMs)")
+}
 
 async fn lookup_descriptor(state: &Arc<AppState>, user_id: uuid::Uuid) -> Result<String, AppError> {
     let row = db::find_wallet_for_user(&state.db, user_id)
