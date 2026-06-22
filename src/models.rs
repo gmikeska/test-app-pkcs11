@@ -87,3 +87,19 @@ pub struct ElementsTransactionRow {
     pub label: Option<String>,
     pub broadcast_at: DateTime<Utc>,
 }
+
+/// `federation_versions` row.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct FederationVersionRow {
+    pub id: Uuid,
+    pub wallet_id: Option<Uuid>,
+    pub elements_wallet_id: Option<Uuid>,
+    pub version_index: i32,
+    pub descriptor: String,
+    pub threshold: i32,
+    pub signer_count: i32,
+    pub federation_snapshot: serde_json::Value,
+    pub wallet_handle: String,
+    pub blinding_key: Option<String>,
+    pub created_at: DateTime<Utc>,
+}

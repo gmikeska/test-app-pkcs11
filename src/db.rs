@@ -5,7 +5,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::models::{
-    ElementsTransactionRow, ElementsWalletRow, TransactionRow, UserRow, WalletRow,
+    ElementsTransactionRow, ElementsWalletRow, FederationVersionRow, TransactionRow, UserRow,
+    WalletRow,
 };
 
 /// Run all `migrations/*.sql` against `pool`.
@@ -409,4 +410,105 @@ pub async fn find_elements_transaction(
     .bind(txid)
     .fetch_optional(pool)
     .await
+}
+
+// ---------------------------------------------------------------------------
+// federation_versions
+// ---------------------------------------------------------------------------
+
+pub struct NewFederationVersion<'a> {
+    pub wallet_id: Option<Uuid>,
+    pub elements_wallet_id: Option<Uuid>,
+    pub version_index: i32,
+    pub descriptor: &'a str,
+    pub threshold: i32,
+    pub signer_count: i32,
+    pub federation_snapshot: &'a serde_json::Value,
+    pub wallet_handle: &'a str,
+    pub blinding_key: Option<&'a str>,
+}
+
+pub async fn insert_federation_version(
+    pool: &PgPool,
+    spec: &NewFederationVersion<'_>,
+) -> sqlx::Result<FederationVersionRow> {
+    sqlx::query_as::<_, FederationVersionRow>(
+        "INSERT INTO federation_versions \
+            (wallet_id, elements_wallet_id, version_index, descriptor, \
+             threshold, signer_count, federation_snapshot, wallet_handle, blinding_key) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+         ON CONFLICT (wallet_id, version_index) WHERE wallet_id IS NOT NULL DO NOTHING \
+         RETURNING id, wallet_id, elements_wallet_id, version_index, descriptor, \
+                   threshold, signer_count, federation_snapshot, wallet_handle, \
+                   blinding_key, created_at",
+    )
+    .bind(spec.wallet_id)
+    .bind(spec.elements_wallet_id)
+    .bind(spec.version_index)
+    .bind(spec.descriptor)
+    .bind(spec.threshold)
+    .bind(spec.signer_count)
+    .bind(spec.federation_snapshot)
+    .bind(spec.wallet_handle)
+    .bind(spec.blinding_key)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn list_federation_versions_for_wallet(
+    pool: &PgPool,
+    wallet_id: Uuid,
+) -> sqlx::Result<Vec<FederationVersionRow>> {
+    sqlx::query_as::<_, FederationVersionRow>(
+        "SELECT id, wallet_id, elements_wallet_id, version_index, descriptor, \
+                threshold, signer_count, federation_snapshot, wallet_handle, \
+                blinding_key, created_at \
+         FROM federation_versions WHERE wallet_id = $1 \
+         ORDER BY version_index ASC",
+    )
+    .bind(wallet_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn list_federation_versions_for_elements_wallet(
+    pool: &PgPool,
+    elements_wallet_id: Uuid,
+) -> sqlx::Result<Vec<FederationVersionRow>> {
+    sqlx::query_as::<_, FederationVersionRow>(
+        "SELECT id, wallet_id, elements_wallet_id, version_index, descriptor, \
+                threshold, signer_count, federation_snapshot, wallet_handle, \
+                blinding_key, created_at \
+         FROM federation_versions WHERE elements_wallet_id = $1 \
+         ORDER BY version_index ASC",
+    )
+    .bind(elements_wallet_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn federation_version_count_for_wallet(
+    pool: &PgPool,
+    wallet_id: Uuid,
+) -> sqlx::Result<i64> {
+    let count: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM federation_versions WHERE wallet_id = $1",
+    )
+    .bind(wallet_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(count.unwrap_or(0))
+}
+
+pub async fn federation_version_count_for_elements_wallet(
+    pool: &PgPool,
+    elements_wallet_id: Uuid,
+) -> sqlx::Result<i64> {
+    let count: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM federation_versions WHERE elements_wallet_id = $1",
+    )
+    .bind(elements_wallet_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(count.unwrap_or(0))
 }

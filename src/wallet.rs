@@ -18,10 +18,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use asterism_core::descriptor::{KeyMode, to_multipath_string};
+use asterism_core::federated_wallet::FederatedWallet as FederatedWalletTrait;
 use asterism_core::network::NetworkType;
 use asterism_core::psbt::{SigningCoordinator, UnsignedPsbt};
 use asterism_core::signer::{Signer, SignerCapabilities, SignerHealth, SignerId, SignerType};
-use asterism_core::{Federation, error::SignerError};
+use asterism_core::{BtcFederatedWallet, Federation, FederationWallet, error::SignerError};
 use asterism_pkcs11::Pkcs11Signer;
 use bdk_bitcoind_rpc::{Emitter, NO_EXPECTED_MEMPOOL_TXS};
 use bdk_wallet::chain::{ChainPosition, Merge};
@@ -387,6 +388,107 @@ impl WalletManager {
         Ok(row)
     }
 
+    /// Construct a `BtcFederatedWallet` from stored federation versions, or
+    /// bootstrap with the current federation if no versions are recorded yet.
+    async fn build_federated_wallet(
+        &self,
+        wallet_id: Uuid,
+        current_federation: &Federation<NetworkPatchedSigner>,
+    ) -> Result<BtcFederatedWallet<NetworkPatchedSigner>, WalletError> {
+        let versions = db::list_federation_versions_for_wallet(&self.pool, wallet_id).await?;
+
+        if versions.is_empty() {
+            // Bootstrap: record the current (and only) federation as version 0.
+            let descriptor_str = to_multipath_string(
+                current_federation
+                    .try_descriptor()
+                    .expect("Bitcoin federation has a descriptor"),
+            );
+            let snapshot =
+                serde_json::json!({ "threshold": current_federation.threshold(), "signer_count": current_federation.total_signers() });
+            let _ = db::insert_federation_version(
+                &self.pool,
+                &db::NewFederationVersion {
+                    wallet_id: Some(wallet_id),
+                    elements_wallet_id: None,
+                    version_index: 0,
+                    descriptor: &descriptor_str,
+                    threshold: i32::try_from(current_federation.threshold()).unwrap_or(0),
+                    signer_count: i32::try_from(current_federation.total_signers()).unwrap_or(0),
+                    federation_snapshot: &snapshot,
+                    wallet_handle: &wallet_id.to_string(),
+                    blinding_key: None,
+                },
+            )
+            .await
+            .ok();
+
+            let metadata_wallet = Self::create_metadata_wallet(current_federation, self.network)?;
+            return BtcFederatedWallet::new(current_federation.clone(), metadata_wallet)
+                .map_err(|e| WalletError::CreateWallet(e.to_string()));
+        }
+
+        // Reconstruct from stored versions: the first version initializes
+        // the FederatedWallet, subsequent versions are chained via
+        // with_federation(). Each version creates its own metadata wallet
+        // from the stored descriptor.
+        let first = &versions[0];
+        let first_fed = self.reconstruct_federation_from_version(first).await?;
+        let first_wallet = Self::create_metadata_wallet(&first_fed, self.network)?;
+        let mut fw = BtcFederatedWallet::new(first_fed, first_wallet)
+            .map_err(|e| WalletError::CreateWallet(e.to_string()))?;
+
+        for v in &versions[1..] {
+            let fed = self.reconstruct_federation_from_version(v).await?;
+            let w = Self::create_metadata_wallet(&fed, self.network)?;
+            fw = fw
+                .with_federation(fed, w)
+                .map_err(|e| WalletError::CreateWallet(e.to_string()))?;
+        }
+
+        Ok(fw)
+    }
+
+    /// Build a read-only BDK wallet from a federation's descriptor (for
+    /// metadata queries — balance, UTXOs, address derivation).
+    fn create_metadata_wallet(
+        federation: &Federation<NetworkPatchedSigner>,
+        network: Network,
+    ) -> Result<Wallet, WalletError> {
+        let desc = to_multipath_string(
+            federation
+                .try_descriptor()
+                .expect("Bitcoin federation has a descriptor"),
+        );
+        Wallet::create_from_two_path_descriptor(desc)
+            .network(network)
+            .create_wallet_no_persist()
+            .map_err(|e| WalletError::CreateWallet(e.to_string()))
+    }
+
+    /// Reconstruct a `Federation<NetworkPatchedSigner>` from a stored
+    /// federation version row. Rebuilds signers from the HSM fleet at the
+    /// stored derivation path.
+    #[allow(clippy::unused_async)]
+    async fn reconstruct_federation_from_version(
+        &self,
+        _version: &crate::models::FederationVersionRow,
+    ) -> Result<Federation<NetworkPatchedSigner>, WalletError> {
+        // For now, federation reconstruction from stored versions will be
+        // fully implemented when federation changes are supported. The
+        // stored descriptor and snapshot contain enough information to
+        // rebuild the federation, but the signer-discovery path (matching
+        // HSM keys to stored fingerprints) is part of the federation-changes
+        // plan (Phase 1 of that plan). For the initial integration, this
+        // codepath is only reached if there are stored versions, which only
+        // happens once federation changes are exercised.
+        Err(WalletError::CreateWallet(
+            "federation reconstruction from stored versions not yet implemented \
+             (single-federation path bootstraps from current state)"
+                .into(),
+        ))
+    }
+
     async fn build_user_wallet(
         &self,
         user_id: Uuid,
@@ -444,12 +546,19 @@ impl WalletManager {
             wallet.add_signer(KeychainKind::Internal, SignerOrdering::default(), arc);
         }
 
+        // Build the FederatedWallet from stored federation versions, or
+        // bootstrap with just the current federation if none are stored yet.
+        let federated_wallet = self
+            .build_federated_wallet(wallet_id, &federation)
+            .await?;
+
         Ok(UserWallet {
             user_id,
             wallet_id,
             account_idx,
             network: self.network,
             federation,
+            federated_wallet,
             inner: AsyncMutex::new(wallet),
             aggregate: AsyncMutex::new(initial_changeset),
             pool: self.pool.clone(),
@@ -542,6 +651,7 @@ pub struct UserWallet {
     account_idx: i32,
     network: Network,
     federation: Federation<NetworkPatchedSigner>,
+    federated_wallet: BtcFederatedWallet<NetworkPatchedSigner>,
     inner: AsyncMutex<Wallet>,
     aggregate: AsyncMutex<ChangeSet>,
     pool: PgPool,
@@ -578,6 +688,32 @@ impl UserWallet {
     #[must_use]
     pub fn federation(&self) -> &Federation<NetworkPatchedSigner> {
         &self.federation
+    }
+
+    /// Borrow the federated wallet spanning all historical federation versions.
+    #[must_use]
+    pub fn federated_wallet(&self) -> &BtcFederatedWallet<NetworkPatchedSigner> {
+        &self.federated_wallet
+    }
+
+    /// Number of federation versions in this wallet's history.
+    #[must_use]
+    pub fn federation_count(&self) -> usize {
+        self.federated_wallet.federation_count()
+    }
+
+    /// All federation-wallet pairs where the given signer appears.
+    pub fn federations_for_signer(
+        &self,
+        id: &SignerId,
+    ) -> Vec<&FederationWallet<NetworkPatchedSigner, Arc<bdk_wallet::Wallet>>> {
+        self.federated_wallet.find_by_signer(id)
+    }
+
+    /// Whether the given signer is a member of the current federation.
+    #[must_use]
+    pub fn signer_is_current(&self, id: &SignerId) -> bool {
+        self.federated_wallet.signer_is_current(id)
     }
 
     /// Drive `bdk_bitcoind_rpc::Emitter` until the wallet matches

@@ -306,6 +306,35 @@ impl ElementsWalletManager {
             .await
             .expect("spawn_blocking join")?;
 
+        // Record the initial federation version if not already stored.
+        let version_count = db::federation_version_count_for_elements_wallet(
+            &self.pool, row.id,
+        )
+        .await
+        .unwrap_or(0);
+        if version_count == 0 {
+            let snapshot = serde_json::json!({
+                "descriptor": row.descriptor,
+                "daemon_wallet_name": row.daemon_wallet_name,
+            });
+            let _ = db::insert_federation_version(
+                &self.pool,
+                &db::NewFederationVersion {
+                    wallet_id: None,
+                    elements_wallet_id: Some(row.id),
+                    version_index: 0,
+                    descriptor: &row.descriptor,
+                    threshold: 3,
+                    signer_count: 3,
+                    federation_snapshot: &snapshot,
+                    wallet_handle: &row.daemon_wallet_name,
+                    blinding_key: Some(&row.master_blinding_key),
+                },
+            )
+            .await
+            .ok();
+        }
+
         Ok(UserElementsWallet {
             user_id,
             wallet_id: row.id,
@@ -314,6 +343,7 @@ impl ElementsWalletManager {
             descriptor: row.descriptor,
             daemon_wallet_name: row.daemon_wallet_name,
             signers: signers_arc,
+            federation_version_count: usize::try_from(version_count.max(1)).unwrap_or(1),
             rpc: self.rpc.clone(),
             pool: self.pool.clone(),
         })
@@ -367,6 +397,8 @@ pub struct UserElementsWallet {
     descriptor: String,
     daemon_wallet_name: String,
     signers: crate::hsm::UserSigners,
+    /// Number of historical federation versions for this wallet.
+    federation_version_count: usize,
     rpc: Arc<ElementsRpc>,
     pool: PgPool,
 }
@@ -391,6 +423,10 @@ impl UserElementsWallet {
 
     pub fn descriptor(&self) -> &str {
         &self.descriptor
+    }
+
+    pub fn federation_version_count(&self) -> usize {
+        self.federation_version_count
     }
 
     pub async fn tip_height(&self) -> Result<u64, ElementsWalletError> {
