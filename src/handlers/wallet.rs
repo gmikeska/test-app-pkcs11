@@ -171,6 +171,7 @@ pub struct FederationHistoryView {
     pub descriptor_short: String,
     pub created_at: String,
     pub is_current: bool,
+    pub migration_status: String,
 }
 
 /// Row for the recent-transactions table on the send tab.
@@ -514,6 +515,7 @@ pub async fn federation(
                 descriptor_short: truncate_descriptor(&v.descriptor, 40),
                 created_at: v.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
                 is_current,
+                migration_status: v.migration_status.clone(),
             }
         })
         .collect();

@@ -1,0 +1,112 @@
+# Federation Change Configuration
+# ================================
+#
+# This file describes a federation membership change and the strategy for
+# migrating funds from old federation addresses to the new one.
+#
+# A federation change is an infrastructure-level operation: the HSM pool
+# and threshold change affects every account index simultaneously. The
+# migration tool discovers all active accounts from the database and
+# applies the new federation across all of them — there is no per-user
+# or per-account configuration.
+#
+# Usage:
+#   cargo run --example federation_migration -- --config examples/federation_change.example.toml
+#
+# The tool reads this file alongside the same .env used by the web app
+# (HSM tokens, database, RPC endpoints). It walks you through each step
+# with a confirmation prompt before anything irreversible happens.
+
+# ---------------------------------------------------------------------------
+# New federation
+# ---------------------------------------------------------------------------
+[federation]
+
+# Threshold for the new federation (m in m-of-n).
+# This example keeps a 3-of-3 policy while rotating one signer.
+threshold = 3
+
+# Signers in the new federation, listed by their HSM token label.
+# These labels must match APP_HSM_{N}_LABEL values from your .env file.
+# The tool validates that every listed token was discovered at startup.
+#
+# This example rotates from [app-1, app-2, app-3] to [app-1, app-3, app-4]:
+# HSM #2 is removed, HSM #4 is added, threshold stays at 3-of-3.
+signers = [
+    "asterism-pkcs11-app-1",
+    "asterism-pkcs11-app-3",
+    "asterism-pkcs11-app-4",
+]
+
+# ---------------------------------------------------------------------------
+# Migration strategy
+# ---------------------------------------------------------------------------
+[migration]
+
+# How to sweep funds from old federation addresses to the new federation.
+#
+# Single-account strategies (operate within one account):
+#
+#   "consolidation"        - All UTXOs into a single output at the new
+#                            federation's first receive address. Best for
+#                            simple treasuries with a single pooled balance.
+#
+#   "address-for-address"  - Each old derived address maps to a corresponding
+#                            new derived address at the same index. Preserves
+#                            per-address segregation within a single account.
+#
+#   "batched"              - Like consolidation, but splits into multiple
+#                            transactions with at most `max_inputs_per_tx`
+#                            inputs each. For large UTXO sets.
+#
+# Multi-account strategies (operate across all account indices):
+#
+#   "account-for-account"  - All accounts swept in a SINGLE transaction.
+#                            Inputs from every account index, one output per
+#                            account at the matching index in the new
+#                            federation. Maximum fee efficiency. Best when
+#                            on-chain common-ownership disclosure is acceptable
+#                            (institutional custody).
+#
+#   "account-for-account-batched"
+#                          - One transaction PER account by default, giving
+#                            each account an independently verifiable on-chain
+#                            migration. Accounts with balances below
+#                            `small_account_threshold` are bundled into a
+#                            single transaction (outputs still account-
+#                            segregated). RECOMMENDED DEFAULT for exchanges
+#                            and fund managers — balances audit/compliance
+#                            needs against fee efficiency for small accounts.
+#
+strategy = "account-for-account-batched"
+
+# Only used when strategy = "batched". Maximum inputs per sweep transaction.
+# max_inputs_per_tx = 50
+
+# Only used when strategy = "account-for-account-batched".
+# Accounts with a total balance below this threshold (in satoshis) are
+# bundled into a single "small accounts" sweep transaction instead of
+# getting their own individual transaction. Outputs in the bundled
+# transaction are still account-segregated — each small account gets its
+# own output at the correct account index.
+# small_account_threshold = 100000
+
+# Fee rate in sat/vB for the sweep transactions.
+# The tool shows fee estimates before asking for confirmation.
+fee_rate_sat_per_vb = 2
+
+# ---------------------------------------------------------------------------
+# Elements (optional)
+# ---------------------------------------------------------------------------
+[elements]
+
+# Whether to also migrate the Elements wallet alongside the Bitcoin wallet.
+# When true, the tool performs the same federation change on the Elements
+# side, including creating a new daemon watch-only wallet.
+enabled = true
+
+# Whether to rotate the SLIP-77 master blinding key for the new federation.
+# Rotating prevents signers removed from the federation from deriving
+# blinding keys for future transactions (since backup bundles contain the
+# blinding key). Set to false if you need accounting continuity.
+rotate_blinding_key = false

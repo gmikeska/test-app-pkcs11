@@ -12,18 +12,6 @@
 //! 7. Eager-seed wallets for `test1/2/3`.
 //! 8. Build the router and serve on `APP_HOST:APP_PORT`.
 
-mod auth;
-mod config;
-mod db;
-mod elements_rpc;
-mod elements_wallet;
-mod error;
-mod handlers;
-mod hsm;
-mod models;
-mod state;
-mod wallet;
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -44,11 +32,12 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
-use crate::config::AppConfig;
-use crate::elements_wallet::ElementsWalletManager;
-use crate::hsm::HsmFleet;
-use crate::state::AppState;
-use crate::wallet::WalletManager;
+use test_app_pkcs11::config::AppConfig;
+use test_app_pkcs11::elements_wallet::ElementsWalletManager;
+use test_app_pkcs11::hsm::HsmFleet;
+use test_app_pkcs11::state::AppState;
+use test_app_pkcs11::wallet::WalletManager;
+use test_app_pkcs11::{auth, db, handlers};
 
 #[allow(clippy::too_many_lines)]
 #[tokio::main]

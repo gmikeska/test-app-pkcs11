@@ -101,5 +101,6 @@ pub struct FederationVersionRow {
     pub federation_snapshot: serde_json::Value,
     pub wallet_handle: String,
     pub blinding_key: Option<String>,
+    pub migration_status: String,
     pub created_at: DateTime<Utc>,
 }

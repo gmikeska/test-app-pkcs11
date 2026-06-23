@@ -287,7 +287,7 @@ impl WalletManager {
 
     /// Compute the BIP-48 derivation path for `account_idx` given the
     /// configured coin index.
-    fn derivation_path_for(&self, account_idx: u32) -> Result<DerivationPath, WalletError> {
+    pub fn derivation_path_for(&self, account_idx: u32) -> Result<DerivationPath, WalletError> {
         let parts = [
             bitcoin::bip32::ChildNumber::from_hardened_idx(48)
                 .map_err(|e| WalletError::Sign(format!("48': {e}")))?,

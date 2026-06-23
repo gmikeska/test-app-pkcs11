@@ -440,7 +440,7 @@ pub async fn insert_federation_version(
          ON CONFLICT (wallet_id, version_index) WHERE wallet_id IS NOT NULL DO NOTHING \
          RETURNING id, wallet_id, elements_wallet_id, version_index, descriptor, \
                    threshold, signer_count, federation_snapshot, wallet_handle, \
-                   blinding_key, created_at",
+                   blinding_key, migration_status, created_at",
     )
     .bind(spec.wallet_id)
     .bind(spec.elements_wallet_id)
@@ -462,7 +462,7 @@ pub async fn list_federation_versions_for_wallet(
     sqlx::query_as::<_, FederationVersionRow>(
         "SELECT id, wallet_id, elements_wallet_id, version_index, descriptor, \
                 threshold, signer_count, federation_snapshot, wallet_handle, \
-                blinding_key, created_at \
+                blinding_key, migration_status, created_at \
          FROM federation_versions WHERE wallet_id = $1 \
          ORDER BY version_index ASC",
     )
@@ -478,7 +478,7 @@ pub async fn list_federation_versions_for_elements_wallet(
     sqlx::query_as::<_, FederationVersionRow>(
         "SELECT id, wallet_id, elements_wallet_id, version_index, descriptor, \
                 threshold, signer_count, federation_snapshot, wallet_handle, \
-                blinding_key, created_at \
+                blinding_key, migration_status, created_at \
          FROM federation_versions WHERE elements_wallet_id = $1 \
          ORDER BY version_index ASC",
     )
@@ -511,4 +511,49 @@ pub async fn federation_version_count_for_elements_wallet(
     .fetch_one(pool)
     .await?;
     Ok(count.unwrap_or(0))
+}
+
+pub async fn update_migration_status(
+    pool: &PgPool,
+    version_id: Uuid,
+    status: &str,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE federation_versions SET migration_status = $1 WHERE id = $2")
+        .bind(status)
+        .bind(version_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_pending_migration_for_older_versions(
+    pool: &PgPool,
+    wallet_id: Uuid,
+    current_version_index: i32,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE federation_versions \
+         SET migration_status = 'pending' \
+         WHERE wallet_id = $1 AND version_index < $2 \
+           AND migration_status = 'not_applicable'",
+    )
+    .bind(wallet_id)
+    .bind(current_version_index)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn has_in_progress_migration(
+    pool: &PgPool,
+    wallet_id: Uuid,
+) -> sqlx::Result<bool> {
+    let count: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM federation_versions \
+         WHERE wallet_id = $1 AND migration_status = 'in_progress'",
+    )
+    .bind(wallet_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(count.unwrap_or(0) > 0)
 }

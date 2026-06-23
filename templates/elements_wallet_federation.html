@@ -56,6 +56,21 @@
 
         <dt>Created</dt>
         <dd>{{ v.created_at }}</dd>
+
+        {% if !v.is_current %}
+        <dt>Migration</dt>
+        <dd>
+          {% if v.migration_status == "complete" %}
+            <span class="badge">complete</span>
+          {% else if v.migration_status == "pending" %}
+            <span class="badge regtest">pending</span>
+          {% else if v.migration_status == "in_progress" %}
+            <span class="badge regtest">in progress</span>
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+        </dd>
+        {% endif %}
       </dl>
     </div>
   {% endfor %}
