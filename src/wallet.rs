@@ -428,7 +428,17 @@ impl WalletManager {
                 .map_err(|e| WalletError::CreateWallet(e.to_string()));
         }
 
-        // Reconstruct from stored versions: the first version initializes
+        if versions.len() == 1 {
+            // Single stored version — this is the common pre-federation-change
+            // case. Use the live current_federation directly rather than
+            // attempting reconstruction (which requires signer discovery from
+            // Phase 3 of the federation-changes plan).
+            let metadata_wallet = Self::create_metadata_wallet(current_federation, self.network)?;
+            return BtcFederatedWallet::new(current_federation.clone(), metadata_wallet)
+                .map_err(|e| WalletError::CreateWallet(e.to_string()));
+        }
+
+        // Multi-version reconstruction: the first version initializes
         // the FederatedWallet, subsequent versions are chained via
         // with_federation(). Each version creates its own metadata wallet
         // from the stored descriptor.
