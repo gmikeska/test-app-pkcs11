@@ -330,7 +330,10 @@ impl WalletManager {
     ///
     /// # Errors
     /// See [`WalletError`].
-    pub async fn load_wallet_from_row(&self, row: WalletRow) -> Result<Arc<UserWallet>, WalletError> {
+    pub async fn load_wallet_from_row(
+        &self,
+        row: WalletRow,
+    ) -> Result<Arc<UserWallet>, WalletError> {
         let user_id = row.user_id;
         if let Some(uw) = self.cache.lock().await.get(&user_id).cloned() {
             return Ok(uw);

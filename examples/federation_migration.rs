@@ -460,7 +460,10 @@ fn display_sweep_plan(
     if let Some(idx) = fee_account_idx
         && let Some(fee_acct) = accounts.iter().find(|a| a.account_idx == idx as i32)
     {
-        let post_fee = fee_acct.balance.checked_sub(plan.total_fees).unwrap_or(Amount::ZERO);
+        let post_fee = fee_acct
+            .balance
+            .checked_sub(plan.total_fees)
+            .unwrap_or(Amount::ZERO);
         println!();
         println!(
             "  Fee account balance: {} → {} (debit: ~{} sat)",
@@ -731,9 +734,7 @@ async fn main() {
             };
             let new_signers: Vec<NetworkPatchedSigner> = new_signer_indices
                 .iter()
-                .map(|&idx| {
-                    NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network)
-                })
+                .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
                 .collect();
 
             let new_fed = match asterism_core::Federation::new(
@@ -832,13 +833,21 @@ async fn main() {
         println!();
         println!(
             "  Accounts to migrate:  {}",
-            account_summaries.iter().filter(|a| a.balance > Amount::ZERO).count()
+            account_summaries
+                .iter()
+                .filter(|a| a.balance > Amount::ZERO)
+                .count()
         );
         println!("  Total balance:        {total_balance}");
         println!("  Strategy:             {}", cfg.migration.strategy);
-        println!("  Fee rate:             {} sat/vB", cfg.migration.fee_rate_sat_per_vb);
+        println!(
+            "  Fee rate:             {} sat/vB",
+            cfg.migration.fee_rate_sat_per_vb
+        );
         if let Some(idx) = fee_account_idx
-            && let Some(fee_acct) = account_summaries.iter().find(|a| a.account_idx == idx as i32)
+            && let Some(fee_acct) = account_summaries
+                .iter()
+                .find(|a| a.account_idx == idx as i32)
         {
             println!("  Fee account ({idx}):      {}", fee_acct.balance);
         }
@@ -904,14 +913,15 @@ async fn main() {
             }
         };
 
-        let versions =
-            match db::list_federation_versions_for_wallet(&pool, wallet.wallet_id()).await {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("error: failed to list federation versions for account {acct_idx}: {e}");
-                    std::process::exit(1);
-                }
-            };
+        let versions = match db::list_federation_versions_for_wallet(&pool, wallet.wallet_id())
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: failed to list federation versions for account {acct_idx}: {e}");
+                std::process::exit(1);
+            }
+        };
         let new_version_index = i32::try_from(versions.len()).unwrap_or(0);
 
         let descriptor_str = asterism_core::descriptor::to_multipath_string(
@@ -955,9 +965,7 @@ async fn main() {
         )
         .await
         {
-            eprintln!(
-                "warning: failed to update migration status for account {acct_idx}: {e}"
-            );
+            eprintln!("warning: failed to update migration status for account {acct_idx}: {e}");
         }
 
         println!(
@@ -1037,9 +1045,7 @@ async fn main() {
             };
             let new_signers: Vec<NetworkPatchedSigner> = new_signer_indices
                 .iter()
-                .map(|&idx| {
-                    NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network)
-                })
+                .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
                 .collect();
 
             let new_fed = match asterism_core::Federation::new(
@@ -1102,17 +1108,11 @@ async fn main() {
             match db::list_federation_versions_for_wallet(&pool, wallet.wallet_id()).await {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!(
-                        "warning: failed to list versions for account {acct_idx}: {e}"
-                    );
+                    eprintln!("warning: failed to list versions for account {acct_idx}: {e}");
                     continue;
                 }
             };
-        let max_version = versions
-            .iter()
-            .map(|v| v.version_index)
-            .max()
-            .unwrap_or(0);
+        let max_version = versions.iter().map(|v| v.version_index).max().unwrap_or(0);
         for v in &versions {
             if v.version_index < max_version {
                 let _ = db::update_migration_status(&pool, v.id, "complete").await;
@@ -1152,10 +1152,7 @@ async fn main() {
         cfg.federation.threshold,
         cfg.federation.signers.len()
     );
-    println!(
-        "    Accounts migrated: {}",
-        user_wallets.len()
-    );
+    println!("    Accounts migrated: {}", user_wallets.len());
     println!();
     println!("  Restart the web app to pick up the new federation.");
 }
