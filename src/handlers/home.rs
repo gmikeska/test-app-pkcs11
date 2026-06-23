@@ -36,11 +36,13 @@ pub async fn root(
 }
 
 /// `GET /wallet` — redirect to `/wallet/receive`.
+#[allow(clippy::unused_async)]
 pub async fn wallet_root() -> Response {
     Redirect::to("/wallet/receive").into_response()
 }
 
 /// `GET /elements/wallet` — redirect to `/elements/wallet/receive`.
+#[allow(clippy::unused_async)]
 pub async fn elements_wallet_root() -> Response {
     Redirect::to("/elements/wallet/receive").into_response()
 }

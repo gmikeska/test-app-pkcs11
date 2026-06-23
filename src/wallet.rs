@@ -80,6 +80,7 @@ impl NetworkPatchedSigner {
     }
 
     /// Borrow the inner [`Pkcs11Signer`].
+    #[must_use]
     #[allow(dead_code)]
     pub fn inner(&self) -> &Pkcs11Signer {
         &self.inner

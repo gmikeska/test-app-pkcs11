@@ -4,6 +4,12 @@
 //! (`examples/federation_migration.rs`, etc.) import these modules
 //! through the library crate.
 
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::module_name_repetitions
+)]
+
 pub mod auth;
 pub mod config;
 pub mod db;

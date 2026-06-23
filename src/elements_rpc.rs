@@ -23,6 +23,7 @@ pub struct ElementsRpc {
 }
 
 impl ElementsRpc {
+    #[must_use]
     pub fn new(base_url: &str, user: &str, password: &str) -> Self {
         Self {
             base_url: base_url.to_string(),

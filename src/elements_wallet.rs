@@ -407,26 +407,32 @@ pub struct UserElementsWallet {
 
 #[allow(dead_code)]
 impl UserElementsWallet {
+    #[must_use]
     pub fn user_id(&self) -> Uuid {
         self.user_id
     }
 
+    #[must_use]
     pub fn wallet_id(&self) -> Uuid {
         self.wallet_id
     }
 
+    #[must_use]
     pub fn network(&self) -> ElementsNetwork {
         self.network
     }
 
+    #[must_use]
     pub fn account_idx(&self) -> i32 {
         self.account_idx
     }
 
+    #[must_use]
     pub fn descriptor(&self) -> &str {
         &self.descriptor
     }
 
+    #[must_use]
     pub fn federation_version_count(&self) -> usize {
         self.federation_version_count
     }
