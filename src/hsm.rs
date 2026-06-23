@@ -1,4 +1,4 @@
-//! [`HsmFleet`] — manager for the federation HSMs backing every user wallet.
+//! [`HsmFleet`] — manager for the federation HSMs backing every wallet.
 //!
 //! ## Token initialization
 //!
@@ -6,11 +6,11 @@
 //! for each discovered token. The helper is idempotent — already
 //! initialized tokens are left alone.
 //!
-//! ## Per-user signer derivation
+//! ## Per-signer derivation
 //!
 //! Each customer's BIP-48 federation lives on the same set of tokens, but
-//! at a different *Asterism label*: `user-{short_id}`. The first time
-//! [`HsmFleet::signers_for`] is called for a user, the fleet opens
+//! at a different *Asterism label*: `signer-{uuid}`. The first time
+//! [`HsmFleet::signers_for`] is called for a signer ID, the fleet opens
 //! authenticated sessions and either:
 //!
 //! 1. Loads pre-existing keys (`Pkcs11Signer::load`) if the master has
@@ -25,8 +25,8 @@
 //! `Network::Regtest`).
 //!
 //! Cloned [`Pkcs11Signer`]s share the inner `Arc<Mutex<...>>`, so caching
-//! per user keeps the open session count to
-//! `n × distinct users with cached wallets` instead of growing unbounded.
+//! per signer keeps the open session count to
+//! `n × distinct signers with cached wallets` instead of growing unbounded.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,29 +62,28 @@ pub enum HsmError {
     },
 }
 
-/// A user-scoped set of [`Pkcs11Signer`]s — one per HSM token — that
-/// together form the user's federation.
+/// A set of [`Pkcs11Signer`]s — one per HSM token — that together form
+/// the signer's federation contribution.
 ///
 /// `Arc`'d so it can be cheaply cloned to handlers without duplicating
 /// sessions.
-pub type UserSigners = Arc<Vec<Pkcs11Signer>>;
+pub type SignerSet = Arc<Vec<Pkcs11Signer>>;
 
-/// Owns the federation HSMs: token labels/PINs, plus a per-user signer
-/// cache.
+/// Owns the federation HSMs: token labels/PINs, plus a per-signer cache.
 pub struct HsmFleet {
     library_path: std::path::PathBuf,
     network: Network,
     tokens: Vec<HsmTokenConfig>,
-    cache: AsyncMutex<HashMap<Uuid, UserSigners>>,
+    cache: AsyncMutex<HashMap<Uuid, SignerSet>>,
 }
 
-#[allow(dead_code)] // `network`/`evict`/`delete_keys_for_user` are dev/debug entry points
+#[allow(dead_code)]
 impl HsmFleet {
     /// Initialize the fleet:
     ///
     /// 1. Verify `PKCS11_LIB` exists.
     /// 2. Run `init_dev_token` for each discovered token (idempotent).
-    /// 3. Stash configuration; defer session opening to first per-user use.
+    /// 3. Stash configuration; defer session opening to first per-signer use.
     ///
     /// # Errors
     /// - [`HsmError::LibraryMissing`] if `PKCS11_LIB` doesn't exist.
@@ -118,66 +117,56 @@ impl HsmFleet {
         self.network
     }
 
-    /// Build the Asterism-namespace label this fleet uses for `user_id`.
-    /// Stable, short (8 hex chars of the UUID), and matches the
-    /// on-token namespace `asterism/v1/{label}/{priv,policy,sigrate}`.
+    /// Build the Asterism-namespace label this fleet uses for `signer_id`.
+    /// Matches the on-token namespace `asterism/v1/{label}/{priv,policy,sigrate}`.
     #[must_use]
-    pub fn user_label(user_id: Uuid) -> String {
-        let s = user_id.simple().to_string();
-        format!("user-{}", &s[..8])
+    pub fn signer_label(signer_id: Uuid) -> String {
+        format!("signer-{signer_id}")
     }
 
-    /// Retrieve (or lazily build) the user's [`Pkcs11Signer`]s.
+    /// Retrieve (or lazily build) the [`Pkcs11Signer`]s for `signer_id`.
     ///
     /// Cache-miss path opens sessions in series (one per token),
     /// and either loads pre-existing keys or derives a fresh master via
     /// the dev shim. Each call after that hits the cache.
     ///
-    /// Concurrent first-use calls for the same user race the cache
-    /// mutex; whichever wins runs the derivation, the rest see the
-    /// cached result.
-    ///
     /// # Errors
     /// Surfaces every PKCS#11-layer failure (`HsmError::Pkcs11`).
     pub async fn signers_for(
         &self,
-        user_id: Uuid,
+        signer_id: Uuid,
         derivation_path: &DerivationPath,
-    ) -> Result<UserSigners, HsmError> {
-        if let Some(signers) = self.cache.lock().await.get(&user_id).cloned() {
+    ) -> Result<SignerSet, HsmError> {
+        if let Some(signers) = self.cache.lock().await.get(&signer_id).cloned() {
             return Ok(signers);
         }
 
-        let label = Self::user_label(user_id);
+        let label = Self::signer_label(signer_id);
         let library_path = self.library_path.clone();
         let network = self.network;
         let tokens = self.tokens.clone();
         let path_owned = derivation_path.clone();
 
-        // Session open + master derive call into cryptoki, which is
-        // synchronous and will block the runtime if held on a regular
-        // tokio worker. Off-load to spawn_blocking so concurrent web
-        // requests aren't stalled.
         let signers = tokio::task::spawn_blocking(move || {
-            derive_user_signers(&library_path, network, &tokens, &label, &path_owned)
+            derive_signers(&library_path, network, &tokens, &label, &path_owned)
         })
         .await
-        .expect("derive_user_signers join")?;
+        .expect("derive_signers join")?;
 
-        let arc: UserSigners = Arc::new(signers);
+        let arc: SignerSet = Arc::new(signers);
         let mut cache = self.cache.lock().await;
-        Ok(cache.entry(user_id).or_insert(arc).clone())
+        Ok(cache.entry(signer_id).or_insert(arc).clone())
     }
 
-    /// Drop the cached signer triple for `user_id` (closing its three
-    /// sessions when the last clone is released). Useful for tests and
-    /// debugging; never invoked by the regular request flow.
-    pub async fn evict(&self, user_id: Uuid) {
-        self.cache.lock().await.remove(&user_id);
+    /// Drop the cached signer set for `signer_id` (closing its sessions
+    /// when the last clone is released). Useful for tests and debugging;
+    /// never invoked by the regular request flow.
+    pub async fn evict(&self, signer_id: Uuid) {
+        self.cache.lock().await.remove(&signer_id);
     }
 
-    /// Permanently delete every Asterism-namespace object for `user_id`
-    /// from each of the three tokens, and evict any cached triple.
+    /// Permanently delete every Asterism-namespace object for `signer_id`
+    /// from each token, and evict any cached set.
     ///
     /// Used by tests and by future "reset wallet" flows. Fresh sessions
     /// are opened just for the deletion to avoid contending on a
@@ -185,16 +174,16 @@ impl HsmFleet {
     ///
     /// # Errors
     /// Surfaces every PKCS#11-layer failure (`HsmError::Pkcs11`).
-    pub async fn delete_keys_for_user(&self, user_id: Uuid) -> Result<(), HsmError> {
-        let label = Self::user_label(user_id);
+    pub async fn delete_keys(&self, signer_id: Uuid) -> Result<(), HsmError> {
+        let label = Self::signer_label(signer_id);
         let library_path = self.library_path.clone();
         let tokens = self.tokens.clone();
         let label_clone = label.clone();
-        tokio::task::spawn_blocking(move || delete_keys(&library_path, &tokens, &label_clone))
+        tokio::task::spawn_blocking(move || delete_key_objects(&library_path, &tokens, &label_clone))
             .await
-            .expect("delete_keys join")?;
-        self.evict(user_id).await;
-        tracing::info!(%user_id, %label, "deleted user HSM keys");
+            .expect("delete_key_objects join")?;
+        self.evict(signer_id).await;
+        tracing::info!(%signer_id, %label, "deleted signer HSM keys");
         Ok(())
     }
 }
@@ -203,7 +192,7 @@ impl HsmFleet {
 // Sync helpers (run on spawn_blocking)
 // ---------------------------------------------------------------------------
 
-fn derive_user_signers(
+fn derive_signers(
     library_path: &std::path::Path,
     network: Network,
     tokens: &[HsmTokenConfig],
@@ -252,8 +241,7 @@ fn derive_user_signers(
     Ok(out)
 }
 
-#[allow(dead_code)] // invoked from `delete_keys_for_user`
-fn delete_keys(
+fn delete_key_objects(
     library_path: &std::path::Path,
     tokens: &[HsmTokenConfig],
     label: &str,
@@ -263,8 +251,6 @@ fn delete_keys(
             library_path,
             SlotIdentifier::label(&token.label),
             token.pin.clone(),
-            // Derivation path is irrelevant for deletion — the helper
-            // touches only object handles already on the token.
             DerivationPath::default(),
             Box::new(DevBackend),
         );

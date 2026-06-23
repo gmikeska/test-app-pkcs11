@@ -549,19 +549,14 @@ fn build_signer_views(
     federation
         .signers()
         .iter()
-        .map(|s| {
+        .enumerate()
+        .map(|(i, s)| {
             let id_str = s.id().as_str().to_string();
-            let label = s
-                .label()
-                .map(String::from)
-                .or_else(|| {
-                    state
-                        .config
-                        .hsm_tokens
-                        .iter()
-                        .find(|t| t.label == id_str)
-                        .map(|t| t.label.clone())
-                })
+            let label = state
+                .config
+                .hsm_tokens
+                .get(i)
+                .map(|t| t.label.clone())
                 .unwrap_or_default();
             SignerView { id: id_str, label }
         })

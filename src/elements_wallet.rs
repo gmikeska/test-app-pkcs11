@@ -400,7 +400,7 @@ pub struct UserElementsWallet {
     network: ElementsNetwork,
     descriptor: String,
     daemon_wallet_name: String,
-    signers: crate::hsm::UserSigners,
+    signers: crate::hsm::SignerSet,
     /// Number of historical federation versions for this wallet.
     federation_version_count: usize,
     rpc: Arc<ElementsRpc>,
