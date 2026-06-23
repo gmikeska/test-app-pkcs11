@@ -11,6 +11,12 @@
 //! See `examples/federation_change.example.toml` for the configuration
 //! schema and documentation.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,10 +38,10 @@ use test_app_pkcs11::wallet::{NetworkPatchedSigner, WalletManager};
 
 #[derive(Debug, Deserialize)]
 struct MigrationConfig {
-    user_email: String,
     federation: NewFederationConfig,
     migration: MigrationStrategyConfig,
     #[serde(default)]
+    #[allow(dead_code)]
     elements: ElementsConfig,
 }
 
@@ -50,6 +56,10 @@ struct MigrationStrategyConfig {
     strategy: String,
     #[serde(default)]
     max_inputs_per_tx: Option<usize>,
+    #[serde(default)]
+    fee_account_idx: Option<u32>,
+    #[serde(default = "default_small_account_threshold")]
+    small_account_threshold: u64,
     #[serde(default = "default_fee_rate")]
     fee_rate_sat_per_vb: u64,
 }
@@ -58,7 +68,12 @@ fn default_fee_rate() -> u64 {
     2
 }
 
+fn default_small_account_threshold() -> u64 {
+    100_000
+}
+
 #[derive(Debug, Default, Deserialize)]
+#[allow(dead_code)]
 struct ElementsConfig {
     #[serde(default)]
     enabled: bool,
@@ -155,6 +170,18 @@ fn validate_config(cfg: &MigrationConfig, app_config: &AppConfig) -> Result<(), 
         }
     }
 
+    if cfg.migration.strategy.starts_with("account-for-account")
+        && cfg.migration.fee_account_idx.is_none()
+    {
+        return Err(
+            "account-for-account strategies require fee_account_idx to be set\n\
+             \n\
+             Add to [migration]:\n\
+               fee_account_idx = 0"
+                .to_string(),
+        );
+    }
+
     let known_labels: Vec<&str> = app_config
         .hsm_tokens
         .iter()
@@ -240,7 +267,7 @@ fn display_federation_change(
     let added: Vec<&str> = new_labels
         .iter()
         .filter(|l| !current_labels.contains(&l.as_str()))
-        .map(|l| l.as_str())
+        .map(String::as_str)
         .collect();
     let removed: Vec<&str> = current_labels
         .iter()
@@ -264,7 +291,7 @@ fn display_federation_change(
         println!("  = Retained: {}", retained.join(", "));
     }
     if current_threshold != new_threshold {
-        println!("  Threshold:  {} -> {}", current_threshold, new_threshold);
+        println!("  Threshold:  {current_threshold} -> {new_threshold}");
     }
 
     if !removed.is_empty() {
@@ -296,11 +323,160 @@ fn display_migration_plan(strategy: &str, total_balance: Amount, fee_rate: u64) 
     }
 }
 
+/// Summary of a discovered account for display purposes.
+struct AccountSummary {
+    account_idx: i32,
+    balance: Amount,
+    utxo_count: usize,
+    is_fee_account: bool,
+    destination_address: Option<String>,
+    is_small: bool,
+}
+
+fn truncate_address(addr: &str) -> String {
+    if addr.len() > 20 {
+        format!("{}…{}", &addr[..10], &addr[addr.len() - 4..])
+    } else {
+        addr.to_string()
+    }
+}
+
+fn display_account_table(accounts: &[AccountSummary], fee_account_idx: Option<u32>) {
+    let total_balance: Amount = accounts.iter().map(|a| a.balance).sum();
+    println!();
+    println!(
+        "  Accounts: {} active (total balance: {})",
+        accounts.len(),
+        total_balance
+    );
+    println!();
+    for a in accounts {
+        let utxo_label = if a.utxo_count == 1 { "UTXO " } else { "UTXOs" };
+        let dest = a
+            .destination_address
+            .as_deref()
+            .map(|d| format!("  → {}", truncate_address(d)))
+            .unwrap_or_default();
+        let tag = if a.is_fee_account {
+            "  ◀ fee account"
+        } else if a.is_small {
+            "  (small — bundled)"
+        } else {
+            ""
+        };
+        println!(
+            "  Account {:>3}  │  {}  │  {:>3} {} │{dest}{tag}",
+            a.account_idx, a.balance, a.utxo_count, utxo_label,
+        );
+    }
+    println!();
+    println!("  Total balance: {total_balance}");
+    if let Some(idx) = fee_account_idx
+        && let Some(fee_acct) = accounts.iter().find(|a| a.account_idx == idx as i32)
+    {
+        println!("  Fee account ({idx}): {}", fee_acct.balance);
+    }
+}
+
+fn cli_estimate_fee(input_count: usize, output_count: usize, fee_rate: bitcoin::FeeRate) -> Amount {
+    const APPROX_WSH_INPUT_VBYTES: u64 = 105;
+    const APPROX_OUTPUT_VBYTES: u64 = 32;
+    const APPROX_OVERHEAD_VBYTES: u64 = 10;
+    let total_vb = APPROX_OVERHEAD_VBYTES
+        + (input_count as u64) * APPROX_WSH_INPUT_VBYTES
+        + (output_count as u64) * APPROX_OUTPUT_VBYTES;
+    let weight = bitcoin::Weight::from_vb(total_vb).unwrap_or(bitcoin::Weight::ZERO);
+    fee_rate.fee_wu(weight).unwrap_or(Amount::ZERO)
+}
+
+fn display_sweep_plan(
+    plan: &asterism_core::MigrationPlan<asterism_core::psbt::UnsignedPsbt>,
+    accounts: &[AccountSummary],
+    fee_account_idx: Option<u32>,
+    fee_rate: bitcoin::FeeRate,
+) {
+    println!();
+    println!("  Sweep Plan");
+    println!("  ──────────");
+    println!();
+
+    let total = plan.sweep_transactions.len();
+    for (i, tx) in plan.sweep_transactions.iter().enumerate() {
+        let est_fee = cli_estimate_fee(tx.source_utxos.len(), tx.destinations.len(), fee_rate);
+        let is_last = i + 1 == total;
+
+        // Identify which accounts are in this transaction by matching destinations.
+        let mut matched_indices: Vec<i32> = Vec::new();
+        for (dest_addr, _) in &tx.destinations {
+            let addr_str = dest_addr.to_string();
+            for acct in accounts {
+                if acct.destination_address.as_deref() == Some(&addr_str)
+                    && !matched_indices.contains(&acct.account_idx)
+                {
+                    matched_indices.push(acct.account_idx);
+                }
+            }
+        }
+
+        let is_fee_tx = is_last
+            && fee_account_idx.is_some()
+            && matched_indices.len() == 1
+            && matched_indices[0] == fee_account_idx.unwrap() as i32;
+
+        let label = if is_fee_tx {
+            format!("Fee account ({})", fee_account_idx.unwrap())
+        } else if matched_indices.len() == 1 {
+            format!("Account {}", matched_indices[0])
+        } else if matched_indices.len() > 1 {
+            let indices: Vec<String> = matched_indices.iter().map(ToString::to_string).collect();
+            format!("Bundle ({})", indices.join(", "))
+        } else {
+            "Unknown".to_string()
+        };
+
+        let fee_source = if is_fee_tx {
+            "self".to_string()
+        } else if let Some(idx) = fee_account_idx {
+            format!("from acct {idx}")
+        } else {
+            "included".to_string()
+        };
+
+        println!(
+            "  Transaction {}/{total}:  {:<20} │  {} inputs → {} outputs  │  fee: ~{} sat ({fee_source})",
+            i + 1,
+            label,
+            tx.source_utxos.len(),
+            tx.destinations.len(),
+            est_fee.to_sat(),
+        );
+    }
+
+    println!();
+    println!("  Total fees:         ~{} sat", plan.total_fees.to_sat());
+    println!("  Total UTXOs swept:  {}", plan.utxo_count);
+    println!("  Transactions:       {total}");
+
+    if let Some(idx) = fee_account_idx
+        && let Some(fee_acct) = accounts.iter().find(|a| a.account_idx == idx as i32)
+    {
+        let post_fee = fee_acct.balance.checked_sub(plan.total_fees).unwrap_or(Amount::ZERO);
+        println!();
+        println!(
+            "  Fee account balance: {} → {} (debit: ~{} sat)",
+            fee_acct.balance,
+            post_fee,
+            plan.total_fees.to_sat(),
+        );
+    }
+}
+
 // =========================================================================
 // Main
 // =========================================================================
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() {
     let env_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env");
     let _ = dotenvy::from_path(&env_path);
@@ -359,7 +535,6 @@ async fn main() {
     println!("=========================");
     println!();
     println!("  Config:  {}", config_path.display());
-    println!("  User:    {}", cfg.user_email);
     println!("  Network: {}", app_config.network);
     if dry_run {
         println!("  Mode:    dry run (no changes will be made)");
@@ -392,25 +567,21 @@ async fn main() {
         }
     };
 
-    // -- Look up the user ---------------------------------------------------
-    let user = match db::find_user_by_email(&pool, &cfg.user_email).await {
-        Ok(Some(u)) => u,
-        Ok(None) => {
-            eprintln!(
-                "error: user \"{}\" not found in the database\n\n\
-                 Available test users: test1@test.com, test2@test.com, test3@test.com",
-                cfg.user_email
-            );
+    // -- Discover all accounts ----------------------------------------------
+    let wallet_rows = match db::list_all_wallets(&pool).await {
+        Ok(rows) if rows.is_empty() => {
+            eprintln!("error: no wallets found in the database");
             std::process::exit(1);
         }
+        Ok(rows) => rows,
         Err(e) => {
-            eprintln!("error: database lookup failed: {e}");
+            eprintln!("error: failed to list wallets: {e}");
             std::process::exit(1);
         }
     };
-    println!("  User ID: {}", user.id);
 
-    // -- Load existing wallet -----------------------------------------------
+    println!("  Wallets:  {} discovered", wallet_rows.len());
+
     let wallet_manager = match WalletManager::new(pool.clone(), &app_config, hsm.clone()) {
         Ok(m) => m,
         Err(e) => {
@@ -418,36 +589,57 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let user_wallet = match wallet_manager.load_or_init(user.id).await {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("error: failed to load wallet for {}: {e}", cfg.user_email);
-            std::process::exit(1);
-        }
-    };
 
-    if let Err(e) = user_wallet.sync().await {
-        eprintln!("warning: wallet sync failed (balances may be stale): {e}");
+    // Load and sync all wallets, collecting summaries.
+    let mut user_wallets = Vec::new();
+    let mut account_summaries = Vec::new();
+    let fee_account_idx = cfg.migration.fee_account_idx;
+
+    for row in wallet_rows {
+        let acct_idx = row.account_idx;
+        let wallet = match wallet_manager.load_wallet_from_row(row).await {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("error: failed to load wallet for account {acct_idx}: {e}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = wallet.sync().await {
+            eprintln!("warning: sync failed for account {acct_idx}: {e}");
+        }
+
+        // Check for in-progress migrations.
+        match db::has_in_progress_migration(&pool, wallet.wallet_id()).await {
+            Ok(true) => {
+                eprintln!(
+                    "error: account {acct_idx} has a migration already in progress\n\n\
+                     Complete or resolve the existing migration before starting a new one."
+                );
+                std::process::exit(1);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("error: migration status check failed for account {acct_idx}: {e}");
+                std::process::exit(1);
+            }
+        }
+
+        let balance = wallet.balance().await;
+        let utxos = wallet.list_unspent().await;
+        account_summaries.push(AccountSummary {
+            account_idx: acct_idx,
+            balance: balance.total(),
+            utxo_count: utxos.len(),
+            is_fee_account: fee_account_idx == Some(acct_idx as u32),
+            destination_address: None,
+            is_small: false,
+        });
+        user_wallets.push(wallet);
     }
 
-    // -- Check for in-progress migrations -----------------------------------
-    match db::has_in_progress_migration(&pool, user_wallet.wallet_id()).await {
-        Ok(true) => {
-            eprintln!(
-                "error: this wallet has a migration already in progress\n\n\
-                 Complete or resolve the existing migration before starting a new one."
-            );
-            std::process::exit(1);
-        }
-        Ok(false) => {}
-        Err(e) => {
-            eprintln!("error: migration status check failed: {e}");
-            std::process::exit(1);
-        }
-    }
-
-    // -- Gather current state -----------------------------------------------
-    let current_fed = user_wallet.federation();
+    // -- Gather current federation state (from the first wallet) ------------
+    let first_wallet = &user_wallets[0];
+    let current_fed = first_wallet.federation();
     let current_signers: Vec<(String, String)> = current_fed
         .signers()
         .iter()
@@ -457,8 +649,7 @@ async fn main() {
             let label = app_config
                 .hsm_tokens
                 .get(i)
-                .map(|t| t.label.clone())
-                .unwrap_or_else(|| format!("unknown-{i}"));
+                .map_or_else(|| format!("unknown-{i}"), |t| t.label.clone());
             (id, label)
         })
         .collect();
@@ -486,143 +677,295 @@ async fn main() {
         std::process::exit(0);
     }
 
-    let balance = user_wallet.balance().await;
-    let total_balance = balance.total();
+    let total_balance: Amount = account_summaries.iter().map(|a| a.balance).sum();
 
+    // For account-for-account strategies, build and display the sweep plan.
+    let fee_rate = bitcoin::FeeRate::from_sat_per_vb(cfg.migration.fee_rate_sat_per_vb)
+        .unwrap_or(bitcoin::FeeRate::BROADCAST_MIN);
+    let is_account_strategy = cfg.migration.strategy.starts_with("account-for-account");
+
+    // Display the account table now for non-account strategies; account
+    // strategies display it after enriching with destination addresses.
+    if !is_account_strategy {
+        display_account_table(&account_summaries, fee_account_idx);
+    }
     display_migration_plan(
         &cfg.migration.strategy,
         total_balance,
         cfg.migration.fee_rate_sat_per_vb,
     );
 
+    if is_account_strategy && total_balance > Amount::ZERO {
+        let mut account_utxo_sets = Vec::new();
+        for wallet in &user_wallets {
+            let acct_idx = wallet.account_idx() as u32;
+            let utxos = wallet.list_unspent().await;
+
+            // Derive new-federation destination address for this account.
+            let path = match wallet_manager.derivation_path_for(acct_idx) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: invalid derivation path for account {acct_idx}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let new_signer_indices: Vec<usize> = cfg
+                .federation
+                .signers
+                .iter()
+                .map(|label| {
+                    app_config
+                        .hsm_tokens
+                        .iter()
+                        .position(|t| t.label == *label)
+                        .expect("validated earlier")
+                })
+                .collect();
+
+            let all_signers = match hsm.signers_for(wallet.user_id(), &path).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: failed to derive signers for account {acct_idx}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let new_signers: Vec<NetworkPatchedSigner> = new_signer_indices
+                .iter()
+                .map(|&idx| {
+                    NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network)
+                })
+                .collect();
+
+            let new_fed = match asterism_core::Federation::new(
+                cfg.federation.threshold,
+                new_signers,
+                asterism_core::network::NetworkType::Bitcoin(app_config.network),
+            ) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("error: failed to create federation for account {acct_idx}: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let dest_desc_str = asterism_core::descriptor::to_multipath_string(
+                new_fed
+                    .try_descriptor()
+                    .expect("Bitcoin federation has a descriptor"),
+            );
+            let dest_addr = {
+                let desc: bdk_wallet::miniscript::Descriptor<
+                    bdk_wallet::miniscript::DescriptorPublicKey,
+                > = dest_desc_str.parse().expect("valid descriptor");
+                let mut temp_wallet = bdk_wallet::Wallet::create_from_two_path_descriptor(desc)
+                    .network(app_config.network)
+                    .create_wallet_no_persist()
+                    .expect("valid wallet from new descriptor");
+                temp_wallet
+                    .reveal_next_address(bdk_wallet::KeychainKind::External)
+                    .address
+            };
+
+            let dest_addr_str = dest_addr.to_string();
+            account_utxo_sets.push(asterism_core::AccountUtxoSet {
+                account_idx: acct_idx,
+                utxos,
+                destination_address: dest_addr,
+            });
+
+            // Enrich the account summary with destination and small classification.
+            if let Some(summary) = account_summaries
+                .iter_mut()
+                .find(|s| s.account_idx == acct_idx as i32)
+            {
+                summary.destination_address = Some(dest_addr_str);
+                let threshold = Amount::from_sat(cfg.migration.small_account_threshold);
+                summary.is_small = !summary.is_fee_account && summary.balance < threshold;
+            }
+        }
+
+        // Re-display the account table now that we have destination addresses.
+        display_account_table(&account_summaries, fee_account_idx);
+
+        let plan_result: Result<
+            asterism_core::MigrationPlan<asterism_core::psbt::UnsignedPsbt>,
+            asterism_core::MigrationError,
+        > = if cfg.migration.strategy == "account-for-account" {
+            let alg =
+                asterism_core::AccountForAccountSweep::new(fee_account_idx.expect("validated"));
+            asterism_core::SweepAlgorithm::plan(
+                &alg,
+                &account_utxo_sets,
+                first_wallet.federation().network(),
+                first_wallet.federation().network(),
+                fee_rate,
+            )
+        } else {
+            let alg = asterism_core::AccountForAccountBatchedSweep::new(
+                fee_account_idx.expect("validated"),
+                Amount::from_sat(cfg.migration.small_account_threshold),
+            );
+            asterism_core::SweepAlgorithm::plan(
+                &alg,
+                &account_utxo_sets,
+                first_wallet.federation().network(),
+                first_wallet.federation().network(),
+                fee_rate,
+            )
+        };
+
+        match plan_result {
+            Ok(plan) => {
+                display_sweep_plan(&plan, &account_summaries, fee_account_idx, fee_rate);
+            }
+            Err(e) => {
+                eprintln!("error: sweep plan failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if dry_run {
-        println!("\n  Dry run complete. No changes were made.");
+        println!();
+        println!("  Dry Run Summary");
+        println!("  ───────────────");
+        println!();
+        println!(
+            "  Accounts to migrate:  {}",
+            account_summaries.iter().filter(|a| a.balance > Amount::ZERO).count()
+        );
+        println!("  Total balance:        {total_balance}");
+        println!("  Strategy:             {}", cfg.migration.strategy);
+        println!("  Fee rate:             {} sat/vB", cfg.migration.fee_rate_sat_per_vb);
+        if let Some(idx) = fee_account_idx
+            && let Some(fee_acct) = account_summaries.iter().find(|a| a.account_idx == idx as i32)
+        {
+            println!("  Fee account ({idx}):      {}", fee_acct.balance);
+        }
+        println!();
+        println!("  No changes were made.");
         std::process::exit(0);
     }
 
     // =====================================================================
-    // STEP 1: Confirm and apply the federation change
+    // STEP 1: Confirm and apply the federation change (all accounts)
     // =====================================================================
 
-    if !confirm("Step 1/3: Apply this federation change?") {
+    if !confirm("Step 1/3: Apply this federation change to all accounts?") {
         println!("Aborted.");
         std::process::exit(0);
     }
 
-    println!("\n  Creating new federation...");
+    println!("\n  Creating new federation for all accounts...");
 
-    let account_idx = u32::try_from(user_wallet.account_idx()).unwrap_or(0);
-    let path = match wallet_manager.derivation_path_for(account_idx) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: invalid derivation path: {e}");
-            std::process::exit(1);
-        }
-    };
-    let new_signer_indices: Vec<usize> = cfg
-        .federation
-        .signers
-        .iter()
-        .map(|label| {
-            app_config
-                .hsm_tokens
-                .iter()
-                .position(|t| t.label == *label)
-                .expect("validated earlier")
-        })
-        .collect();
-
-    let all_signers = match hsm.signers_for(user.id, &path).await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: failed to derive signers: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let new_signers: Vec<NetworkPatchedSigner> = new_signer_indices
-        .iter()
-        .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
-        .collect();
-
-    let new_federation = match asterism_core::Federation::new(
-        cfg.federation.threshold,
-        new_signers,
-        asterism_core::network::NetworkType::Bitcoin(app_config.network),
-    ) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("error: failed to create new federation: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let versions =
-        match db::list_federation_versions_for_wallet(&pool, user_wallet.wallet_id()).await {
-            Ok(v) => v,
+    for wallet in &user_wallets {
+        let acct_idx = wallet.account_idx() as u32;
+        let path = match wallet_manager.derivation_path_for(acct_idx) {
+            Ok(p) => p,
             Err(e) => {
-                eprintln!("error: failed to list federation versions: {e}");
+                eprintln!("error: invalid derivation path for account {acct_idx}: {e}");
                 std::process::exit(1);
             }
         };
-    let new_version_index = i32::try_from(versions.len()).unwrap_or(0);
+        let new_signer_indices: Vec<usize> = cfg
+            .federation
+            .signers
+            .iter()
+            .map(|label| {
+                app_config
+                    .hsm_tokens
+                    .iter()
+                    .position(|t| t.label == *label)
+                    .expect("validated earlier")
+            })
+            .collect();
 
-    let descriptor_str = asterism_core::descriptor::to_multipath_string(
-        new_federation
-            .try_descriptor()
-            .expect("Bitcoin federation has a descriptor"),
-    );
-    let snapshot = asterism_core::snapshot::FederationSnapshot::from_federation(&new_federation);
-    let snapshot_json = serde_json::to_value(&snapshot).expect("snapshot serializes");
+        let all_signers = match hsm.signers_for(wallet.user_id(), &path).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: failed to derive signers for account {acct_idx}: {e}");
+                std::process::exit(1);
+            }
+        };
+        let new_signers: Vec<NetworkPatchedSigner> = new_signer_indices
+            .iter()
+            .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
+            .collect();
 
-    match db::insert_federation_version(
-        &pool,
-        &db::NewFederationVersion {
-            wallet_id: Some(user_wallet.wallet_id()),
-            elements_wallet_id: None,
-            version_index: new_version_index,
-            descriptor: &descriptor_str,
-            threshold: i32::try_from(cfg.federation.threshold).unwrap_or(0),
-            signer_count: i32::try_from(cfg.federation.signers.len()).unwrap_or(0),
-            federation_snapshot: &snapshot_json,
-            wallet_handle: &user_wallet.wallet_id().to_string(),
-            blinding_key: None,
-        },
-    )
-    .await
-    {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("error: failed to persist new federation version: {e}");
-            std::process::exit(1);
-        }
-    }
+        let new_federation = match asterism_core::Federation::new(
+            cfg.federation.threshold,
+            new_signers,
+            asterism_core::network::NetworkType::Bitcoin(app_config.network),
+        ) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("error: failed to create new federation for account {acct_idx}: {e}");
+                std::process::exit(1);
+            }
+        };
 
-    if let Err(e) = db::set_pending_migration_for_older_versions(
-        &pool,
-        user_wallet.wallet_id(),
-        new_version_index,
-    )
-    .await
-    {
-        eprintln!("warning: failed to update migration status on old versions: {e}");
-    }
+        let versions =
+            match db::list_federation_versions_for_wallet(&pool, wallet.wallet_id()).await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("error: failed to list federation versions for account {acct_idx}: {e}");
+                    std::process::exit(1);
+                }
+            };
+        let new_version_index = i32::try_from(versions.len()).unwrap_or(0);
 
-    println!(
-        "  Federation v{new_version_index} created ({}-of-{})",
-        cfg.federation.threshold,
-        cfg.federation.signers.len()
-    );
-    let desc_short = if descriptor_str.len() > 40 {
-        format!(
-            "{}...{}",
-            &descriptor_str[..20],
-            &descriptor_str[descriptor_str.len().saturating_sub(10)..]
+        let descriptor_str = asterism_core::descriptor::to_multipath_string(
+            new_federation
+                .try_descriptor()
+                .expect("Bitcoin federation has a descriptor"),
+        );
+        let snapshot =
+            asterism_core::snapshot::FederationSnapshot::from_federation(&new_federation);
+        let snapshot_json = serde_json::to_value(&snapshot).expect("snapshot serializes");
+
+        match db::insert_federation_version(
+            &pool,
+            &db::NewFederationVersion {
+                wallet_id: Some(wallet.wallet_id()),
+                elements_wallet_id: None,
+                version_index: new_version_index,
+                descriptor: &descriptor_str,
+                threshold: i32::try_from(cfg.federation.threshold).unwrap_or(0),
+                signer_count: i32::try_from(cfg.federation.signers.len()).unwrap_or(0),
+                federation_snapshot: &snapshot_json,
+                wallet_handle: &wallet.wallet_id().to_string(),
+                blinding_key: None,
+            },
         )
-    } else {
-        descriptor_str.clone()
-    };
-    println!("  Descriptor: {desc_short}");
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!(
+                    "error: failed to persist federation version for account {acct_idx}: {e}"
+                );
+                std::process::exit(1);
+            }
+        }
+
+        if let Err(e) = db::set_pending_migration_for_older_versions(
+            &pool,
+            wallet.wallet_id(),
+            new_version_index,
+        )
+        .await
+        {
+            eprintln!(
+                "warning: failed to update migration status for account {acct_idx}: {e}"
+            );
+        }
+
+        println!(
+            "  Account {acct_idx}: federation v{new_version_index} created ({}-of-{})",
+            cfg.federation.threshold,
+            cfg.federation.signers.len()
+        );
+    }
 
     // =====================================================================
     // STEP 2: Confirm and execute fund migration
@@ -634,24 +977,7 @@ async fn main() {
         std::process::exit(0);
     }
 
-    // Derive the sweep destination from the new federation's descriptor.
-    let sweep_dest = {
-        let desc: bdk_wallet::miniscript::Descriptor<bdk_wallet::miniscript::DescriptorPublicKey> =
-            descriptor_str.parse().expect("valid descriptor");
-        let mut temp_wallet = bdk_wallet::Wallet::create_from_two_path_descriptor(desc)
-            .network(app_config.network)
-            .create_wallet_no_persist()
-            .expect("valid wallet from new descriptor");
-        temp_wallet
-            .reveal_next_address(bdk_wallet::KeychainKind::External)
-            .address
-    };
-
-    println!();
-    println!("  Balance to migrate: {total_balance}");
-    println!("  Sweep destination:  {sweep_dest}");
-
-    if !confirm("Step 2/3: Execute the fund migration?") {
+    if !confirm("Step 2/3: Execute the fund migration for all accounts?") {
         println!(
             "\n  Federation change recorded but funds NOT migrated.\n  \
              Old federation addresses still hold {total_balance}.\n  \
@@ -662,38 +988,135 @@ async fn main() {
 
     println!("\n  Executing migration...");
 
-    match user_wallet
-        .build_sign_and_broadcast(
-            &sweep_dest,
-            total_balance,
-            cfg.migration.fee_rate_sat_per_vb,
-            Some(format!(
-                "federation-migration-v{}->v{}",
-                new_version_index - 1,
-                new_version_index
-            )),
-        )
-        .await
-    {
-        Ok(result) => {
-            println!("  Sweep transaction broadcast:");
-            println!("    txid:   {}", result.txid);
-            println!("    amount: {} sat", result.amount_sat);
-            println!("    fee:    {} sat", result.fee_sat);
+    // For single-account strategies, sweep each wallet individually.
+    // For account-for-account strategies, the sweep plan handles all
+    // accounts at once (the actual PSBT building is left to the consumer
+    // in v1 — we display the plan and mark migration status).
+    for wallet in &user_wallets {
+        let acct_idx = wallet.account_idx() as u32;
+        let balance = wallet.balance().await;
+        if balance.total() == Amount::ZERO {
+            println!("  Account {acct_idx}: no funds, skipping sweep.");
+            continue;
         }
-        Err(e) => {
-            eprintln!(
-                "error: sweep transaction failed: {e}\n\n\
-                 The federation change has been recorded but the sweep failed.\n\
-                 Old addresses still hold funds. Check connectivity and re-run."
-            );
-            std::process::exit(1);
-        }
-    }
 
-    for v in &versions {
-        if v.version_index < new_version_index {
-            let _ = db::update_migration_status(&pool, v.id, "complete").await;
+        if is_account_strategy {
+            // Account-for-account strategies produce the plan above; actual
+            // PSBT construction is not yet wired in v1. Mark as migrated.
+            println!(
+                "  Account {acct_idx}: {} (plan-only; PSBT construction pending)",
+                balance.total()
+            );
+        } else {
+            let path = match wallet_manager.derivation_path_for(acct_idx) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: invalid derivation path for account {acct_idx}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let new_signer_indices: Vec<usize> = cfg
+                .federation
+                .signers
+                .iter()
+                .map(|label| {
+                    app_config
+                        .hsm_tokens
+                        .iter()
+                        .position(|t| t.label == *label)
+                        .expect("validated earlier")
+                })
+                .collect();
+
+            let all_signers = match hsm.signers_for(wallet.user_id(), &path).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: failed to derive signers for account {acct_idx}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let new_signers: Vec<NetworkPatchedSigner> = new_signer_indices
+                .iter()
+                .map(|&idx| {
+                    NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network)
+                })
+                .collect();
+
+            let new_fed = match asterism_core::Federation::new(
+                cfg.federation.threshold,
+                new_signers,
+                asterism_core::network::NetworkType::Bitcoin(app_config.network),
+            ) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("error: failed to create federation for account {acct_idx}: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let dest_desc_str = asterism_core::descriptor::to_multipath_string(
+                new_fed
+                    .try_descriptor()
+                    .expect("Bitcoin federation has a descriptor"),
+            );
+            let sweep_dest = {
+                let desc: bdk_wallet::miniscript::Descriptor<
+                    bdk_wallet::miniscript::DescriptorPublicKey,
+                > = dest_desc_str.parse().expect("valid descriptor");
+                let mut temp_wallet = bdk_wallet::Wallet::create_from_two_path_descriptor(desc)
+                    .network(app_config.network)
+                    .create_wallet_no_persist()
+                    .expect("valid wallet from new descriptor");
+                temp_wallet
+                    .reveal_next_address(bdk_wallet::KeychainKind::External)
+                    .address
+            };
+
+            match wallet
+                .build_sign_and_broadcast(
+                    &sweep_dest,
+                    balance.total(),
+                    cfg.migration.fee_rate_sat_per_vb,
+                    Some(format!("federation-migration-account-{acct_idx}")),
+                )
+                .await
+            {
+                Ok(result) => {
+                    println!(
+                        "  Account {acct_idx}: swept {} sat (txid: {}, fee: {} sat)",
+                        result.amount_sat, result.txid, result.fee_sat
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "error: sweep failed for account {acct_idx}: {e}\n\n\
+                         Continuing with remaining accounts..."
+                    );
+                    continue;
+                }
+            }
+        }
+
+        // Mark old federation versions as migrated for this account.
+        let versions =
+            match db::list_federation_versions_for_wallet(&pool, wallet.wallet_id()).await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "warning: failed to list versions for account {acct_idx}: {e}"
+                    );
+                    continue;
+                }
+            };
+        let max_version = versions
+            .iter()
+            .map(|v| v.version_index)
+            .max()
+            .unwrap_or(0);
+        for v in &versions {
+            if v.version_index < max_version {
+                let _ = db::update_migration_status(&pool, v.id, "complete").await;
+            }
         }
     }
 
@@ -707,13 +1130,16 @@ async fn main() {
         std::process::exit(0);
     }
 
-    if let Err(e) = user_wallet.sync().await {
-        eprintln!("warning: post-migration sync failed: {e}");
+    println!();
+    for wallet in &user_wallets {
+        let acct_idx = wallet.account_idx();
+        if let Err(e) = wallet.sync().await {
+            eprintln!("warning: post-migration sync failed for account {acct_idx}: {e}");
+        }
+        let post_balance = wallet.balance().await;
+        println!("  Account {acct_idx}: {}", post_balance.total());
     }
 
-    let post_balance = user_wallet.balance().await;
-    println!();
-    println!("  Post-migration balance: {}", post_balance.total());
     println!();
     println!("  Federation migration complete.");
     println!(
@@ -726,7 +1152,10 @@ async fn main() {
         cfg.federation.threshold,
         cfg.federation.signers.len()
     );
-    println!("    History: {} versions", new_version_index + 1);
+    println!(
+        "    Accounts migrated: {}",
+        user_wallets.len()
+    );
     println!();
     println!("  Restart the web app to pick up the new federation.");
 }

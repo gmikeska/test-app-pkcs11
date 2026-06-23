@@ -87,6 +87,13 @@ strategy = "account-for-account-batched"
 # own output at the correct account index.
 # small_account_threshold = 100000
 
+# Account index of the internal/house account that pays migration fees.
+# Required for account-for-account strategies. This account MUST exist
+# and have sufficient balance to cover all transaction fees before the
+# migration begins. For account-for-account-batched, this account is
+# migrated last so it can fund fees for all preceding transactions.
+fee_account_idx = 0
+
 # Fee rate in sat/vB for the sweep transactions.
 # The tool shows fee estimates before asking for confirmation.
 fee_rate_sat_per_vb = 2

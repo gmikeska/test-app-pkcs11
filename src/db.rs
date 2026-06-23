@@ -127,6 +127,20 @@ pub async fn find_wallet_for_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<
     .await
 }
 
+/// List every wallet in the system, ordered by `account_idx`.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn list_all_wallets(pool: &PgPool) -> sqlx::Result<Vec<WalletRow>> {
+    sqlx::query_as::<_, WalletRow>(
+        "SELECT id, user_id, account_idx, descriptor, bdk_changeset, \
+                chain_tip_height, created_at \
+         FROM wallets ORDER BY account_idx",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// Compute the next free `account_idx` (`max(account_idx) + 1`, or `0`
 /// if the table is empty).
 ///

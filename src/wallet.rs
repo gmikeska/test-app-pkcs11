@@ -325,6 +325,21 @@ impl WalletManager {
         Ok(cache.entry(user_id).or_insert(uw).clone())
     }
 
+    /// Load a wallet from an existing database row. Used by the migration
+    /// tool to load all wallets without going through user lookup.
+    ///
+    /// # Errors
+    /// See [`WalletError`].
+    pub async fn load_wallet_from_row(&self, row: WalletRow) -> Result<Arc<UserWallet>, WalletError> {
+        let user_id = row.user_id;
+        if let Some(uw) = self.cache.lock().await.get(&user_id).cloned() {
+            return Ok(uw);
+        }
+        let uw = Arc::new(self.build_user_wallet(user_id, row).await?);
+        let mut cache = self.cache.lock().await;
+        Ok(cache.entry(user_id).or_insert(uw).clone())
+    }
+
     /// Eagerly create the user's wallet row if it doesn't exist. Idempotent.
     ///
     /// Returns the (possibly pre-existing) row. Used by the boot path
@@ -980,6 +995,16 @@ impl UserWallet {
     /// Snapshot the wallet's current balance.
     pub async fn balance(&self) -> bdk_wallet::Balance {
         self.inner.lock().await.balance()
+    }
+
+    /// Return all unspent outputs (UTXOs) in this wallet.
+    pub async fn list_unspent(&self) -> Vec<bdk_wallet::LocalOutput> {
+        self.inner
+            .lock()
+            .await
+            .list_output()
+            .filter(|o| !o.is_spent)
+            .collect()
     }
 
     /// Build → sign (m-of-n) → finalize → broadcast → persist.
