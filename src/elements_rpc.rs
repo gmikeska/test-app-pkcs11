@@ -234,7 +234,6 @@ impl ElementsRpc {
             ElementsRpcError::BadResponse("sendrawtransaction returned non-string".into())
         })
     }
-
 }
 
 fn extract_btc_balance(v: Option<&Value>) -> f64 {
@@ -314,4 +313,3 @@ pub struct FundedPsbt {
     pub fee: f64,
     pub changepos: i32,
 }
-

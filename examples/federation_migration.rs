@@ -95,10 +95,10 @@ fn parse_args() -> Result<(PathBuf, bool), String> {
         match args[i].as_str() {
             "--config" | "-c" => {
                 i += 1;
-                config_path = Some(PathBuf::from(
-                    args.get(i)
-                        .ok_or_else(|| "--config requires a path argument".to_string())?,
-                ));
+                config_path =
+                    Some(PathBuf::from(args.get(i).ok_or_else(|| {
+                        "--config requires a path argument".to_string()
+                    })?));
             }
             "--dry-run" => dry_run = true,
             "--help" | "-h" => {
@@ -121,10 +121,7 @@ fn parse_args() -> Result<(PathBuf, bool), String> {
 // Validation
 // =========================================================================
 
-fn validate_config(
-    cfg: &MigrationConfig,
-    app_config: &AppConfig,
-) -> Result<(), String> {
+fn validate_config(cfg: &MigrationConfig, app_config: &AppConfig) -> Result<(), String> {
     match cfg.migration.strategy.as_str() {
         "consolidation" | "address-for-address" | "batched" => {}
         other => {
@@ -718,7 +715,11 @@ async fn main() {
     println!("  Post-migration balance: {}", post_balance.total());
     println!();
     println!("  Federation migration complete.");
-    println!("    Old: {}-of-{}", current_threshold, current_signers.len());
+    println!(
+        "    Old: {}-of-{}",
+        current_threshold,
+        current_signers.len()
+    );
     println!(
         "    New: {}-of-{}",
         cfg.federation.threshold,

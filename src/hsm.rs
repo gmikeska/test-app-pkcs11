@@ -179,9 +179,11 @@ impl HsmFleet {
         let library_path = self.library_path.clone();
         let tokens = self.tokens.clone();
         let label_clone = label.clone();
-        tokio::task::spawn_blocking(move || delete_key_objects(&library_path, &tokens, &label_clone))
-            .await
-            .expect("delete_key_objects join")?;
+        tokio::task::spawn_blocking(move || {
+            delete_key_objects(&library_path, &tokens, &label_clone)
+        })
+        .await
+        .expect("delete_key_objects join")?;
         self.evict(signer_id).await;
         tracing::info!(%signer_id, %label, "deleted signer HSM keys");
         Ok(())

@@ -414,7 +414,14 @@ pub async fn address_show(
             qr_uri,
             qr_svg,
             derivation_index,
-            total_received_btc: format!("{:.8}", if total_received <= 0.0 { 0.0 } else { total_received }),
+            total_received_btc: format!(
+                "{:.8}",
+                if total_received <= 0.0 {
+                    0.0
+                } else {
+                    total_received
+                }
+            ),
             unspent_btc: format!("{:.8}", if unspent <= 0.0 { 0.0 } else { unspent }),
             receipt_count,
         },
@@ -441,13 +448,9 @@ pub async fn federation(
         .hsm_tokens
         .iter()
         .enumerate()
-        .take(
-            versions
-                .last()
-                .map_or(state.config.hsm_tokens.len(), |v| {
-                    usize::try_from(v.signer_count).unwrap_or(0)
-                }),
-        )
+        .take(versions.last().map_or(state.config.hsm_tokens.len(), |v| {
+            usize::try_from(v.signer_count).unwrap_or(0)
+        }))
         .map(|(_, t)| ElementsSignerView {
             id: t.label.clone(),
             label: t.label.clone(),

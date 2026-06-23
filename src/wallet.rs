@@ -404,8 +404,7 @@ impl WalletManager {
                     .try_descriptor()
                     .expect("Bitcoin federation has a descriptor"),
             );
-            let snapshot =
-                serde_json::json!({ "threshold": current_federation.threshold(), "signer_count": current_federation.total_signers() });
+            let snapshot = serde_json::json!({ "threshold": current_federation.threshold(), "signer_count": current_federation.total_signers() });
             let _ = db::insert_federation_version(
                 &self.pool,
                 &db::NewFederationVersion {
@@ -556,9 +555,7 @@ impl WalletManager {
 
         // Build the FederatedWallet from stored federation versions, or
         // bootstrap with just the current federation if none are stored yet.
-        let federated_wallet = self
-            .build_federated_wallet(wallet_id, &federation)
-            .await?;
+        let federated_wallet = self.build_federated_wallet(wallet_id, &federation).await?;
 
         Ok(UserWallet {
             user_id,

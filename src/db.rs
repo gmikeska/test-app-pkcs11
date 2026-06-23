@@ -491,12 +491,11 @@ pub async fn federation_version_count_for_wallet(
     pool: &PgPool,
     wallet_id: Uuid,
 ) -> sqlx::Result<i64> {
-    let count: Option<i64> = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM federation_versions WHERE wallet_id = $1",
-    )
-    .bind(wallet_id)
-    .fetch_one(pool)
-    .await?;
+    let count: Option<i64> =
+        sqlx::query_scalar("SELECT COUNT(*) FROM federation_versions WHERE wallet_id = $1")
+            .bind(wallet_id)
+            .fetch_one(pool)
+            .await?;
     Ok(count.unwrap_or(0))
 }
 
@@ -544,10 +543,7 @@ pub async fn set_pending_migration_for_older_versions(
     Ok(())
 }
 
-pub async fn has_in_progress_migration(
-    pool: &PgPool,
-    wallet_id: Uuid,
-) -> sqlx::Result<bool> {
+pub async fn has_in_progress_migration(pool: &PgPool, wallet_id: Uuid) -> sqlx::Result<bool> {
     let count: Option<i64> = sqlx::query_scalar(
         "SELECT COUNT(*) FROM federation_versions \
          WHERE wallet_id = $1 AND migration_status = 'in_progress'",

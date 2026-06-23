@@ -164,9 +164,7 @@ impl AppConfig {
         if fed_threshold < 1 || fed_threshold > n {
             return Err(ConfigError::Parse {
                 var: "APP_FED_THRESHOLD",
-                reason: format!(
-                    "threshold must satisfy 1 ≤ t ≤ {n} (got {fed_threshold})"
-                ),
+                reason: format!("threshold must satisfy 1 ≤ t ≤ {n} (got {fed_threshold})"),
             });
         }
 
@@ -253,15 +251,12 @@ fn hardened(index: u32, label: &'static str) -> Result<ChildNumber, ConfigError>
 fn discover_hsm_tokens() -> Result<Vec<HsmTokenConfig>, ConfigError> {
     let mut tokens = Vec::new();
     for idx in 1u32.. {
-        let label_var: &'static str =
-            Box::leak(format!("APP_HSM_{idx}_LABEL").into_boxed_str());
+        let label_var: &'static str = Box::leak(format!("APP_HSM_{idx}_LABEL").into_boxed_str());
         let Some(label) = optional(label_var) else {
             break;
         };
-        let pin_var: &'static str =
-            Box::leak(format!("APP_HSM_{idx}_PIN").into_boxed_str());
-        let so_pin_var: &'static str =
-            Box::leak(format!("APP_HSM_{idx}_SO_PIN").into_boxed_str());
+        let pin_var: &'static str = Box::leak(format!("APP_HSM_{idx}_PIN").into_boxed_str());
+        let so_pin_var: &'static str = Box::leak(format!("APP_HSM_{idx}_SO_PIN").into_boxed_str());
         tokens.push(HsmTokenConfig {
             label,
             pin: require(pin_var)?,

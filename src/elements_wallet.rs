@@ -309,11 +309,9 @@ impl ElementsWalletManager {
             .expect("spawn_blocking join")?;
 
         // Record the initial federation version if not already stored.
-        let version_count = db::federation_version_count_for_elements_wallet(
-            &self.pool, row.id,
-        )
-        .await
-        .unwrap_or(0);
+        let version_count = db::federation_version_count_for_elements_wallet(&self.pool, row.id)
+            .await
+            .unwrap_or(0);
         let signer_count = i32::try_from(signers_arc.len()).unwrap_or(0);
         let threshold = i32::try_from(self.fed_threshold).unwrap_or(0);
         if version_count == 0 {
@@ -500,13 +498,14 @@ impl UserElementsWallet {
 
         let rpc = self.rpc.clone();
         let wallet = self.daemon_wallet_name.clone();
-        let (utxos, txs) = tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
-            let utxos = rpc.list_unspent(&wallet)?;
-            let txs = rpc.list_transactions(&wallet)?;
-            Ok((utxos, txs))
-        })
-        .await
-        .expect("spawn_blocking join")?;
+        let (utxos, txs) =
+            tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
+                let utxos = rpc.list_unspent(&wallet)?;
+                let txs = rpc.list_transactions(&wallet)?;
+                Ok((utxos, txs))
+            })
+            .await
+            .expect("spawn_blocking join")?;
 
         // Build script-pubkey maps for unspent and total received.
         let spk_unspent = build_spk_utxo_map(&utxos);
@@ -555,16 +554,12 @@ impl UserElementsWallet {
 
                 let matched_txs: Vec<_> = txs
                     .into_iter()
-                    .filter(|t| {
-                        t.address.as_deref().is_some_and(addr_matches)
-                    })
+                    .filter(|t| t.address.as_deref().is_some_and(addr_matches))
                     .collect();
 
                 let matched_utxos: Vec<_> = utxos
                     .into_iter()
-                    .filter(|u| {
-                        u.address.as_deref().is_some_and(addr_matches)
-                    })
+                    .filter(|u| u.address.as_deref().is_some_and(addr_matches))
                     .collect();
 
                 Ok((matched_txs, matched_utxos, tip))
@@ -603,8 +598,7 @@ impl UserElementsWallet {
                     txid: t.txid.clone(),
                     vout,
                     amount: t.amount.unwrap_or(0.0),
-                    confirmations: u32::try_from(t.confirmations.unwrap_or(0).max(0))
-                        .unwrap_or(0),
+                    confirmations: u32::try_from(t.confirmations.unwrap_or(0).max(0)).unwrap_or(0),
                     is_spent,
                 }
             })
@@ -655,9 +649,8 @@ impl UserElementsWallet {
             // For those inputs, fetch the full previous transaction to get
             // the complete output with range proof for unblinding.
             let mbk = MasterBlindingKey::from(mbk_bytes);
-            let inp_secrets = derive_input_secrets_with_rpc(
-                unsigned.as_pset(), &mbk, &rpc, &wallet,
-            )?;
+            let inp_secrets =
+                derive_input_secrets_with_rpc(unsigned.as_pset(), &mbk, &rpc, &wallet)?;
             let blinded = asterism_elements::blind_pset(unsigned, &inp_secrets)
                 .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
 
@@ -735,9 +728,10 @@ fn derive_input_secrets_with_rpc(
 
     let mut secrets = HashMap::new();
     for (i, input) in pset.inputs().iter().enumerate() {
-        let utxo = input.witness_utxo.as_ref().ok_or_else(|| {
-            ElementsWalletError::Sign(format!("input {i} missing witness_utxo"))
-        })?;
+        let utxo = input
+            .witness_utxo
+            .as_ref()
+            .ok_or_else(|| ElementsWalletError::Sign(format!("input {i} missing witness_utxo")))?;
 
         if let (confidential::Value::Explicit(value), confidential::Asset::Explicit(asset)) =
             (utxo.value, utxo.asset)
@@ -746,18 +740,16 @@ fn derive_input_secrets_with_rpc(
         } else {
             let prev_txid = &input.previous_txid;
             let prev_vout = input.previous_output_index;
-            let raw_hex = rpc.get_wallet_transaction_hex(wallet, &prev_txid.to_string())
-                .map_err(|e| ElementsWalletError::Sign(format!(
-                    "failed to fetch prev tx {prev_txid}: {e}"
-                )))?;
-            let tx_bytes = hex_decode(&raw_hex)
-                .map_err(|e| ElementsWalletError::Sign(format!(
-                    "bad hex from getrawtransaction: {e}"
-                )))?;
+            let raw_hex = rpc
+                .get_wallet_transaction_hex(wallet, &prev_txid.to_string())
+                .map_err(|e| {
+                    ElementsWalletError::Sign(format!("failed to fetch prev tx {prev_txid}: {e}"))
+                })?;
+            let tx_bytes = hex_decode(&raw_hex).map_err(|e| {
+                ElementsWalletError::Sign(format!("bad hex from getrawtransaction: {e}"))
+            })?;
             let prev_tx: elements::Transaction = consensus_deserialize(&tx_bytes)
-                .map_err(|e| ElementsWalletError::Sign(format!(
-                    "failed to decode prev tx: {e}"
-                )))?;
+                .map_err(|e| ElementsWalletError::Sign(format!("failed to decode prev tx: {e}")))?;
             let full_output = &prev_tx.output[prev_vout as usize];
             let slip77_key = asterism_elements::slip77_blinding_key(
                 master_blinding_key,
@@ -776,21 +768,23 @@ fn derive_input_secrets_with_rpc(
                     None,
                     &elements::AddressParams::ELEMENTS,
                 )
-                .ok_or_else(|| ElementsWalletError::Sign(format!(
-                    "input {i}: cannot derive address from script_pubkey"
-                )))?;
-                let key_hex = rpc.dump_blinding_key(wallet, &addr.to_string())
-                    .map_err(|e| ElementsWalletError::Sign(format!(
-                        "input {i}: dumpblindingkey failed: {e}"
-                    )))?;
-                let key_bytes = hex_decode(&key_hex)
-                    .map_err(|e| ElementsWalletError::Sign(format!(
-                        "input {i}: bad blinding key hex: {e}"
-                    )))?;
+                .ok_or_else(|| {
+                    ElementsWalletError::Sign(format!(
+                        "input {i}: cannot derive address from script_pubkey"
+                    ))
+                })?;
+                let key_hex = rpc
+                    .dump_blinding_key(wallet, &addr.to_string())
+                    .map_err(|e| {
+                        ElementsWalletError::Sign(format!("input {i}: dumpblindingkey failed: {e}"))
+                    })?;
+                let key_bytes = hex_decode(&key_hex).map_err(|e| {
+                    ElementsWalletError::Sign(format!("input {i}: bad blinding key hex: {e}"))
+                })?;
                 let daemon_key = elements::secp256k1_zkp::SecretKey::from_slice(&key_bytes)
-                    .map_err(|e| ElementsWalletError::Sign(format!(
-                        "input {i}: invalid blinding key: {e}"
-                    )))?;
+                    .map_err(|e| {
+                        ElementsWalletError::Sign(format!("input {i}: invalid blinding key: {e}"))
+                    })?;
                 asterism_elements::unblind_input(full_output, daemon_key)
                     .map_err(|e| ElementsWalletError::Sign(e.to_string()))?
             };
