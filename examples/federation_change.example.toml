@@ -51,10 +51,6 @@ signers = [
 #                            federation's first receive address. Best for
 #                            simple treasuries with a single pooled balance.
 #
-#   "address-for-address"  - Each old derived address maps to a corresponding
-#                            new derived address at the same index. Preserves
-#                            per-address segregation within a single account.
-#
 #   "batched"              - Like consolidation, but splits into multiple
 #                            transactions with at most `max_inputs_per_tx`
 #                            inputs each. For large UTXO sets.

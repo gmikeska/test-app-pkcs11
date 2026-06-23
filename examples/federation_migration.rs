@@ -123,15 +123,16 @@ fn parse_args() -> Result<(PathBuf, bool), String> {
 
 fn validate_config(cfg: &MigrationConfig, app_config: &AppConfig) -> Result<(), String> {
     match cfg.migration.strategy.as_str() {
-        "consolidation" | "address-for-address" | "batched" => {}
+        "consolidation" | "batched" | "account-for-account" | "account-for-account-batched" => {}
         other => {
             return Err(format!(
                 "unrecognized migration strategy: \"{other}\"\n\
                  \n\
                  Valid strategies are:\n\
-                   consolidation       — all UTXOs into a single output\n\
-                   address-for-address  — preserves per-address segregation\n\
-                   batched             — consolidation in fixed-size batches"
+                   consolidation              — all UTXOs into a single output\n\
+                   batched                    — consolidation in fixed-size batches\n\
+                   account-for-account        — all accounts in one transaction\n\
+                   account-for-account-batched — one tx per account, small accounts bundled"
             ));
         }
     }
