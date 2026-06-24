@@ -121,7 +121,9 @@ async fn build_new_federation(
     threshold: u32,
     app_config: &AppConfig,
 ) -> Federation<NetworkPatchedSigner> {
-    let path = wm.derivation_path_for(account_idx).expect("derivation path");
+    let path = wm
+        .derivation_path_for(account_idx)
+        .expect("derivation path");
     let all_signers = hsm.signers_for(user_id, &path).await.expect("signers");
     let new_signers: Vec<NetworkPatchedSigner> = new_token_indices
         .iter()
@@ -138,7 +140,8 @@ async fn build_new_federation(
 /// Derive the first receive address for a federation's descriptor.
 fn federation_receive_address(fed: &Federation<NetworkPatchedSigner>, network: Network) -> Address {
     let desc_str = asterism_core::descriptor::to_multipath_string(
-        fed.try_descriptor().expect("Bitcoin federation has descriptor"),
+        fed.try_descriptor()
+            .expect("Bitcoin federation has descriptor"),
     );
     let desc: bdk_wallet::miniscript::Descriptor<bdk_wallet::miniscript::DescriptorPublicKey> =
         desc_str.parse().expect("valid descriptor");
@@ -249,10 +252,8 @@ async fn main() {
                 .require_network(app_config.network)
                 .expect("network match");
             let btc = Amount::from_sat(amount_sat);
-            rpc.send_to_address(
-                &addr, btc, None, None, None, None, None, None,
-            )
-            .expect("send_to_address");
+            rpc.send_to_address(&addr, btc, None, None, None, None, None, None)
+                .expect("send_to_address");
             println!(
                 "    Account {} (idx {}): sent {} to {}",
                 i,
@@ -276,7 +277,10 @@ async fn main() {
         pre_balances.push(bal);
         println!(
             "    Account {} (idx {}): {}",
-            wallets.iter().position(|w| w.wallet_id() == wallet.wallet_id()).unwrap(),
+            wallets
+                .iter()
+                .position(|w| w.wallet_id() == wallet.wallet_id())
+                .unwrap(),
             wallet.account_idx(),
             bal,
         );
@@ -423,7 +427,10 @@ async fn run_migration_test(
 
         println!(
             "    Account {} (idx {}): federation v{new_version_index} created",
-            wallets.iter().position(|w| w.wallet_id() == wallet.wallet_id()).unwrap(),
+            wallets
+                .iter()
+                .position(|w| w.wallet_id() == wallet.wallet_id())
+                .unwrap(),
             acct_idx,
         );
 
@@ -591,10 +598,7 @@ async fn run_migration_test(
         let scan = rpc
             .call::<serde_json::Value>(
                 "scantxoutset",
-                &[
-                    serde_json::json!("start"),
-                    serde_json::json!([desc]),
-                ],
+                &[serde_json::json!("start"), serde_json::json!([desc])],
             )
             .expect("scantxoutset");
 
@@ -724,7 +728,10 @@ fn run_batched_plan_test(
     // - Accounts 1, 2, 4 (small) should be bundled
     // - Account 0 (fee) should be last
     let total_txs = plan.sweep_transactions.len();
-    assert!(total_txs >= 3, "expected at least 3 transactions (1 large + 1 bundle + 1 fee)");
+    assert!(
+        total_txs >= 3,
+        "expected at least 3 transactions (1 large + 1 bundle + 1 fee)"
+    );
 
     // Fee account should always be last.
     let last_tx = &plan.sweep_transactions[total_txs - 1];
@@ -733,7 +740,10 @@ fn run_batched_plan_test(
         .destinations
         .iter()
         .any(|(addr, _)| addr == fee_acct_dest);
-    assert!(last_has_fee_dest, "fee account must be in the last transaction");
+    assert!(
+        last_has_fee_dest,
+        "fee account must be in the last transaction"
+    );
 
     // Verify total UTXO count matches.
     let expected_utxos: usize = ACCOUNTS.iter().map(|a| a.fund_amounts.len()).sum();
@@ -755,7 +765,10 @@ fn run_batched_plan_test(
         "    ✓ Batched plan: {} txs, fee account last, {} UTXOs swept",
         total_txs, plan.utxo_count,
     );
-    println!("    ✓ Total fees: ~{} sat (< 1% of total balance)", plan.total_fees.to_sat());
+    println!(
+        "    ✓ Total fees: ~{} sat (< 1% of total balance)",
+        plan.total_fees.to_sat()
+    );
 
     println!();
     println!("  ✓ Account-for-account-batched plan test PASSED");
