@@ -204,7 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn seed_test_wallets(pool: &sqlx::PgPool, wallet_manager: &WalletManager) {
-    const EMAILS: &[&str] = &["test1@test.com", "test2@test.com", "test3@test.com"];
+    const EMAILS: &[&str] = &["test1@test.com", "test2@test.com", "test3@test.com", "admin@test.com"];
     for email in EMAILS {
         let user = match db::find_user_by_email(pool, email).await {
             Ok(Some(u)) => u,
@@ -217,7 +217,12 @@ async fn seed_test_wallets(pool: &sqlx::PgPool, wallet_manager: &WalletManager) 
                 continue;
             }
         };
-        match wallet_manager.ensure_wallet_for_user(user.id).await {
+        let result = if *email == "admin@test.com" {
+            wallet_manager.ensure_wallet_for_user_at(user.id, 99).await
+        } else {
+            wallet_manager.ensure_wallet_for_user(user.id).await
+        };
+        match result {
             Ok(row) => tracing::info!(
                 %email,
                 account_idx = row.account_idx,
@@ -233,7 +238,7 @@ async fn seed_test_wallets(pool: &sqlx::PgPool, wallet_manager: &WalletManager) 
 }
 
 async fn seed_test_elements_wallets(pool: &sqlx::PgPool, manager: &ElementsWalletManager) {
-    const EMAILS: &[&str] = &["test1@test.com", "test2@test.com", "test3@test.com"];
+    const EMAILS: &[&str] = &["test1@test.com", "test2@test.com", "test3@test.com", "admin@test.com"];
     for email in EMAILS {
         let user = match db::find_user_by_email(pool, email).await {
             Ok(Some(u)) => u,
@@ -246,7 +251,12 @@ async fn seed_test_elements_wallets(pool: &sqlx::PgPool, manager: &ElementsWalle
                 continue;
             }
         };
-        match manager.ensure_wallet_for_user(user.id).await {
+        let result = if *email == "admin@test.com" {
+            manager.ensure_wallet_for_user_at(user.id, 99).await
+        } else {
+            manager.ensure_wallet_for_user(user.id).await
+        };
+        match result {
             Ok(row) => tracing::info!(
                 %email,
                 account_idx = row.account_idx,

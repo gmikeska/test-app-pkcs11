@@ -98,14 +98,22 @@ Options:
                     the federation change. See the example at:
                     examples/federation_change.example.toml
   --dry-run         Validate and display the plan without executing
+  --sweep-only      Skip Step 1 (federation already recorded); sweep funds only
   --help            Show this help message"
     );
 }
 
-fn parse_args() -> Result<(PathBuf, bool), String> {
+struct CliArgs {
+    config_path: PathBuf,
+    dry_run: bool,
+    sweep_only: bool,
+}
+
+fn parse_args() -> Result<CliArgs, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut config_path: Option<PathBuf> = None;
     let mut dry_run = false;
+    let mut sweep_only = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -117,6 +125,7 @@ fn parse_args() -> Result<(PathBuf, bool), String> {
                     })?));
             }
             "--dry-run" => dry_run = true,
+            "--sweep-only" => sweep_only = true,
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -130,7 +139,11 @@ fn parse_args() -> Result<(PathBuf, bool), String> {
          Run with --help for usage information."
             .to_string()
     })?;
-    Ok((path, dry_run))
+    Ok(CliArgs {
+        config_path: path,
+        dry_run,
+        sweep_only,
+    })
 }
 
 // =========================================================================
@@ -492,18 +505,20 @@ async fn main() {
         )
         .init();
 
-    let (config_path, dry_run) = match parse_args() {
+    let cli = match parse_args() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
     };
+    let dry_run = cli.dry_run;
+    let sweep_only = cli.sweep_only;
 
-    let toml_str = match std::fs::read_to_string(&config_path) {
+    let toml_str = match std::fs::read_to_string(&cli.config_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("error: cannot read {}: {e}", config_path.display());
+            eprintln!("error: cannot read {}: {e}", cli.config_path.display());
             std::process::exit(1);
         }
     };
@@ -513,7 +528,7 @@ async fn main() {
             eprintln!(
                 "error: failed to parse {}\n\n{e}\n\n\
                  See examples/federation_change.example.toml for the expected format.",
-                config_path.display()
+                cli.config_path.display()
             );
             std::process::exit(1);
         }
@@ -538,7 +553,7 @@ async fn main() {
     println!("Federation Migration Tool");
     println!("=========================");
     println!();
-    println!("  Config:  {}", config_path.display());
+    println!("  Config:  {}", cli.config_path.display());
     println!("  Network: {}", app_config.network);
     if dry_run {
         println!("  Mode:    dry run (no changes will be made)");
@@ -862,6 +877,10 @@ async fn main() {
     // STEP 1: Confirm and apply the federation change (all accounts)
     // =====================================================================
 
+    if sweep_only {
+        println!("\n  --sweep-only: skipping Step 1 (federation change already recorded).");
+    } else {
+
     if !confirm("Step 1/3: Apply this federation change to all accounts?") {
         println!("Aborted.");
         std::process::exit(0);
@@ -977,6 +996,7 @@ async fn main() {
             cfg.federation.signers.len()
         );
     }
+    } // end if !sweep_only
 
     // =====================================================================
     // STEP 2: Confirm and execute fund migration
@@ -1011,15 +1031,7 @@ async fn main() {
             continue;
         }
 
-        if is_account_strategy {
-            // Account-for-account strategies produce the plan above; actual
-            // PSBT construction is not yet wired in v1. Mark as migrated.
-            println!(
-                "  Account {acct_idx}: {} (plan-only; PSBT construction pending)",
-                balance.total()
-            );
-        } else {
-            let path = match wallet_manager.derivation_path_for(acct_idx) {
+        let path = match wallet_manager.derivation_path_for(acct_idx) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("error: invalid derivation path for account {acct_idx}: {e}");
@@ -1083,9 +1095,8 @@ async fn main() {
             };
 
             match wallet
-                .build_sign_and_broadcast(
+                .sweep_to(
                     &sweep_dest,
-                    balance.total(),
                     cfg.migration.fee_rate_sat_per_vb,
                     Some(format!("federation-migration-account-{acct_idx}")),
                 )
@@ -1105,7 +1116,6 @@ async fn main() {
                     continue;
                 }
             }
-        }
 
         // Mark old federation versions as migrated for this account.
         let versions =

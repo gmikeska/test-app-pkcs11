@@ -359,8 +359,28 @@ impl WalletManager {
         self.create_wallet_for_user(user_id).await
     }
 
+    /// Like [`ensure_wallet_for_user`] but forces a specific account index.
+    pub async fn ensure_wallet_for_user_at(
+        &self,
+        user_id: Uuid,
+        account_idx: i32,
+    ) -> Result<WalletRow, WalletError> {
+        if let Some(row) = db::find_wallet_for_user(&self.pool, user_id).await? {
+            return Ok(row);
+        }
+        self.create_wallet_for_user_at(user_id, account_idx).await
+    }
+
     async fn create_wallet_for_user(&self, user_id: Uuid) -> Result<WalletRow, WalletError> {
         let account_idx = db::next_account_idx(&self.pool).await?;
+        self.create_wallet_for_user_at(user_id, account_idx).await
+    }
+
+    async fn create_wallet_for_user_at(
+        &self,
+        user_id: Uuid,
+        account_idx: i32,
+    ) -> Result<WalletRow, WalletError> {
         let account_idx_u32 = u32::try_from(account_idx).unwrap_or(0);
         let path = self.derivation_path_for(account_idx_u32)?;
 
@@ -594,6 +614,15 @@ impl WalletManager {
             .build_federated_wallet(wallet_id, &federation, &signers_arc)
             .await?;
 
+        // Create mutable BDK wallets for each federation version so we
+        // can sync them all against the blockchain.
+        use asterism_core::federated_wallet::FederatedWallet as FwTrait;
+        let mut version_wallets = Vec::with_capacity(federated_wallet.federation_count());
+        for fw in federated_wallet.federation_wallets() {
+            let vw = Self::create_metadata_wallet(&fw.federation, self.network)?;
+            version_wallets.push(AsyncMutex::new(vw));
+        }
+
         Ok(UserWallet {
             user_id,
             wallet_id,
@@ -601,6 +630,7 @@ impl WalletManager {
             network: self.network,
             federation,
             federated_wallet,
+            version_wallets,
             inner: AsyncMutex::new(wallet),
             aggregate: AsyncMutex::new(initial_changeset),
             pool: self.pool.clone(),
@@ -694,6 +724,10 @@ pub struct UserWallet {
     network: Network,
     federation: Federation<NetworkPatchedSigner>,
     federated_wallet: BtcFederatedWallet<NetworkPatchedSigner>,
+    /// Per-federation-version BDK wallets that get synced against the
+    /// blockchain. Index 0 = oldest federation, last = newest (current).
+    /// These mirror `federated_wallet` but are mutable for sync.
+    version_wallets: Vec<AsyncMutex<Wallet>>,
     inner: AsyncMutex<Wallet>,
     aggregate: AsyncMutex<ChangeSet>,
     pool: PgPool,
@@ -765,6 +799,23 @@ impl UserWallet {
     /// # Errors
     /// See [`WalletError`]. RPC and DB errors propagate.
     pub async fn sync(&self) -> Result<SyncSummary, WalletError> {
+        // Sync each federation-version wallet independently so each builds
+        // its own checkpoint chain and discovers UTXOs at its descriptor's
+        // addresses.
+        for vw_mutex in &self.version_wallets {
+            let mut vw = vw_mutex.lock().await;
+            let cp = vw.latest_checkpoint();
+            let start = cp.height();
+            let mut emitter = Emitter::new(&*self.rpc, cp, start, NO_EXPECTED_MEMPOOL_TXS);
+            while let Some(block_event) = emitter.next_block()? {
+                let height = block_event.block_height();
+                let connected_to = block_event.connected_to();
+                let _ = vw.apply_block_connected_to(&block_event.block, height, connected_to);
+            }
+            let mempool = emitter.mempool()?;
+            vw.apply_unconfirmed_txs(mempool.update);
+        }
+
         let (summary, delta) = {
             let mut wallet = self.inner.lock().await;
             let cp = wallet.latest_checkpoint();
@@ -904,61 +955,62 @@ impl UserWallet {
     ) -> Vec<(usize, Vec<RevealedAddress>)> {
         use asterism_core::federated_wallet::FederatedWallet as _;
 
-        let wallet = self.inner.lock().await;
-        let outputs: Vec<_> = wallet.list_output().collect();
-        drop(wallet);
+        let mut results = Vec::with_capacity(self.version_wallets.len());
 
-        self.federated_wallet
-            .federation_wallets()
-            .iter()
-            .map(|fw| {
-                let addrs: Vec<RevealedAddress> = (0..count)
-                    .map(|index| {
-                        let info = fw.wallet.peek_address(KeychainKind::External, index);
-                        let spk = info.address.script_pubkey();
-                        let mut received = Amount::ZERO;
-                        let mut unspent = Amount::ZERO;
-                        for utxo in &outputs {
-                            if utxo.txout.script_pubkey == spk {
-                                received += utxo.txout.value;
-                                if !utxo.is_spent {
-                                    unspent += utxo.txout.value;
-                                }
+        for (i, vw_mutex) in self.version_wallets.iter().enumerate() {
+            let vw = vw_mutex.lock().await;
+            let outputs: Vec<_> = vw.list_output().collect();
+            let fw = &self.federated_wallet.federation_wallets()[i];
+
+            let addrs: Vec<RevealedAddress> = (0..count)
+                .map(|index| {
+                    let info = fw.wallet.peek_address(KeychainKind::External, index);
+                    let spk = info.address.script_pubkey();
+                    let mut received = Amount::ZERO;
+                    let mut unspent = Amount::ZERO;
+                    for utxo in &outputs {
+                        if utxo.txout.script_pubkey == spk {
+                            received += utxo.txout.value;
+                            if !utxo.is_spent {
+                                unspent += utxo.txout.value;
                             }
                         }
-                        RevealedAddress {
-                            index,
-                            keychain: info.keychain,
-                            address: info.address.to_string(),
-                            received,
-                            unspent,
-                        }
-                    })
-                    .collect();
-                (fw.index, addrs)
-            })
-            .collect()
+                    }
+                    RevealedAddress {
+                        index,
+                        keychain: info.keychain,
+                        address: info.address.to_string(),
+                        received,
+                        unspent,
+                    }
+                })
+                .collect();
+            results.push((fw.index, addrs));
+        }
+
+        results
     }
 
     /// List Internal (change) keychain addresses that have ever received funds.
     pub async fn change_addresses(&self) -> Vec<RevealedAddress> {
-        let wallet = self.inner.lock().await;
-        let outputs: Vec<_> = wallet.list_output().collect();
-        let mut seen = std::collections::BTreeMap::<u32, (Amount, Amount)>::new();
-        for utxo in &outputs {
-            if let Some((KeychainKind::Internal, idx)) =
-                wallet.derivation_of_spk(utxo.txout.script_pubkey.clone())
-            {
-                let entry = seen.entry(idx).or_insert((Amount::ZERO, Amount::ZERO));
-                entry.0 += utxo.txout.value;
-                if !utxo.is_spent {
-                    entry.1 += utxo.txout.value;
+        let mut all = Vec::new();
+        for vw_mutex in &self.version_wallets {
+            let vw = vw_mutex.lock().await;
+            let outputs: Vec<_> = vw.list_output().collect();
+            let mut seen = std::collections::BTreeMap::<u32, (Amount, Amount)>::new();
+            for utxo in &outputs {
+                if let Some((KeychainKind::Internal, idx)) =
+                    vw.derivation_of_spk(utxo.txout.script_pubkey.clone())
+                {
+                    let entry = seen.entry(idx).or_insert((Amount::ZERO, Amount::ZERO));
+                    entry.0 += utxo.txout.value;
+                    if !utxo.is_spent {
+                        entry.1 += utxo.txout.value;
+                    }
                 }
             }
-        }
-        seen.into_iter()
-            .map(|(index, (received, unspent))| {
-                let info = wallet.peek_address(KeychainKind::Internal, index);
+            all.extend(seen.into_iter().map(|(index, (received, unspent))| {
+                let info = vw.peek_address(KeychainKind::Internal, index);
                 RevealedAddress {
                     index,
                     keychain: info.keychain,
@@ -966,8 +1018,9 @@ impl UserWallet {
                     received,
                     unspent,
                 }
-            })
-            .collect()
+            }));
+        }
+        all
     }
 
     /// Resolve a user-supplied address string into a [`Address`] tied
@@ -1080,17 +1133,147 @@ impl UserWallet {
 
     /// Snapshot the wallet's current balance.
     pub async fn balance(&self) -> bdk_wallet::Balance {
-        self.inner.lock().await.balance()
+        let mut total = bdk_wallet::Balance::default();
+        for vw_mutex in &self.version_wallets {
+            let vw = vw_mutex.lock().await;
+            let b = vw.balance();
+            total.confirmed += b.confirmed;
+            total.trusted_pending += b.trusted_pending;
+            total.untrusted_pending += b.untrusted_pending;
+            total.immature += b.immature;
+        }
+        total
     }
 
     /// Return all unspent outputs (UTXOs) in this wallet.
     pub async fn list_unspent(&self) -> Vec<bdk_wallet::LocalOutput> {
-        self.inner
-            .lock()
-            .await
-            .list_output()
-            .filter(|o| !o.is_spent)
-            .collect()
+        let mut all = Vec::new();
+        for vw_mutex in &self.version_wallets {
+            let vw = vw_mutex.lock().await;
+            all.extend(vw.list_output().filter(|o| !o.is_spent));
+        }
+        all
+    }
+
+    /// Sweep all funds to `recipient`, deducting fees automatically.
+    ///
+    /// Uses BDK's `drain_to` so the entire balance minus the mining fee
+    /// lands in a single output at the destination address.
+    pub async fn sweep_to(
+        &self,
+        recipient: &Address,
+        fee_rate_sat_vb: u64,
+        label: Option<String>,
+    ) -> Result<BroadcastTransaction, WalletError> {
+        let fee_rate =
+            FeeRate::from_sat_per_vb(fee_rate_sat_vb).ok_or(WalletError::BadFeeRate {
+                sat_per_vb: fee_rate_sat_vb,
+            })?;
+
+        let recipient_spk = recipient.script_pubkey();
+
+        let (raw_tx, txid, fee_sat, recipient_sat, delta, tip) = {
+            let mut wallet = self.inner.lock().await;
+            let psbt = {
+                let mut builder = wallet.build_tx();
+                builder
+                    .drain_wallet()
+                    .drain_to(recipient_spk.clone())
+                    .fee_rate(fee_rate);
+                builder
+                    .finish()
+                    .map_err(|e| WalletError::BuildTx(e.to_string()))?
+            };
+
+            let unsigned = UnsignedPsbt::new(psbt)?;
+            let mut coord = SigningCoordinator::new(&self.federation, unsigned);
+            let sign_only = SignOptions {
+                try_finalize: false,
+                ..SignOptions::default()
+            };
+            let _actions = coord
+                .request_signatures(&wallet, sign_only)
+                .map_err(|e| WalletError::Sign(e.to_string()))?;
+            let finalized = coord
+                .finalize(&wallet, SignOptions::default())
+                .map_err(|e| WalletError::Sign(e.to_string()))?;
+
+            let txid = finalized.txid();
+            let tx = finalized.transaction().clone();
+
+            let mut output_total: u64 = 0;
+            let mut recipient_total: u64 = 0;
+            for txout in &tx.output {
+                output_total = output_total.saturating_add(txout.value.to_sat());
+                if txout.script_pubkey == recipient_spk {
+                    recipient_total = recipient_total.saturating_add(txout.value.to_sat());
+                }
+            }
+            let mut input_total: u64 = 0;
+            for txin in &tx.input {
+                if let Some(utxo) = wallet.get_utxo(txin.previous_output) {
+                    input_total = input_total.saturating_add(utxo.txout.value.to_sat());
+                }
+            }
+            let fee_sat = input_total.saturating_sub(output_total);
+
+            let mut raw = Vec::new();
+            tx.consensus_encode(&mut raw)
+                .map_err(|e| WalletError::ExtractTx(e.to_string()))?;
+
+            let delta = wallet.take_staged();
+            let tip = wallet.latest_checkpoint().height();
+            drop(wallet);
+            (raw, txid, fee_sat, recipient_total, delta, tip)
+        };
+
+        if let Some(delta) = delta {
+            let mut agg = self.aggregate.lock().await;
+            agg.merge(delta);
+            let json = serde_json::to_value(&*agg).map_err(WalletError::EncodeChangeSet)?;
+            drop(agg);
+            db::update_wallet_changeset(
+                &self.pool,
+                self.wallet_id,
+                &json,
+                i32::try_from(tip).unwrap_or(i32::MAX),
+            )
+            .await?;
+        }
+
+        let raw_clone = raw_tx.clone();
+        let rpc = self.rpc.clone();
+        let txid_after_broadcast =
+            tokio::task::spawn_blocking(move || rpc.send_raw_transaction(&raw_clone[..]))
+                .await
+                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?
+                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?;
+        debug_assert_eq!(txid_after_broadcast, txid);
+
+        let recipient_str = recipient.to_string();
+        let amount_sat_i64 = i64::try_from(recipient_sat).unwrap_or(i64::MAX);
+        let fee_sat_i64 = i64::try_from(fee_sat).unwrap_or(i64::MAX);
+        let raw_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(raw_tx.as_slice());
+        db::insert_transaction(
+            &self.pool,
+            &db::NewTransaction {
+                wallet_id: self.wallet_id,
+                txid: &txid.to_string(),
+                recipient: &recipient_str,
+                amount_sat: amount_sat_i64,
+                fee_sat: fee_sat_i64,
+                raw_tx_hex: &raw_hex,
+                label: label.as_deref(),
+            },
+        )
+        .await?;
+
+        Ok(BroadcastTransaction {
+            txid,
+            recipient: recipient_str,
+            amount_sat: amount_sat_i64,
+            fee_sat: fee_sat_i64,
+        })
     }
 
     /// Build → sign (m-of-n) → finalize → broadcast → persist.

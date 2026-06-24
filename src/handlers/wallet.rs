@@ -228,6 +228,8 @@ pub struct AddressDetailView {
     pub qr_svg: String,
     /// Derivation index, if known.
     pub derivation_index: Option<u32>,
+    /// Full BIP-48 derivation path, e.g. `m/48'/1'/0'/2'/0/0`.
+    pub derivation_path: String,
     /// Keychain label ("external" / "change" / "—").
     pub keychain: String,
     /// Total received, BTC.
@@ -475,6 +477,20 @@ pub async fn address_show(
     }
     let (keychain, index) = derivation.map_or((None, None), |(k, i)| (Some(k), Some(i)));
     let keychain_str = keychain.map_or_else(|| "—".to_string(), keychain_label);
+    let derivation_path = match (keychain, index) {
+        (Some(k), Some(i)) => {
+            let chain = match k {
+                KeychainKind::External => 0,
+                KeychainKind::Internal => 1,
+            };
+            format!(
+                "m/48'/{}'/{}'/2'/{chain}/{i}",
+                state.config.bip48_coin_index,
+                uw.account_idx(),
+            )
+        }
+        _ => "—".to_string(),
+    };
 
     let activity = uw.address_history(&address).await?;
     let descriptor = lookup_descriptor(&state, user.id).await?;
@@ -513,6 +529,7 @@ pub async fn address_show(
             qr_uri,
             qr_svg,
             derivation_index: index,
+            derivation_path,
             keychain: keychain_str,
             total_received_btc: format_btc(activity.total_received),
             unspent_btc: format_btc(activity.unspent),

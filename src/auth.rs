@@ -155,7 +155,7 @@ where
 /// Propagates database / hashing errors.
 pub async fn seed_test_users(pool: &PgPool) -> Result<(), SeedError> {
     const TEST_PASSWORD: &str = "test1234";
-    const EMAILS: &[&str] = &["test1@test.com", "test2@test.com", "test3@test.com"];
+    const EMAILS: &[&str] = &["test1@test.com", "test2@test.com", "test3@test.com", "admin@test.com"];
 
     for email in EMAILS {
         if db::find_user_by_email(pool, email).await?.is_some() {

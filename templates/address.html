@@ -33,6 +33,7 @@
         {% when None %}
           <dt>Derivation index</dt><dd>&mdash;</dd>
       {% endmatch %}
+      <dt>Derivation path</dt><dd><code>{{ address.derivation_path }}</code></dd>
       <dt>Keychain</dt><dd>{{ address.keychain }}</dd>
       <dt>Total received</dt><dd>{{ address.total_received_btc }} BTC</dd>
       <dt>Unspent</dt><dd>{{ address.unspent_btc }} BTC</dd>

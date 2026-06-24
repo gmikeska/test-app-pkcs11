@@ -153,11 +153,30 @@ impl ElementsWalletManager {
         self.create_wallet_for_user(user_id).await
     }
 
+    pub async fn ensure_wallet_for_user_at(
+        &self,
+        user_id: Uuid,
+        account_idx: i32,
+    ) -> Result<ElementsWalletRow, ElementsWalletError> {
+        if let Some(row) = db::find_elements_wallet_for_user(&self.pool, user_id).await? {
+            return Ok(row);
+        }
+        self.create_wallet_for_user_at(user_id, account_idx).await
+    }
+
     async fn create_wallet_for_user(
         &self,
         user_id: Uuid,
     ) -> Result<ElementsWalletRow, ElementsWalletError> {
         let account_idx = db::next_elements_account_idx(&self.pool).await?;
+        self.create_wallet_for_user_at(user_id, account_idx).await
+    }
+
+    async fn create_wallet_for_user_at(
+        &self,
+        user_id: Uuid,
+        account_idx: i32,
+    ) -> Result<ElementsWalletRow, ElementsWalletError> {
         let account_idx_u32 = u32::try_from(account_idx).unwrap_or(0);
         let path = self.derivation_path_for(account_idx_u32)?;
 
