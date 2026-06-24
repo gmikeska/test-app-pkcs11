@@ -92,7 +92,7 @@ strategy = "account-for-account-batched"
 # and have sufficient balance to cover all transaction fees before the
 # migration begins. For account-for-account-batched, this account is
 # migrated last so it can fund fees for all preceding transactions.
-fee_account_idx = 0
+fee_account_idx = 99
 
 # Fee rate in sat/vB for the sweep transactions.
 # The tool shows fee estimates before asking for confirmation.
