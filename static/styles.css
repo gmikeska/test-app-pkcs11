@@ -314,6 +314,34 @@ h2 { margin: 0 0 12px; font-size: 1.15rem; color: var(--text); }
   font-weight: 600;
 }
 
+/* Federation version sub-tabs (receive page). */
+.fed-tabs {
+  display: flex;
+  gap: 2px;
+  margin: 12px 0 0 0;
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+}
+.fed-tab {
+  padding: 6px 14px;
+  font-size: 0.85rem;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  transform: translateY(1px);
+  cursor: pointer;
+  user-select: none;
+}
+.fed-tab:hover { color: var(--text); }
+.fed-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.fed-panel { display: none; }
+.fed-panel.active { display: block; }
+
 /* Send form. */
 .stack-form {
   display: flex;

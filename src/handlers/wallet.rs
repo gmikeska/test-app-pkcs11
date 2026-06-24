@@ -97,6 +97,21 @@ pub struct AddressView {
     pub unspent_btc: String,
 }
 
+/// Addresses grouped by federation version for the tabbed receive page.
+#[derive(Debug, Serialize, Clone)]
+pub struct FederationAddressGroup {
+    /// Federation version index (0 = oldest).
+    pub version: usize,
+    /// Tab label, e.g. "v3 (current)" or "v2".
+    pub label: String,
+    /// Whether this is the newest (current) federation.
+    pub is_current: bool,
+    /// External keychain addresses for this federation.
+    pub addresses: Vec<AddressView>,
+    /// Change addresses with funds for this federation.
+    pub change_addresses: Vec<AddressView>,
+}
+
 // ---------------------------------------------------------------------------
 // Templates
 // ---------------------------------------------------------------------------
@@ -115,8 +130,7 @@ pub struct FlashBanner {
 struct ReceiveTemplate {
     header: WalletHeader,
     balance: BalanceView,
-    addresses: Vec<AddressView>,
-    change_addresses: Vec<AddressView>,
+    federation_groups: Vec<FederationAddressGroup>,
     flash: Option<FlashBanner>,
 }
 
@@ -270,35 +284,64 @@ pub async fn receive(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
 ) -> Result<Response, AppError> {
+    use asterism_core::federated_wallet::FederatedWallet as _;
+
     let uw = state.wallet_manager.load_or_init(user.id).await?;
     uw.sync().await?;
-    let revealed = uw.reveal_addresses(REVEAL_COUNT).await?;
+    let _revealed = uw.reveal_addresses(REVEAL_COUNT).await?;
     let balance = uw.balance().await;
     let tip_height = uw.tip_height().await;
 
     let descriptor = lookup_descriptor(&state, user.id).await?;
 
-    let addresses = revealed
+    let fw = uw.federated_wallet();
+    let total_versions = fw.federation_count();
+    let change_addrs = uw.change_addresses().await;
+
+    let revealed = uw.revealed_addresses_all_versions(REVEAL_COUNT).await;
+
+    let mut federation_groups: Vec<FederationAddressGroup> = revealed
         .into_iter()
-        .map(|a| AddressView {
-            index: a.index,
-            address: a.address,
-            received_btc: format_btc(a.received),
-            unspent_btc: format_btc(a.unspent),
+        .rev()
+        .map(|(version_idx, addrs)| {
+            let is_current = version_idx == total_versions - 1;
+            let label = if is_current {
+                format!("v{} (current)", version_idx + 1)
+            } else {
+                format!("v{}", version_idx + 1)
+            };
+
+            let addresses = addrs
+                .into_iter()
+                .map(|a| AddressView {
+                    index: a.index,
+                    address: a.address,
+                    received_btc: format_btc(a.received),
+                    unspent_btc: format_btc(a.unspent),
+                })
+                .collect();
+
+            FederationAddressGroup {
+                version: version_idx,
+                label,
+                is_current,
+                addresses,
+                change_addresses: Vec::new(),
+            }
         })
         .collect();
 
-    let change_addresses = uw
-        .change_addresses()
-        .await
-        .into_iter()
-        .map(|a| AddressView {
-            index: a.index,
-            address: a.address,
-            received_btc: format_btc(a.received),
-            unspent_btc: format_btc(a.unspent),
-        })
-        .collect();
+    if let Some(current_group) = federation_groups.iter_mut().find(|g| g.is_current) {
+        current_group.change_addresses = change_addrs
+            .into_iter()
+            .map(|a| AddressView {
+                index: a.index,
+                address: a.address,
+                received_btc: format_btc(a.received),
+                unspent_btc: format_btc(a.unspent),
+            })
+            .collect();
+    }
 
     Ok(ReceiveTemplate {
         header: WalletHeader {
@@ -311,8 +354,7 @@ pub async fn receive(
             policy: policy_label(&state),
         },
         balance: BalanceView::from(balance),
-        addresses,
-        change_addresses,
+        federation_groups,
         flash: None,
     }
     .into_response())

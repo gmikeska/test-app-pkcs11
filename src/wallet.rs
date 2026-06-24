@@ -895,6 +895,51 @@ impl UserWallet {
         Ok(results)
     }
 
+    /// Derive external addresses for every federation version, with UTXO data
+    /// from the inner wallet where available. Returns `(version_index, addresses)`
+    /// pairs in oldest-first order.
+    pub async fn revealed_addresses_all_versions(
+        &self,
+        count: u32,
+    ) -> Vec<(usize, Vec<RevealedAddress>)> {
+        use asterism_core::federated_wallet::FederatedWallet as _;
+
+        let wallet = self.inner.lock().await;
+        let outputs: Vec<_> = wallet.list_output().collect();
+        drop(wallet);
+
+        self.federated_wallet
+            .federation_wallets()
+            .iter()
+            .map(|fw| {
+                let addrs: Vec<RevealedAddress> = (0..count)
+                    .map(|index| {
+                        let info = fw.wallet.peek_address(KeychainKind::External, index);
+                        let spk = info.address.script_pubkey();
+                        let mut received = Amount::ZERO;
+                        let mut unspent = Amount::ZERO;
+                        for utxo in &outputs {
+                            if utxo.txout.script_pubkey == spk {
+                                received += utxo.txout.value;
+                                if !utxo.is_spent {
+                                    unspent += utxo.txout.value;
+                                }
+                            }
+                        }
+                        RevealedAddress {
+                            index,
+                            keychain: info.keychain,
+                            address: info.address.to_string(),
+                            received,
+                            unspent,
+                        }
+                    })
+                    .collect();
+                (fw.index, addrs)
+            })
+            .collect()
+    }
+
     /// List Internal (change) keychain addresses that have ever received funds.
     pub async fn change_addresses(&self) -> Vec<RevealedAddress> {
         let wallet = self.inner.lock().await;
@@ -951,8 +996,21 @@ impl UserWallet {
     /// Look up the keychain + derivation index BDK has assigned to the
     /// given address, if any.
     pub async fn locate_address(&self, address: &Address) -> Option<(KeychainKind, u32)> {
+        let spk = address.script_pubkey();
+
         let wallet = self.inner.lock().await;
-        wallet.derivation_of_spk(address.script_pubkey())
+        if let Some(result) = wallet.derivation_of_spk(spk.clone()) {
+            return Some(result);
+        }
+        drop(wallet);
+
+        use asterism_core::federated_wallet::FederatedWallet as _;
+        for fw in self.federated_wallet.federation_wallets() {
+            if let Some(result) = fw.wallet.derivation_of_spk(spk.clone()) {
+                return Some(result);
+            }
+        }
+        None
     }
 
     /// Return every wallet transaction that pays into `address`.

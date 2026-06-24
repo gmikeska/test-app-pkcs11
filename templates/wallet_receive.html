@@ -1,23 +1,75 @@
 {% extends "_wallet_layout.html" %}
 
 {% block tab_body %}
+<style>
+.fed-tabs{display:flex;gap:2px;margin:12px 0 0;padding:0;border-bottom:1px solid var(--border)}
+.fed-tab{padding:6px 14px;font-size:.85rem;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;transform:translateY(1px);cursor:pointer;user-select:none}
+.fed-tab:hover{color:var(--text)}
+.fed-tab.active{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
+.fed-panel{display:none}
+.fed-panel.active{display:block}
+</style>
 <section class="card">
   <h2>Receive addresses</h2>
-  <p class="muted">First {{ addresses.len() }} addresses on the external keychain (BIP-48 multisig). Click any address to view receipts.</p>
-  {% if addresses.is_empty() %}
-    <p class="muted">No addresses derived yet.</p>
-  {% else %}
+  <p class="muted">First 20 addresses on the external keychain (BIP-48 multisig). Click any address to view receipts.</p>
+
+  {% if federation_groups.len() > 1 %}
+  <nav class="fed-tabs" role="tablist">
+    {% for g in federation_groups %}
+      <button class="fed-tab{% if g.is_current %} active{% endif %}"
+              role="tab"
+              aria-selected="{% if g.is_current %}true{% else %}false{% endif %}"
+              aria-controls="fed-panel-{{ g.version }}"
+              data-fed-version="{{ g.version }}"
+              onclick="switchFedTab({{ g.version }})">{{ g.label }}</button>
+    {% endfor %}
+  </nav>
+  {% endif %}
+
+  {% for g in federation_groups %}
+  <div class="fed-panel{% if g.is_current %} active{% endif %}"
+       id="fed-panel-{{ g.version }}"
+       role="tabpanel">
+    {% if g.addresses.is_empty() %}
+      <p class="muted">No addresses derived yet.</p>
+    {% else %}
+      <table class="data">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Address</th>
+            <th>Unspent (BTC)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for a in g.addresses %}
+            <tr>
+              <td>{{ a.index }}</td>
+              <td>
+                <a href="/wallet/addresses/{{ a.address }}">
+                  <code>{{ a.address }}</code>
+                </a>
+              </td>
+              <td>{{ a.unspent_btc }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+
+    {% if !g.change_addresses.is_empty() %}
+    <h3 style="margin-top: 1.5rem;">Change addresses</h3>
+    <p class="muted">Internal keychain addresses holding change from sent transactions.</p>
     <table class="data">
       <thead>
         <tr>
           <th>#</th>
           <th>Address</th>
-          <!-- <th>Received (BTC)</th> -->
           <th>Unspent (BTC)</th>
         </tr>
       </thead>
       <tbody>
-        {% for a in addresses %}
+        {% for a in g.change_addresses %}
           <tr>
             <td>{{ a.index }}</td>
             <td>
@@ -25,43 +77,26 @@
                 <code>{{ a.address }}</code>
               </a>
             </td>
-            <!-- <td>{{ a.received_btc }}</td> -->
             <td>{{ a.unspent_btc }}</td>
           </tr>
         {% endfor %}
       </tbody>
     </table>
-  {% endif %}
+    {% endif %}
+  </div>
+  {% endfor %}
 </section>
 
-{% if !change_addresses.is_empty() %}
-<section class="card">
-  <h2>Change addresses</h2>
-  <p class="muted">Internal keychain addresses holding change from sent transactions.</p>
-  <table class="data">
-    <thead>
-      <tr>
-        <th>#</th>
-        <th>Address</th>
-        <!-- <th>Received (BTC)</th> -->
-        <th>Unspent (BTC)</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for a in change_addresses %}
-        <tr>
-          <td>{{ a.index }}</td>
-          <td>
-            <a href="/wallet/addresses/{{ a.address }}">
-              <code>{{ a.address }}</code>
-            </a>
-          </td>
-          <!-- <td>{{ a.received_btc }}</td> -->
-          <td>{{ a.unspent_btc }}</td>
-        </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</section>
-{% endif %}
+<script>
+function switchFedTab(version) {
+  document.querySelectorAll('.fed-tab').forEach(function(t) {
+    var isTarget = t.getAttribute('data-fed-version') == version;
+    t.classList.toggle('active', isTarget);
+    t.setAttribute('aria-selected', isTarget ? 'true' : 'false');
+  });
+  document.querySelectorAll('.fed-panel').forEach(function(p) {
+    p.classList.toggle('active', p.id === 'fed-panel-' + version);
+  });
+}
+</script>
 {% endblock %}
