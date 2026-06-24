@@ -976,6 +976,16 @@ impl UserElementsWallet {
     pub fn daemon_wallet_name(&self) -> &str {
         &self.daemon_wallet_name
     }
+
+    /// Sign a PSET using this wallet's PKCS#11 signers.
+    /// Only inputs whose `bip32_derivation` contains a matching fingerprint
+    /// will be signed. Callers should clear `bip32_derivation` on
+    /// non-owned inputs before calling this to prevent cross-signing.
+    pub fn sign_pset_with_signers(&self, pset: &mut Pset) {
+        for signer in self.signers.iter() {
+            let _ = signer.sign_pset(pset);
+        }
+    }
 }
 
 fn derive_input_secrets_with_rpc(

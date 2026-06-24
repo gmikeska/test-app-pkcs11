@@ -31,7 +31,7 @@ use bdk_wallet::{AddressInfo, ChangeSet, KeychainKind, SignOptions, Wallet};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use bitcoin::consensus::Encodable;
-use bitcoin::{Address, Amount, FeeRate, Network, NetworkKind, ScriptBuf, Txid};
+use bitcoin::{Address, Amount, FeeRate, Network, NetworkKind, OutPoint, ScriptBuf, Txid, Weight};
 use bitcoincore_rpc::{Auth, Client as RpcClient, RpcApi};
 use sqlx::PgPool;
 use tokio::sync::Mutex as AsyncMutex;
@@ -1278,6 +1278,91 @@ impl UserWallet {
             amount_sat: amount_sat_i64,
             fee_sat: fee_sat_i64,
         })
+    }
+
+    /// Build a populated `psbt::Input` for a UTXO owned by this wallet,
+    /// suitable for use as a foreign input in a multi-wallet migration PSBT.
+    ///
+    /// Searches version wallets first, then falls back to the inner wallet.
+    /// The returned `Weight` is a conservative satisfaction-weight estimate
+    /// for P2WSH multisig inputs (used by BDK for fee estimation).
+    pub async fn psbt_input_for_utxo(
+        &self,
+        outpoint: OutPoint,
+    ) -> Result<(bitcoin::psbt::Input, Weight), WalletError> {
+        // ~260 WU for a 2-of-3 P2WSH multisig witness satisfaction.
+        let satisfaction_weight = Weight::from_witness_data_size(260);
+
+        for vw_mutex in &self.version_wallets {
+            let vw = vw_mutex.lock().await;
+            if vw.get_utxo(outpoint).is_some() {
+                let local = vw
+                    .get_utxo(outpoint)
+                    .expect("checked above");
+                let psbt_input = vw
+                    .get_psbt_input(local, None, false)
+                    .map_err(|e| WalletError::BuildTx(e.to_string()))?;
+                return Ok((psbt_input, satisfaction_weight));
+            }
+        }
+        let wallet = self.inner.lock().await;
+        let local = wallet
+            .get_utxo(outpoint)
+            .ok_or_else(|| WalletError::BuildTx(format!("UTXO {outpoint} not found in wallet")))?;
+        let psbt_input = wallet
+            .get_psbt_input(local, None, false)
+            .map_err(|e| WalletError::BuildTx(e.to_string()))?;
+        Ok((psbt_input, satisfaction_weight))
+    }
+
+    /// Sign specific inputs in a PSBT using this wallet's registered signers.
+    ///
+    /// Only inputs at `input_indices` are signed. Other inputs have their
+    /// `bip32_derivation` temporarily cleared so that the PKCS#11 signers
+    /// skip them (they match by fingerprint in bip32_derivation).
+    pub async fn sign_migration_inputs(
+        &self,
+        psbt: &mut bitcoin::Psbt,
+        input_indices: &[usize],
+    ) -> Result<(), WalletError> {
+        let mut saved: Vec<(usize, std::collections::BTreeMap<bitcoin::secp256k1::PublicKey, (Fingerprint, DerivationPath)>)> = Vec::new();
+        for (i, inp) in psbt.inputs.iter_mut().enumerate() {
+            if !input_indices.contains(&i) {
+                saved.push((i, std::mem::take(&mut inp.bip32_derivation)));
+            }
+        }
+
+        let wallet = self.inner.lock().await;
+        let sign_only = SignOptions {
+            try_finalize: false,
+            trust_witness_utxo: true,
+            ..SignOptions::default()
+        };
+        let _ = wallet
+            .sign(psbt, sign_only)
+            .map_err(|e| WalletError::Sign(e.to_string()))?;
+        drop(wallet);
+
+        for (i, derivation) in saved {
+            psbt.inputs[i].bip32_derivation = derivation;
+        }
+        Ok(())
+    }
+
+    /// Lock and return a guard to the inner BDK wallet.
+    /// Used by the migration tool to build multi-wallet PSBTs.
+    pub async fn inner_wallet(&self) -> tokio::sync::MutexGuard<'_, Wallet> {
+        self.inner.lock().await
+    }
+
+    /// Borrow the shared RPC client.
+    pub fn rpc(&self) -> &Arc<RpcClient> {
+        &self.rpc
+    }
+
+    /// Borrow the DB pool.
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     /// Build → sign (m-of-n) → finalize → broadcast → persist.

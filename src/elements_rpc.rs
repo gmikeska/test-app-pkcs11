@@ -252,6 +252,64 @@ impl ElementsRpc {
             .ok_or_else(|| ElementsRpcError::BadResponse("gettransaction returned no hex".into()))
     }
 
+    /// Create a funded PSET using the fee account's daemon wallet with
+    /// explicit inputs (from multiple wallets) and fee subtracted only
+    /// from the specified output index.
+    pub fn wallet_create_funded_psbt_with_inputs(
+        &self,
+        wallet: &str,
+        inputs: &[Value],
+        outputs: &[Value],
+        fee_subtract_output_index: usize,
+        fee_rate_btc_per_kb: f64,
+    ) -> Result<FundedPsbt, ElementsRpcError> {
+        let client = self.client_for_wallet(wallet)?;
+        let result: FundedPsbt = client.call(
+            "walletcreatefundedpsbt",
+            &[
+                json!(inputs),
+                json!(outputs),
+                json!(0),
+                json!({
+                    "feeRate": fee_rate_btc_per_kb,
+                    "subtractFeeFromOutputs": [fee_subtract_output_index],
+                    "add_inputs": false,
+                }),
+                json!(true),
+            ],
+        )?;
+        Ok(result)
+    }
+
+    /// Create a raw PSET with explicit inputs and outputs (no wallet context).
+    pub fn create_psbt(
+        &self,
+        inputs: &[Value],
+        outputs: &[Value],
+    ) -> Result<String, ElementsRpcError> {
+        let client = self.base_client()?;
+        let result: String = client.call("createpsbt", &[json!(inputs), json!(outputs)])?;
+        Ok(result)
+    }
+
+    /// Update a PSET with metadata from a specific daemon wallet (witness
+    /// data, bip32 derivations) WITHOUT signing.
+    pub fn wallet_update_psbt(
+        &self,
+        wallet: &str,
+        psbt_base64: &str,
+    ) -> Result<String, ElementsRpcError> {
+        let client = self.client_for_wallet(wallet)?;
+        let result: serde_json::Value = client.call(
+            "walletprocesspsbt",
+            &[json!(psbt_base64), json!(false), json!("ALL"), json!(true)],
+        )?;
+        result["psbt"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| ElementsRpcError::BadResponse("walletprocesspsbt returned no psbt".into()))
+    }
+
     pub fn send_raw_transaction(&self, hex: &str) -> Result<String, ElementsRpcError> {
         let client = self.base_client()?;
         let txid: Value = client.call("sendrawtransaction", &[json!(hex)])?;

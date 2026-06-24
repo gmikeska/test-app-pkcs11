@@ -996,7 +996,19 @@ async fn run_elements_migration(
 
     println!("\n  Executing Elements migration...");
 
-    for wallet in &user_wallets {
+    // Collect all UTXOs and destination addresses per account.
+    let fee_acct_idx_el = cfg.migration.fee_account_idx;
+    struct ElementsMigrationData {
+        wallet_idx: usize,
+        acct_idx: i32,
+        daemon_wallet: String,
+        balance_btc: f64,
+        utxos: Vec<test_app_pkcs11::elements_rpc::ElementsUtxo>,
+        dest_address: String,
+    }
+    let mut migration_data: Vec<ElementsMigrationData> = Vec::new();
+
+    for (wi, wallet) in user_wallets.iter().enumerate() {
         let acct_idx = wallet.account_idx();
         let balance = match wallet.balance().await {
             Ok(b) => b,
@@ -1010,6 +1022,22 @@ async fn run_elements_migration(
             println!("  Account {acct_idx}: no funds, skipping sweep.");
             continue;
         }
+
+        let daemon_name = wallet.daemon_wallet_name().to_string();
+        let utxos = {
+            let rpc = rpc.clone();
+            let wn = daemon_name.clone();
+            match tokio::task::spawn_blocking(move || rpc.list_unspent(&wn))
+                .await
+                .expect("spawn_blocking join")
+            {
+                Ok(u) => u,
+                Err(e) => {
+                    eprintln!("error: failed to list UTXOs for Elements account {acct_idx}: {e}");
+                    std::process::exit(1);
+                }
+            }
+        };
 
         // Get the new federation's receive address from the new daemon wallet.
         let versions =
@@ -1030,12 +1058,10 @@ async fn run_elements_migration(
             }
         };
 
-        // Derive the new federation's first receive address.
         let dest_address = {
             type CtDesc = asterism_elements::elements_miniscript::confidential::Descriptor<
                 asterism_elements::elements_miniscript::descriptor::DescriptorPublicKey,
             >;
-
             let receive_str = latest.descriptor.replace("/<0;1>/*", "/0/*");
             let ct_desc = match CtDesc::from_str(&receive_str) {
                 Ok(d) => d,
@@ -1059,15 +1085,12 @@ async fn run_elements_migration(
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "error: failed to derive address for account {acct_idx}: {e}"
-                    );
+                    eprintln!("error: failed to derive address for account {acct_idx}: {e}");
                     continue;
                 }
             }
         };
 
-        // Enrich account summary with destination.
         if let Some(summary) = account_summaries
             .iter_mut()
             .find(|s| s.account_idx == acct_idx)
@@ -1075,30 +1098,363 @@ async fn run_elements_migration(
             summary.destination_address = Some(truncate_address(&dest_address));
         }
 
-        match wallet
-            .sweep_to(
-                &dest_address,
-                cfg.migration.fee_rate_sat_per_vb,
-                Some(format!("federation-migration-elements-account-{acct_idx}")),
-            )
-            .await
-        {
-            Ok(result) => {
-                println!(
-                    "  Account {acct_idx}: swept {} sat (txid: {}, fee: {} sat)",
-                    result.amount_sat, result.txid, result.fee_sat
-                );
+        migration_data.push(ElementsMigrationData {
+            wallet_idx: wi,
+            acct_idx,
+            daemon_wallet: daemon_name,
+            balance_btc: btc,
+            utxos,
+            dest_address,
+        });
+    }
+
+    if migration_data.is_empty() {
+        println!("  No funded accounts to migrate.");
+    } else if fee_acct_idx_el.is_some() && migration_data.len() > 1 {
+        // Fee-account-pays: build a single PSET with all inputs and outputs.
+        let fee_idx = fee_acct_idx_el.unwrap() as i32;
+
+        // Build PSET inputs and outputs.
+        let mut pset_inputs = Vec::new();
+        let mut daemon_wallets_involved = Vec::new();
+        for data in &migration_data {
+            for utxo in &data.utxos {
+                pset_inputs.push(serde_json::json!({
+                    "txid": utxo.txid,
+                    "vout": utxo.vout
+                }));
             }
-            Err(e) => {
-                eprintln!(
-                    "error: sweep failed for Elements account {acct_idx}: {e}\n\
-                     Continuing with remaining accounts..."
-                );
-                continue;
+            if !daemon_wallets_involved.contains(&data.daemon_wallet) {
+                daemon_wallets_involved.push(data.daemon_wallet.clone());
             }
         }
 
-        // Mark old federation versions as migrated.
+        // Build outputs: customer accounts get exact balance, fee account
+        // gets its balance (fee will be subtracted from it below).
+        let mut pset_outputs = Vec::new();
+        let mut fee_output_idx: Option<usize> = None;
+        for data in &migration_data {
+            if data.acct_idx == fee_idx {
+                fee_output_idx = Some(pset_outputs.len());
+            }
+            pset_outputs.push(serde_json::json!({
+                data.dest_address.clone(): data.balance_btc
+            }));
+        }
+
+        let fee_out_idx = fee_output_idx.unwrap_or(0);
+
+        // Create raw PSET with explicit inputs/outputs.
+        let base_pset_b64 = {
+            let rpc = rpc.clone();
+            let inputs = pset_inputs.clone();
+            let outputs = pset_outputs.clone();
+            match tokio::task::spawn_blocking(move || rpc.create_psbt(&inputs, &outputs))
+                .await
+                .expect("spawn_blocking join")
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: createpsbt failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        };
+
+        // Chain walletprocesspsbt (sign=false) through each daemon wallet
+        // to populate witness_utxo, witness_script, bip32_derivation.
+        let mut updated_pset_b64 = base_pset_b64;
+        for wn in &daemon_wallets_involved {
+            let rpc = rpc.clone();
+            let wn = wn.clone();
+            let wn_display = wn.clone();
+            let pset = updated_pset_b64.clone();
+            updated_pset_b64 = match tokio::task::spawn_blocking(move || {
+                rpc.wallet_update_psbt(&wn, &pset)
+            })
+            .await
+            .expect("spawn_blocking join")
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: walletprocesspsbt failed for {wn_display}: {e}");
+                    std::process::exit(1);
+                }
+            };
+        }
+
+        // Now we need to subtract the fee from the fee account's output.
+        // Re-create with fee subtraction using the fee wallet.
+        // Actually, `createpsbt` doesn't compute fees. Let's use
+        // `walletcreatefundedpsbt` on the fee wallet instead, with explicit
+        // inputs and subtractFeeFromOutputs targeting the fee output.
+        let funded = {
+            let rpc = rpc.clone();
+            let inputs = pset_inputs;
+            let outputs = pset_outputs;
+            let fee_wallet = migration_data
+                .iter()
+                .find(|d| d.acct_idx == fee_idx)
+                .map(|d| d.daemon_wallet.clone())
+                .unwrap_or_default();
+            #[allow(clippy::cast_precision_loss)]
+            let fee_rate_btc_kb = (cfg.migration.fee_rate_sat_per_vb as f64) * 1000.0 / 100_000_000.0;
+            let foi = fee_out_idx;
+            match tokio::task::spawn_blocking(move || {
+                rpc.wallet_create_funded_psbt_with_inputs(
+                    &fee_wallet,
+                    &inputs,
+                    &outputs,
+                    foi,
+                    fee_rate_btc_kb,
+                )
+            })
+            .await
+            .expect("spawn_blocking join")
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("error: walletcreatefundedpsbt failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        };
+
+        // Chain walletprocesspsbt (sign=false) through NON-fee daemon
+        // wallets to add their witness data to the funded PSET.
+        let mut final_pset_b64 = funded.psbt;
+        for wn in &daemon_wallets_involved {
+            let fee_wn = migration_data
+                .iter()
+                .find(|d| d.acct_idx == fee_idx)
+                .map(|d| d.daemon_wallet.as_str())
+                .unwrap_or("");
+            if wn == fee_wn {
+                continue; // Fee wallet already populated by walletcreatefundedpsbt.
+            }
+            let rpc = rpc.clone();
+            let wn = wn.clone();
+            let wn_display = wn.clone();
+            let pset = final_pset_b64.clone();
+            final_pset_b64 = match tokio::task::spawn_blocking(move || {
+                rpc.wallet_update_psbt(&wn, &pset)
+            })
+            .await
+            .expect("spawn_blocking join")
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: walletprocesspsbt failed for {wn_display}: {e}");
+                    std::process::exit(1);
+                }
+            };
+        }
+
+        // Parse, blind, sign, finalize, broadcast.
+        let result = {
+            let pset_b64 = final_pset_b64;
+            let rpc = rpc.clone();
+            let migration_data_ref = &migration_data;
+            let user_wallets_ref = &user_wallets;
+
+            use base64::Engine;
+            use base64::engine::general_purpose::STANDARD as BASE64;
+            use elements::encode::deserialize as consensus_deserialize;
+            use elements::encode::serialize as consensus_serialize;
+            use elements::pset::PartiallySignedTransaction as Pset;
+            use asterism_elements::elements_miniscript::slip77::MasterBlindingKey;
+
+            let pset_bytes = BASE64
+                .decode(pset_b64.as_bytes())
+                .expect("valid base64 from RPC");
+            let pset: Pset =
+                consensus_deserialize(&pset_bytes).expect("valid PSET from RPC");
+            let unsigned = asterism_elements::UnsignedPset::new(pset)
+                .expect("PSET has no signatures yet");
+
+            // Derive input secrets for blinding. Each input's blinding
+            // key comes from the owning account.
+            let mut inp_secrets = std::collections::HashMap::new();
+            let mut input_offset = 0;
+            for data in migration_data_ref {
+                let wallet = &user_wallets_ref[data.wallet_idx];
+                let mbk_bytes = derive_elements_mbk(wallet.user_id(), wallet.account_idx(), 0);
+                let mbk = MasterBlindingKey::from(mbk_bytes);
+                for (u_idx, _utxo) in data.utxos.iter().enumerate() {
+                    let global_idx = input_offset + u_idx;
+                    let input = &unsigned.as_pset().inputs()[global_idx];
+                    let utxo_out = input.witness_utxo.as_ref();
+                    if let Some(utxo_out) = utxo_out {
+                        use elements::confidential;
+                        if let (
+                            confidential::Value::Explicit(value),
+                            confidential::Asset::Explicit(asset),
+                        ) = (utxo_out.value, utxo_out.asset)
+                        {
+                            inp_secrets.insert(
+                                global_idx,
+                                asterism_elements::explicit_txout_secrets(asset, value),
+                            );
+                        } else {
+                            let slip77_key = asterism_elements::slip77_blinding_key(
+                                &mbk,
+                                &utxo_out.script_pubkey,
+                            );
+                            match asterism_elements::unblind_input(utxo_out, slip77_key) {
+                                Ok(s) => {
+                                    inp_secrets.insert(global_idx, s);
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "error: failed to unblind input {global_idx} for account {}: {e}",
+                                        data.acct_idx
+                                    );
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                    }
+                }
+                input_offset += data.utxos.len();
+            }
+
+            let blinded = asterism_elements::blind_pset(unsigned, &inp_secrets)
+                .expect("blinding succeeds");
+            let mut pset = blinded.into_pset();
+
+            // Sign with each account's signers.
+            for data in migration_data_ref {
+                let wallet = &user_wallets_ref[data.wallet_idx];
+                // The wallet's signers are accessible through the UserElementsWallet.
+                // We need to sign only this account's inputs — but Elements
+                // signers (like Bitcoin) match by fingerprint in bip32_derivation.
+                // Use the same masking approach: clear bip32_derivation from
+                // non-owned inputs before signing, then restore.
+                let start = {
+                    let mut off = 0;
+                    for d in migration_data_ref {
+                        if d.acct_idx == data.acct_idx {
+                            break;
+                        }
+                        off += d.utxos.len();
+                    }
+                    off
+                };
+                let end = start + data.utxos.len();
+
+                // Save and clear non-owned bip32_derivation.
+                let mut saved = Vec::new();
+                for (i, inp) in pset.inputs_mut().iter_mut().enumerate() {
+                    if i < start || i >= end {
+                        saved.push((i, std::mem::take(&mut inp.bip32_derivation)));
+                    }
+                }
+
+                wallet.sign_pset_with_signers(&mut pset);
+
+                // Restore.
+                for (i, derivation) in saved {
+                    pset.inputs_mut()[i].bip32_derivation = derivation;
+                }
+            }
+
+            // Finalize.
+            asterism_elements::finalize_p2wsh_pset(&mut pset)
+                .expect("finalization succeeds");
+            let tx = pset.extract_tx().expect("extraction succeeds");
+            let raw_hex = {
+                let bytes = consensus_serialize(&tx);
+                let mut hex = String::with_capacity(bytes.len() * 2);
+                for b in &bytes {
+                    use std::fmt::Write;
+                    let _ = write!(hex, "{b:02x}");
+                }
+                hex
+            };
+
+            let rpc_clone = rpc.clone();
+            let hex_clone = raw_hex.clone();
+            let txid = tokio::task::spawn_blocking(move || {
+                rpc_clone.send_raw_transaction(&hex_clone)
+            })
+            .await
+            .expect("spawn_blocking join")
+            .expect("broadcast succeeds");
+
+            println!(
+                "  Broadcast: txid {txid} ({} inputs, {} outputs)",
+                migration_data_ref.iter().map(|d| d.utxos.len()).sum::<usize>(),
+                migration_data_ref.len()
+            );
+
+            for data in migration_data_ref {
+                #[allow(clippy::cast_possible_truncation)]
+                let amount_sat = (data.balance_btc * 100_000_000.0).round() as i64;
+                println!(
+                    "    Account {}: {amount_sat} sat → {}",
+                    data.acct_idx,
+                    truncate_address(&data.dest_address)
+                );
+            }
+
+            #[allow(clippy::cast_possible_truncation)]
+            let fee_sat = (funded.fee * 100_000_000.0).round() as i64;
+            if let Some(fee_data) = migration_data_ref.iter().find(|d| d.acct_idx == fee_idx) {
+                println!(
+                    "    Fee: {fee_sat} sat (paid by account {})",
+                    fee_data.acct_idx
+                );
+            }
+        };
+
+        let _ = result;
+    } else {
+        // No fee account or single account — fall back to per-account sweep.
+        for data in &migration_data {
+            let wallet = &user_wallets[data.wallet_idx];
+            match wallet
+                .sweep_to(
+                    &data.dest_address,
+                    cfg.migration.fee_rate_sat_per_vb,
+                    Some(format!(
+                        "federation-migration-elements-account-{}",
+                        data.acct_idx
+                    )),
+                )
+                .await
+            {
+                Ok(result) => {
+                    println!(
+                        "  Account {}: swept {} sat (txid: {}, fee: {} sat)",
+                        data.acct_idx, result.amount_sat, result.txid, result.fee_sat
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "error: sweep failed for Elements account {}: {e}\n\
+                         Continuing with remaining accounts...",
+                        data.acct_idx
+                    );
+                    continue;
+                }
+            }
+        }
+    }
+
+    // Mark old federation versions as migrated for all accounts.
+    for data in &migration_data {
+        let wallet = &user_wallets[data.wallet_idx];
+        let versions =
+            match db::list_federation_versions_for_elements_wallet(pool, wallet.wallet_id()).await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "warning: failed to list versions for Elements account {}: {e}",
+                        data.acct_idx
+                    );
+                    continue;
+                }
+            };
         let max_version = versions.iter().map(|v| v.version_index).max().unwrap_or(0);
         for v in &versions {
             if v.version_index < max_version {
@@ -1458,8 +1814,10 @@ async fn main() {
         cfg.migration.fee_rate_sat_per_vb,
     );
 
+    let mut migration_plan: Option<asterism_core::MigrationPlan<asterism_core::psbt::UnsignedPsbt>> = None;
+    let mut account_utxo_sets: Vec<asterism_core::AccountUtxoSet> = Vec::new();
+
     if total_balance > Amount::ZERO {
-        let mut account_utxo_sets = Vec::new();
         for wallet in &user_wallets {
             let acct_idx = wallet.account_idx() as u32;
             let utxos = wallet.list_unspent().await;
@@ -1579,6 +1937,7 @@ async fn main() {
         match plan_result {
             Ok(plan) => {
                 display_sweep_plan(&plan, &account_summaries, fee_account_idx, fee_rate);
+                migration_plan = Some(plan);
             }
             Err(e) => {
                 eprintln!("error: sweep plan failed: {e}");
@@ -1763,105 +2122,277 @@ async fn main() {
 
     println!("\n  Executing migration...");
 
-    // For single-account strategies, sweep each wallet individually.
-    // For account-for-account strategies, the sweep plan handles all
-    // accounts at once (the actual PSBT building is left to the consumer
-    // in v1 — we display the plan and mark migration status).
-    for wallet in &user_wallets {
-        let acct_idx = wallet.account_idx() as u32;
-        let balance = wallet.balance().await;
-        if balance.total() == Amount::ZERO {
-            println!("  Account {acct_idx}: no funds, skipping sweep.");
-            continue;
-        }
+    // Build a map from account_idx → wallet index for quick lookup.
+    let wallet_by_acct: std::collections::HashMap<u32, usize> = user_wallets
+        .iter()
+        .enumerate()
+        .map(|(i, w)| (w.account_idx() as u32, i))
+        .collect();
 
-        let path = match wallet_manager.derivation_path_for(acct_idx) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("error: invalid derivation path for account {acct_idx}: {e}");
-                std::process::exit(1);
+    // Build a map from OutPoint → (wallet_index, account_idx) for UTXO ownership.
+    let mut utxo_owner: std::collections::HashMap<bitcoin::OutPoint, (usize, u32)> =
+        std::collections::HashMap::new();
+    for acct_set in &account_utxo_sets {
+        if let Some(&wi) = wallet_by_acct.get(&acct_set.account_idx) {
+            for utxo in &acct_set.utxos {
+                utxo_owner.insert(utxo.outpoint, (wi, acct_set.account_idx));
             }
-        };
-        let new_signer_indices: Vec<usize> = cfg
-            .federation
-            .signers
+        }
+    }
+
+    let plan = migration_plan.expect("plan computed when total_balance > 0");
+    let fee_acct_idx = fee_account_idx.expect("validated earlier");
+    let fee_wallet_idx = *wallet_by_acct.get(&fee_acct_idx).expect("fee account exists");
+
+    for (tx_num, sweep_tx) in plan.sweep_transactions.iter().enumerate() {
+        println!(
+            "\n  Transaction {}/{}:",
+            tx_num + 1,
+            plan.sweep_transactions.len()
+        );
+
+        // Skip synthetic change outpoints (zeroed txid) — they represent
+        // the chained fee-account change from a preceding tx. The actual
+        // UTXO is resolved at execution time from the prior broadcast.
+        let real_utxos: Vec<&bitcoin::OutPoint> = sweep_tx
+            .source_utxos
             .iter()
-            .map(|label| {
-                app_config
-                    .hsm_tokens
-                    .iter()
-                    .position(|t| t.label == *label)
-                    .expect("validated earlier")
+            .filter(|op| {
+                use bitcoin::hashes::Hash;
+                op.txid != bitcoin::Txid::from_byte_array([0u8; 32])
             })
             .collect();
 
-        let all_signers = match hsm.signers_for(wallet.user_id(), &path).await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("error: failed to derive signers for account {acct_idx}: {e}");
-                std::process::exit(1);
-            }
-        };
-        let new_signers: Vec<NetworkPatchedSigner> = new_signer_indices
-            .iter()
-            .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
-            .collect();
+        // Build the PSBT using the fee account's BDK wallet.
+        let fee_wallet = &user_wallets[fee_wallet_idx];
 
-        let new_fed = match asterism_core::Federation::with_key_mode(
-            cfg.federation.threshold,
-            new_signers,
-            asterism_core::network::NetworkType::Bitcoin(app_config.network),
-            KeyMode::Ranged,
-        ) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("error: failed to create federation for account {acct_idx}: {e}");
-                std::process::exit(1);
-            }
-        };
+        // Collect foreign UTXOs (non-fee-account inputs) with their psbt::Input data.
+        let mut foreign_utxo_data: Vec<(
+            bitcoin::OutPoint,
+            bitcoin::psbt::Input,
+            bitcoin::Weight,
+            usize, // owning wallet index
+        )> = Vec::new();
+        let mut fee_utxos: Vec<bitcoin::OutPoint> = Vec::new();
 
-        let dest_desc_str = asterism_core::descriptor::to_multipath_string(
-            new_fed
-                .try_descriptor()
-                .expect("Bitcoin federation has a descriptor"),
-        );
-        let sweep_dest = {
-            let desc: bdk_wallet::miniscript::Descriptor<
-                bdk_wallet::miniscript::DescriptorPublicKey,
-            > = dest_desc_str.parse().expect("valid descriptor");
-            let mut temp_wallet = bdk_wallet::Wallet::create_from_two_path_descriptor(desc)
-                .network(app_config.network)
-                .create_wallet_no_persist()
-                .expect("valid wallet from new descriptor");
-            temp_wallet
-                .reveal_next_address(bdk_wallet::KeychainKind::External)
-                .address
-        };
-
-        match wallet
-            .sweep_to(
-                &sweep_dest,
-                cfg.migration.fee_rate_sat_per_vb,
-                Some(format!("federation-migration-account-{acct_idx}")),
-            )
-            .await
-        {
-            Ok(result) => {
-                println!(
-                    "  Account {acct_idx}: swept {} sat (txid: {}, fee: {} sat)",
-                    result.amount_sat, result.txid, result.fee_sat
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "error: sweep failed for account {acct_idx}: {e}\n\n\
-                         Continuing with remaining accounts..."
-                );
-                continue;
+        for &outpoint in &real_utxos {
+            if let Some(&(wi, _acct_idx)) = utxo_owner.get(outpoint) {
+                if wi == fee_wallet_idx {
+                    fee_utxos.push(*outpoint);
+                } else {
+                    let wallet = &user_wallets[wi];
+                    match wallet.psbt_input_for_utxo(*outpoint).await {
+                        Ok((psbt_input, weight)) => {
+                            foreign_utxo_data.push((*outpoint, psbt_input, weight, wi));
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "error: failed to build PSBT input for {outpoint}: {e}\n\
+                                 Aborting migration."
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
             }
         }
 
-        // Mark old federation versions as migrated for this account.
+        // Build the PSBT on the fee wallet.
+        let psbt = {
+            let mut inner = fee_wallet.inner_wallet().await;
+            let fee_rate_obj =
+                bitcoin::FeeRate::from_sat_per_vb(cfg.migration.fee_rate_sat_per_vb)
+                    .unwrap_or(bitcoin::FeeRate::BROADCAST_MIN);
+
+            let mut builder = inner.build_tx();
+
+            // Add fee account's own UTXOs.
+            for op in &fee_utxos {
+                if let Err(e) = builder.add_utxo(*op) {
+                    eprintln!("error: failed to add fee UTXO {op}: {e}");
+                    std::process::exit(1);
+                }
+            }
+
+            // Add customer UTXOs as foreign inputs.
+            for (outpoint, psbt_input, weight, _wi) in &foreign_utxo_data {
+                if let Err(e) =
+                    builder.add_foreign_utxo(*outpoint, psbt_input.clone(), *weight)
+                {
+                    eprintln!("error: failed to add foreign UTXO {outpoint}: {e}");
+                    std::process::exit(1);
+                }
+            }
+
+            // Only use manually selected UTXOs — don't let BDK pick extras.
+            builder.manually_selected_only();
+
+            // Add explicit outputs for each destination.
+            // The fee account's destination gets drain_to (absorbs the fee).
+            let fee_dest_idx = sweep_tx
+                .destinations
+                .iter()
+                .position(|(addr, _)| {
+                    account_utxo_sets
+                        .iter()
+                        .find(|a| a.account_idx == fee_acct_idx)
+                        .is_some_and(|a| a.destination_address == *addr)
+                });
+
+            for (i, (addr, amount)) in sweep_tx.destinations.iter().enumerate() {
+                if Some(i) == fee_dest_idx {
+                    // Fee account output: use drain_to so it absorbs the mining fee.
+                    builder.drain_to(addr.script_pubkey());
+                } else {
+                    // Customer output: exact amount, no fee deduction.
+                    builder.add_recipient(addr.script_pubkey(), *amount);
+                }
+            }
+
+            builder.fee_rate(fee_rate_obj);
+
+            match builder.finish() {
+                Ok(psbt) => psbt,
+                Err(e) => {
+                    eprintln!("error: PSBT construction failed for tx {}: {e}", tx_num + 1);
+                    std::process::exit(1);
+                }
+            }
+        };
+
+        let mut psbt = psbt;
+
+        // Determine input indices per wallet for targeted signing.
+        // Fee wallet inputs come first (from add_utxo), then foreign inputs.
+        let fee_input_count = fee_utxos.len();
+        let fee_input_indices: Vec<usize> = (0..fee_input_count).collect();
+
+        // Foreign inputs follow fee inputs in the PSBT.
+        let mut customer_input_indices_by_wallet: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (offset, (_outpoint, _psbt_input, _weight, wi)) in
+            foreign_utxo_data.iter().enumerate()
+        {
+            customer_input_indices_by_wallet
+                .entry(*wi)
+                .or_default()
+                .push(fee_input_count + offset);
+        }
+
+        // Sign fee account inputs.
+        if !fee_input_indices.is_empty() {
+            if let Err(e) = fee_wallet
+                .sign_migration_inputs(&mut psbt, &fee_input_indices)
+                .await
+            {
+                eprintln!("error: fee account signing failed: {e}");
+                std::process::exit(1);
+            }
+        }
+
+        // Sign each customer account's inputs.
+        for (wi, indices) in &customer_input_indices_by_wallet {
+            let wallet = &user_wallets[*wi];
+            if let Err(e) = wallet.sign_migration_inputs(&mut psbt, indices).await {
+                eprintln!(
+                    "error: signing failed for account {}: {e}",
+                    wallet.account_idx()
+                );
+                std::process::exit(1);
+            }
+        }
+
+        // Finalize using miniscript's standalone finalizer (works across
+        // descriptors without needing a single wallet).
+        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+        if let Err(errors) = miniscript::psbt::PsbtExt::finalize_mut(&mut psbt, &secp) {
+            eprintln!("error: PSBT finalization failed for tx {}:", tx_num + 1);
+            for e in &errors {
+                eprintln!("  input error: {e}");
+            }
+            std::process::exit(1);
+        }
+
+        // Extract and broadcast.
+        let tx = match psbt.extract_tx() {
+            Ok(tx) => tx,
+            Err(e) => {
+                eprintln!("error: failed to extract tx {}: {e}", tx_num + 1);
+                std::process::exit(1);
+            }
+        };
+        let txid = tx.compute_txid();
+        let mut raw = Vec::new();
+        bitcoin::consensus::Encodable::consensus_encode(&tx, &mut raw)
+            .expect("consensus encode succeeds");
+
+        let raw_clone = raw.clone();
+        let rpc = fee_wallet.rpc().clone();
+        match tokio::task::spawn_blocking(move || {
+            bitcoincore_rpc::RpcApi::send_raw_transaction(&*rpc, &raw_clone[..])
+        })
+        .await
+        {
+            Ok(Ok(broadcast_txid)) => {
+                // Report per-output amounts.
+                let mut output_summary = Vec::new();
+                for (addr, amount) in &sweep_tx.destinations {
+                    let acct = account_utxo_sets
+                        .iter()
+                        .find(|a| a.destination_address == *addr);
+                    if let Some(a) = acct {
+                        output_summary
+                            .push(format!("account {}: {} sat", a.account_idx, amount.to_sat()));
+                    }
+                }
+                println!(
+                    "    Broadcast: txid {broadcast_txid}\n    Outputs: {}",
+                    output_summary.join(", ")
+                );
+            }
+            Ok(Err(e)) => {
+                eprintln!("error: broadcast rejected for tx {}: {e}", tx_num + 1);
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("error: broadcast task failed for tx {}: {e}", tx_num + 1);
+                std::process::exit(1);
+            }
+        }
+
+        // Record the transaction for each involved account.
+        let raw_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(raw.as_slice());
+        for (addr, amount) in &sweep_tx.destinations {
+            let acct = account_utxo_sets
+                .iter()
+                .find(|a| a.destination_address == *addr);
+            if let Some(a) = acct {
+                if let Some(&wi) = wallet_by_acct.get(&a.account_idx) {
+                    let wallet = &user_wallets[wi];
+                    let _ = db::insert_transaction(
+                        wallet.pool(),
+                        &db::NewTransaction {
+                            wallet_id: wallet.wallet_id(),
+                            txid: &txid.to_string(),
+                            recipient: &addr.to_string(),
+                            amount_sat: i64::try_from(amount.to_sat()).unwrap_or(i64::MAX),
+                            fee_sat: 0, // fee attributed to fee account only
+                            raw_tx_hex: &raw_hex,
+                            label: Some(&format!(
+                                "federation-migration-account-{}",
+                                a.account_idx
+                            )),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    // Mark old federation versions as migrated for all accounts.
+    for wallet in &user_wallets {
+        let acct_idx = wallet.account_idx();
         let versions =
             match db::list_federation_versions_for_wallet(&pool, wallet.wallet_id()).await {
                 Ok(v) => v,
