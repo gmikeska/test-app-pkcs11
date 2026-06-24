@@ -66,6 +66,15 @@ pub struct FlashBanner {
     pub kind: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct ElementsFederationAddressGroup {
+    pub version: usize,
+    pub label: String,
+    pub is_current: bool,
+    pub addresses: Vec<ElementsAddressView>,
+    pub change_addresses: Vec<ElementsAddressView>,
+}
+
 // ---------------------------------------------------------------------------
 // Templates
 // ---------------------------------------------------------------------------
@@ -75,8 +84,7 @@ pub struct FlashBanner {
 struct ReceiveTemplate {
     header: ElementsWalletHeader,
     balance: ElementsBalanceView,
-    addresses: Vec<ElementsAddressView>,
-    change_addresses: Vec<ElementsAddressView>,
+    federation_groups: Vec<ElementsFederationAddressGroup>,
     flash: Option<FlashBanner>,
 }
 
@@ -211,8 +219,6 @@ pub async fn receive(
 ) -> Result<Response, AppError> {
     let uw = state.elements_wallet_manager.load_or_init(user.id).await?;
     let tip_height = uw.tip_height().await?;
-    let revealed = uw.reveal_addresses(REVEAL_COUNT).await?;
-    let change = uw.change_addresses(REVEAL_COUNT).await?;
     let balances = uw.balance().await?;
 
     let to_view = |a: crate::elements_wallet::ElementsRevealedAddress| {
@@ -226,12 +232,48 @@ pub async fn receive(
         }
     };
 
-    let addresses: Vec<_> = revealed.into_iter().map(to_view).collect();
-    let change_addresses: Vec<_> = change
-        .into_iter()
-        .filter(|a| a.unspent > 0.000_000_01)
-        .map(to_view)
-        .collect();
+    let version_groups = uw.reveal_addresses_all_versions(REVEAL_COUNT).await?;
+    let total_versions = version_groups.len();
+
+    let versions_for_change =
+        db::list_federation_versions_for_elements_wallet(&state.db, uw.wallet_id()).await?;
+
+    let mut federation_groups: Vec<ElementsFederationAddressGroup> = Vec::new();
+    for (version_idx, daemon_wallet, addrs) in version_groups.into_iter().rev() {
+        let is_current = version_idx == total_versions - 1;
+        let label = if is_current {
+            format!("v{} (current)", version_idx + 1)
+        } else {
+            format!("v{}", version_idx + 1)
+        };
+
+        let addresses: Vec<_> = addrs.into_iter().map(&to_view).collect();
+
+        let change_addresses = if is_current {
+            let desc = versions_for_change
+                .iter()
+                .find(|v| v.wallet_handle == daemon_wallet)
+                .map(|v| v.descriptor.as_str())
+                .unwrap_or(uw.descriptor());
+            uw.change_addresses_for_version(REVEAL_COUNT, desc, &daemon_wallet)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|a| a.unspent > 0.000_000_01)
+                .map(&to_view)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        federation_groups.push(ElementsFederationAddressGroup {
+            version: version_idx,
+            label,
+            is_current,
+            addresses,
+            change_addresses,
+        });
+    }
 
     let total = balances.trusted + balances.untrusted_pending + balances.immature;
     let has_pending = (balances.untrusted_pending + balances.immature) > 0.000_000_01;
@@ -255,8 +297,7 @@ pub async fn receive(
             policy: elements_policy_label(&state),
         },
         balance: balance_view,
-        addresses,
-        change_addresses,
+        federation_groups,
         flash: None,
     }
     .into_response())

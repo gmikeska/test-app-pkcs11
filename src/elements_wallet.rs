@@ -341,9 +341,9 @@ impl ElementsWalletManager {
             .expect("spawn_blocking join")?;
 
         // Record the initial federation version if not already stored.
-        let version_count = db::federation_version_count_for_elements_wallet(&self.pool, row.id)
-            .await
-            .unwrap_or(0);
+        let versions =
+            db::list_federation_versions_for_elements_wallet(&self.pool, row.id).await?;
+        let version_count = versions.len() as i64;
         let signer_count = i32::try_from(self.fed_signer_indices.len()).unwrap_or(0);
         let threshold = i32::try_from(self.fed_threshold).unwrap_or(0);
         if version_count == 0 {
@@ -369,13 +369,26 @@ impl ElementsWalletManager {
             .ok();
         }
 
+        // Use the latest federation version's descriptor and daemon wallet
+        // so balance/send operations target the current federation.
+        let (active_descriptor, active_daemon_wallet) = if let Some(latest) = versions.last() {
+            let rpc = self.rpc.clone();
+            let wn = latest.wallet_handle.clone();
+            tokio::task::spawn_blocking(move || rpc.ensure_wallet_loaded(&wn))
+                .await
+                .expect("spawn_blocking join")?;
+            (latest.descriptor.clone(), latest.wallet_handle.clone())
+        } else {
+            (row.descriptor, row.daemon_wallet_name)
+        };
+
         Ok(UserElementsWallet {
             user_id,
             wallet_id: row.id,
             account_idx: row.account_idx,
             network: self.network,
-            descriptor: row.descriptor,
-            daemon_wallet_name: row.daemon_wallet_name,
+            descriptor: active_descriptor,
+            daemon_wallet_name: active_daemon_wallet,
             signers: signers_arc,
             federation_version_count: usize::try_from(version_count.max(1)).unwrap_or(1),
             rpc: self.rpc.clone(),
@@ -546,6 +559,111 @@ impl UserElementsWallet {
             .expect("spawn_blocking join")?;
 
         // Build script-pubkey maps for unspent and total received.
+        let spk_unspent = build_spk_utxo_map(&utxos);
+        let spk_received = build_spk_received_map(&txs);
+
+        let results = addr_info
+            .into_iter()
+            .enumerate()
+            .map(|(i, (conf_addr, spk))| {
+                let unspent = spk_unspent.get(&spk).copied().unwrap_or(0.0);
+                let received = spk_received.get(&spk).copied().unwrap_or(0.0);
+                ElementsRevealedAddress {
+                    index: u32::try_from(i).unwrap_or(0),
+                    address: conf_addr,
+                    received,
+                    unspent,
+                }
+            })
+            .collect();
+        Ok(results)
+    }
+
+    pub async fn reveal_addresses_all_versions(
+        &self,
+        count: u32,
+    ) -> Result<Vec<(usize, String, Vec<ElementsRevealedAddress>)>, ElementsWalletError> {
+        let versions =
+            db::list_federation_versions_for_elements_wallet(&self.pool, self.wallet_id).await?;
+        if versions.is_empty() {
+            let addrs = self.reveal_addresses(count).await?;
+            return Ok(vec![(0, self.daemon_wallet_name.clone(), addrs)]);
+        }
+        let mut groups = Vec::with_capacity(versions.len());
+        for v in &versions {
+            let addrs = self
+                .derive_addresses_for_version(
+                    count,
+                    "/0/*",
+                    &v.descriptor,
+                    &v.wallet_handle,
+                )
+                .await?;
+            groups.push((
+                usize::try_from(v.version_index).unwrap_or(0),
+                v.wallet_handle.clone(),
+                addrs,
+            ));
+        }
+        Ok(groups)
+    }
+
+    pub async fn change_addresses_for_version(
+        &self,
+        count: u32,
+        descriptor: &str,
+        daemon_wallet: &str,
+    ) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
+        self.derive_addresses_for_version(count, "/1/*", descriptor, daemon_wallet)
+            .await
+    }
+
+    async fn derive_addresses_for_version(
+        &self,
+        count: u32,
+        keychain_suffix: &str,
+        descriptor: &str,
+        daemon_wallet: &str,
+    ) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
+        type CtDesc = asterism_elements::elements_miniscript::confidential::Descriptor<
+            asterism_elements::elements_miniscript::descriptor::DescriptorPublicKey,
+        >;
+
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let desc_str = descriptor.replace("/<0;1>/*", keychain_suffix);
+        let ct_desc = CtDesc::from_str(&desc_str)
+            .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+
+        let secp =
+            asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new();
+        let network = self.network;
+
+        let mut addr_info: Vec<(String, elements::Script)> = Vec::with_capacity(count as usize);
+        for idx in 0..count {
+            let definite = ct_desc
+                .at_derivation_index(idx)
+                .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+            let conf_addr = definite
+                .address(&secp, network.address_params())
+                .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+            let spk = definite.descriptor.script_pubkey();
+            addr_info.push((conf_addr.to_string(), spk));
+        }
+
+        let rpc = self.rpc.clone();
+        let wallet = daemon_wallet.to_string();
+        let (utxos, txs) =
+            tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
+                let utxos = rpc.list_unspent(&wallet)?;
+                let txs = rpc.list_transactions(&wallet)?;
+                Ok((utxos, txs))
+            })
+            .await
+            .expect("spawn_blocking join")?;
+
         let spk_unspent = build_spk_utxo_map(&utxos);
         let spk_received = build_spk_received_map(&txs);
 

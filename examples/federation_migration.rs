@@ -319,7 +319,7 @@ fn display_migration_plan(strategy: &str, total_balance: Amount, fee_rate: u64) 
     }
 }
 
-/// Summary of a discovered account for display purposes.
+/// Summary of a discovered account for display purposes (Bitcoin).
 struct AccountSummary {
     account_idx: i32,
     balance: Amount,
@@ -327,6 +327,14 @@ struct AccountSummary {
     is_fee_account: bool,
     destination_address: Option<String>,
     is_small: bool,
+}
+
+/// Summary of a discovered Elements account for display purposes.
+struct ElementsAccountSummary {
+    account_idx: i32,
+    balance_btc: f64,
+    utxo_count: usize,
+    destination_address: Option<String>,
 }
 
 fn truncate_address(addr: &str) -> String {
@@ -471,7 +479,48 @@ fn display_sweep_plan(
 }
 
 // =========================================================================
-// Main
+// Elements display helpers
+// =========================================================================
+
+fn display_elements_migration_plan(strategy: &str, total_balance_btc: f64, fee_rate: u64) {
+    println!();
+    println!("  Migration Plan");
+    println!("  ──────────────");
+    println!();
+    println!("  Strategy:  {strategy}");
+    println!("  Fee rate:  {fee_rate} sat/vB");
+    println!("  Balance:   {total_balance_btc:.8} L-BTC");
+    if total_balance_btc <= 0.0 {
+        println!();
+        println!("  No funds to migrate. The federation change will be");
+        println!("  recorded without any sweep transactions.");
+    }
+}
+
+fn display_elements_account_table(accounts: &[ElementsAccountSummary]) {
+    let total_balance: f64 = accounts.iter().map(|a| a.balance_btc).sum();
+    println!();
+    println!(
+        "  Accounts: {} active (total balance: {total_balance:.8} L-BTC)",
+        accounts.len(),
+    );
+    println!();
+    for a in accounts {
+        let utxo_label = if a.utxo_count == 1 { "UTXO " } else { "UTXOs" };
+        let dest = a
+            .destination_address
+            .as_deref()
+            .map(|d| format!("  → {}", truncate_address(d)))
+            .unwrap_or_default();
+        println!(
+            "  Account {:>3}  │  {:.8} L-BTC  │  {:>3} {} │{dest}",
+            a.account_idx, a.balance_btc, a.utxo_count, utxo_label,
+        );
+    }
+    println!();
+    println!("  Total balance: {total_balance:.8} L-BTC");
+}
+
 // =========================================================================
 // Elements migration
 // =========================================================================
@@ -541,26 +590,117 @@ async fn run_elements_migration(
         user_wallets.push(wallet);
     }
 
-    // Show balances.
+    // -- Gather current federation state from the first wallet's latest version --
+    let first_wallet = &user_wallets[0];
+    let current_versions = match db::list_federation_versions_for_elements_wallet(
+        pool,
+        first_wallet.wallet_id(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: failed to list federation versions: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let (current_threshold, current_signer_count) = current_versions
+        .last()
+        .map(|v| (v.threshold as u32, v.signer_count as usize))
+        .unwrap_or((app_config.fed_threshold, app_config.fed_signer_indices.len()));
+
+    let current_signers: Vec<(String, String)> = app_config
+        .fed_signer_indices
+        .iter()
+        .take(current_signer_count)
+        .filter_map(|&idx| app_config.hsm_tokens.get(idx))
+        .map(|t| (t.label.clone(), t.label.clone()))
+        .collect();
+
+    display_federation_change(
+        &current_signers,
+        current_threshold,
+        &cfg.federation.signers,
+        cfg.federation.threshold,
+        app_config,
+    );
+
+    // Check if federation is actually changing.
+    let current_labels: Vec<&str> = current_signers.iter().map(|(_, l)| l.as_str()).collect();
+    let new_is_same = current_labels.len() == cfg.federation.signers.len()
+        && current_labels
+            .iter()
+            .all(|l| cfg.federation.signers.iter().any(|nl| nl == l))
+        && current_threshold == cfg.federation.threshold;
+
+    if new_is_same {
+        println!("\n  The proposed federation is identical to the current one.");
+        println!("  Nothing to do.");
+        std::process::exit(0);
+    }
+
+    // -- Collect account summaries (balance + UTXO count) ----------------------
+    let rpc = elements_manager.rpc().clone();
+    let mut account_summaries: Vec<ElementsAccountSummary> = Vec::new();
     let mut total_balance_btc = 0.0_f64;
+
     for wallet in &user_wallets {
         let acct_idx = wallet.account_idx();
-        match wallet.balance().await {
-            Ok(bal) => {
-                let btc = bal.trusted + bal.untrusted_pending;
-                total_balance_btc += btc;
-                println!("  Account {acct_idx}: {btc:.8} L-BTC");
-            }
+        let daemon_name = wallet.daemon_wallet_name().to_string();
+        let balance = match wallet.balance().await {
+            Ok(b) => b,
             Err(e) => {
                 eprintln!("warning: failed to get balance for Elements account {acct_idx}: {e}");
+                continue;
             }
-        }
+        };
+        let btc = balance.trusted + balance.untrusted_pending;
+        total_balance_btc += btc;
+
+        let utxo_count = {
+            let rpc = rpc.clone();
+            let wn = daemon_name;
+            tokio::task::spawn_blocking(move || rpc.list_unspent(&wn))
+                .await
+                .expect("spawn_blocking join")
+                .map(|u| u.len())
+                .unwrap_or(0)
+        };
+
+        account_summaries.push(ElementsAccountSummary {
+            account_idx: acct_idx,
+            balance_btc: btc,
+            utxo_count,
+            destination_address: None,
+        });
     }
-    println!("  Total:   {total_balance_btc:.8} L-BTC");
+
+    display_elements_migration_plan(
+        &cfg.migration.strategy,
+        total_balance_btc,
+        cfg.migration.fee_rate_sat_per_vb,
+    );
+
+    display_elements_account_table(&account_summaries);
 
     if dry_run {
         println!();
-        println!("  Dry Run — no changes were made.");
+        println!("  Dry Run Summary");
+        println!("  ───────────────");
+        println!();
+        println!(
+            "  Accounts to migrate:  {}",
+            account_summaries.iter().filter(|a| a.balance_btc > 0.0).count()
+        );
+        println!("  Total balance:        {total_balance_btc:.8} L-BTC");
+        println!("  Strategy:             {}", cfg.migration.strategy);
+        println!(
+            "  Fee rate:             {} sat/vB",
+            cfg.migration.fee_rate_sat_per_vb
+        );
+        println!();
+        println!("  No changes were made.");
         std::process::exit(0);
     }
 
@@ -633,7 +773,6 @@ async fn run_elements_migration(
                 };
 
             let mbk_hex = if rotate_blinding_key {
-                // Derive fresh MBK using a version-salted derivation.
                 let new_version = i32::try_from(versions.len()).unwrap_or(0);
                 let key = crate::derive_elements_mbk(
                     wallet.user_id(),
@@ -642,7 +781,6 @@ async fn run_elements_migration(
                 );
                 hex_encode_bytes(&key)
             } else {
-                // Reuse existing MBK from the latest federation version.
                 versions
                     .last()
                     .and_then(|v| v.blinding_key.clone())
@@ -850,6 +988,7 @@ async fn run_elements_migration(
     if !confirm("Step 2/3: Execute the fund migration for all Elements accounts?") {
         println!(
             "\n  Federation change recorded but funds NOT migrated.\n  \
+             Old federation addresses still hold {total_balance_btc:.8} L-BTC.\n  \
              Re-run this tool later to complete the migration."
         );
         std::process::exit(0);
@@ -928,6 +1067,14 @@ async fn run_elements_migration(
             }
         };
 
+        // Enrich account summary with destination.
+        if let Some(summary) = account_summaries
+            .iter_mut()
+            .find(|s| s.account_idx == acct_idx)
+        {
+            summary.destination_address = Some(truncate_address(&dest_address));
+        }
+
         match wallet
             .sweep_to(
                 &dest_address,
@@ -971,12 +1118,15 @@ async fn run_elements_migration(
     }
 
     println!();
+    println!("  Post-Migration Balances (old daemon wallets)");
+    println!("  ────────────────────────────────────────────");
     for wallet in &user_wallets {
         let acct_idx = wallet.account_idx();
         match wallet.balance().await {
             Ok(bal) => {
                 let btc = bal.trusted + bal.untrusted_pending;
-                println!("  Account {acct_idx}: {btc:.8} L-BTC");
+                let status = if btc <= 0.000_000_01 { "✓ drained" } else { "⚠ residual" };
+                println!("  Account {acct_idx}: {btc:.8} L-BTC  {status}");
             }
             Err(e) => {
                 eprintln!("warning: post-migration balance check failed for account {acct_idx}: {e}");
@@ -984,8 +1134,42 @@ async fn run_elements_migration(
         }
     }
 
+    // Query balances on the NEW daemon wallets.
+    println!();
+    println!("  New Federation Balances");
+    println!("  ───────────────────────");
+    for wallet in &user_wallets {
+        let acct_idx = wallet.account_idx();
+        let versions =
+            match db::list_federation_versions_for_elements_wallet(pool, wallet.wallet_id()).await {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+        if let Some(latest) = versions.last() {
+            let rpc = elements_manager.rpc().clone();
+            let wn = latest.wallet_handle.clone();
+            match tokio::task::spawn_blocking(move || rpc.get_balances(&wn))
+                .await
+                .expect("spawn_blocking join")
+            {
+                Ok(bal) => {
+                    let btc = bal.trusted + bal.untrusted_pending;
+                    println!("  Account {acct_idx}: {btc:.8} L-BTC  (daemon: {})", latest.wallet_handle);
+                }
+                Err(e) => {
+                    eprintln!("warning: new wallet balance check failed for account {acct_idx}: {e}");
+                }
+            }
+        }
+    }
+
     println!();
     println!("  Elements federation migration complete.");
+    println!(
+        "    Old: {}-of-{}",
+        current_threshold,
+        current_signers.len()
+    );
     println!(
         "    New: {}-of-{}",
         cfg.federation.threshold,
