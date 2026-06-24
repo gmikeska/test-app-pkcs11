@@ -251,6 +251,7 @@ pub struct WalletManager {
     network: Network,
     bip48_coin_index: u32,
     fed_threshold: u32,
+    fed_signer_indices: Vec<usize>,
     hsm: Arc<HsmFleet>,
     cache: AsyncMutex<HashMap<Uuid, Arc<UserWallet>>>,
 }
@@ -275,6 +276,7 @@ impl WalletManager {
             network: config.network,
             bip48_coin_index: config.bip48_coin_index,
             fed_threshold: config.fed_threshold,
+            fed_signer_indices: config.fed_signer_indices.clone(),
             hsm,
             cache: AsyncMutex::new(HashMap::new()),
         })
@@ -362,11 +364,11 @@ impl WalletManager {
         let account_idx_u32 = u32::try_from(account_idx).unwrap_or(0);
         let path = self.derivation_path_for(account_idx_u32)?;
 
-        let signers = self.hsm.signers_for(user_id, &path).await?;
-        let patched: Vec<NetworkPatchedSigner> = signers
+        let all_signers = self.hsm.signers_for(user_id, &path).await?;
+        let patched: Vec<NetworkPatchedSigner> = self
+            .fed_signer_indices
             .iter()
-            .cloned()
-            .map(|s| NetworkPatchedSigner::new(s, self.network))
+            .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), self.network))
             .collect();
         let fed = Federation::with_key_mode(
             self.fed_threshold,
@@ -413,6 +415,7 @@ impl WalletManager {
         &self,
         wallet_id: Uuid,
         current_federation: &Federation<NetworkPatchedSigner>,
+        all_signers: &[Pkcs11Signer],
     ) -> Result<BtcFederatedWallet<NetworkPatchedSigner>, WalletError> {
         let versions = db::list_federation_versions_for_wallet(&self.pool, wallet_id).await?;
 
@@ -446,28 +449,19 @@ impl WalletManager {
                 .map_err(|e| WalletError::CreateWallet(e.to_string()));
         }
 
-        if versions.len() == 1 {
-            // Single stored version — this is the common pre-federation-change
-            // case. Use the live current_federation directly rather than
-            // attempting reconstruction (which requires signer discovery from
-            // Phase 3 of the federation-changes plan).
-            let metadata_wallet = Self::create_metadata_wallet(current_federation, self.network)?;
-            return BtcFederatedWallet::new(current_federation.clone(), metadata_wallet)
-                .map_err(|e| WalletError::CreateWallet(e.to_string()));
-        }
-
-        // Multi-version reconstruction: the first version initializes
-        // the FederatedWallet, subsequent versions are chained via
-        // with_federation(). Each version creates its own metadata wallet
-        // from the stored descriptor.
+        // Reconstruct every stored version from its descriptor so the
+        // FederatedWallet reflects what was actually persisted — not what
+        // the current config says. This keeps wallet loading correct even
+        // when APP_FED_SIGNERS changes between restarts or after a
+        // migration tool run.
         let first = &versions[0];
-        let first_fed = self.reconstruct_federation_from_version(first).await?;
+        let first_fed = Self::reconstruct_federation_from_version(first, all_signers, self.network)?;
         let first_wallet = Self::create_metadata_wallet(&first_fed, self.network)?;
         let mut fw = BtcFederatedWallet::new(first_fed, first_wallet)
             .map_err(|e| WalletError::CreateWallet(e.to_string()))?;
 
         for v in &versions[1..] {
-            let fed = self.reconstruct_federation_from_version(v).await?;
+            let fed = Self::reconstruct_federation_from_version(v, all_signers, self.network)?;
             let w = Self::create_metadata_wallet(&fed, self.network)?;
             fw = fw
                 .with_federation(fed, w)
@@ -495,26 +489,38 @@ impl WalletManager {
     }
 
     /// Reconstruct a `Federation<NetworkPatchedSigner>` from a stored
-    /// federation version row. Rebuilds signers from the HSM fleet at the
-    /// stored derivation path.
-    #[allow(clippy::unused_async)]
-    async fn reconstruct_federation_from_version(
-        &self,
-        _version: &crate::models::FederationVersionRow,
+    /// federation version row. Matches signers from the available pool
+    /// by fingerprint extracted from the stored descriptor.
+    fn reconstruct_federation_from_version(
+        version: &crate::models::FederationVersionRow,
+        all_signers: &[Pkcs11Signer],
+        network: Network,
     ) -> Result<Federation<NetworkPatchedSigner>, WalletError> {
-        // For now, federation reconstruction from stored versions will be
-        // fully implemented when federation changes are supported. The
-        // stored descriptor and snapshot contain enough information to
-        // rebuild the federation, but the signer-discovery path (matching
-        // HSM keys to stored fingerprints) is part of the federation-changes
-        // plan (Phase 1 of that plan). For the initial integration, this
-        // codepath is only reached if there are stored versions, which only
-        // happens once federation changes are exercised.
-        Err(WalletError::CreateWallet(
-            "federation reconstruction from stored versions not yet implemented \
-             (single-federation path bootstraps from current state)"
-                .into(),
-        ))
+        let fingerprints: Vec<String> = extract_fingerprints_from_descriptor(&version.descriptor);
+        let threshold = u32::try_from(version.threshold).unwrap_or(0);
+
+        let mut matched: Vec<NetworkPatchedSigner> = Vec::with_capacity(fingerprints.len());
+        for fp_hex in &fingerprints {
+            let signer = all_signers
+                .iter()
+                .find(|s| format!("{}", s.fingerprint()) == *fp_hex)
+                .ok_or_else(|| {
+                    WalletError::CreateWallet(format!(
+                        "signer with fingerprint {fp_hex} not found in HSM pool \
+                         (needed for federation version {})",
+                        version.version_index
+                    ))
+                })?;
+            matched.push(NetworkPatchedSigner::new(signer.clone(), network));
+        }
+
+        Federation::with_key_mode(
+            threshold,
+            matched,
+            NetworkType::Bitcoin(network),
+            KeyMode::Ranged,
+        )
+        .map_err(|e| WalletError::CreateWallet(e.to_string()))
     }
 
     async fn build_user_wallet(
@@ -528,17 +534,26 @@ impl WalletManager {
         let path = self.derivation_path_for(account_idx_u32)?;
 
         let signers_arc = self.hsm.signers_for(user_id, &path).await?;
-        let patched_owned: Vec<NetworkPatchedSigner> = signers_arc
-            .iter()
-            .cloned()
-            .map(|s| NetworkPatchedSigner::new(s, self.network))
-            .collect();
-        let federation = Federation::with_key_mode(
-            self.fed_threshold,
-            patched_owned,
-            NetworkType::Bitcoin(self.network),
-            KeyMode::Ranged,
-        )?;
+
+        // Reconstruct the current federation from the latest stored
+        // version so we stay consistent with what's in the DB — even if
+        // APP_FED_SIGNERS changed since the wallet was created.
+        let versions = db::list_federation_versions_for_wallet(&self.pool, wallet_id).await?;
+        let federation = if let Some(latest) = versions.last() {
+            Self::reconstruct_federation_from_version(latest, &signers_arc, self.network)?
+        } else {
+            let patched_owned: Vec<NetworkPatchedSigner> = self
+                .fed_signer_indices
+                .iter()
+                .map(|&idx| NetworkPatchedSigner::new(signers_arc[idx].clone(), self.network))
+                .collect();
+            Federation::with_key_mode(
+                self.fed_threshold,
+                patched_owned,
+                NetworkType::Bitcoin(self.network),
+                KeyMode::Ranged,
+            )?
+        };
 
         let (mut wallet, initial_changeset) = if let Some(json) = row.bdk_changeset.clone() {
             let aggregate: ChangeSet =
@@ -574,7 +589,9 @@ impl WalletManager {
 
         // Build the FederatedWallet from stored federation versions, or
         // bootstrap with just the current federation if none are stored yet.
-        let federated_wallet = self.build_federated_wallet(wallet_id, &federation).await?;
+        let federated_wallet = self
+            .build_federated_wallet(wallet_id, &federation, &signers_arc)
+            .await?;
 
         Ok(UserWallet {
             user_id,
@@ -813,10 +830,17 @@ impl UserWallet {
         &self,
         target_count: u32,
     ) -> Result<Vec<RevealedAddress>, WalletError> {
+        use asterism_core::federated_wallet::FederatedWallet as _;
         if target_count == 0 {
             return Ok(Vec::new());
         }
         let target_index = target_count - 1;
+
+        // Derive receive addresses from the *current* (newest) federation
+        // so new deposits go to the post-migration descriptor. Balance and
+        // UTXO data still come from `self.inner` which tracks all versions.
+        let current_wallet = &self.federated_wallet.current().wallet;
+
         let (results, delta, tip) = {
             let mut wallet = self.inner.lock().await;
             let _newly: Vec<AddressInfo> = wallet
@@ -825,7 +849,7 @@ impl UserWallet {
 
             let results: Vec<RevealedAddress> = (0..target_count)
                 .map(|index| {
-                    let info = wallet.peek_address(KeychainKind::External, index);
+                    let info = current_wallet.peek_address(KeychainKind::External, index);
                     let spk = info.address.script_pubkey();
                     let mut received = Amount::ZERO;
                     let mut unspent = Amount::ZERO;
@@ -1150,4 +1174,20 @@ impl UserWallet {
             fee_sat: fee_sat_i64,
         })
     }
+}
+
+/// Extract key-origin fingerprints from a descriptor string.
+///
+/// Parses `[abcdef01/48'/1'/0'/2']tpub...` patterns and returns the
+/// fingerprint hex strings in the order they appear.
+fn extract_fingerprints_from_descriptor(descriptor: &str) -> Vec<String> {
+    let mut fps = Vec::new();
+    for chunk in descriptor.split('[').skip(1) {
+        if let Some(fp) = chunk.split('/').next() {
+            if fp.len() == 8 && fp.chars().all(|c| c.is_ascii_hexdigit()) {
+                fps.push(fp.to_string());
+            }
+        }
+    }
+    fps
 }

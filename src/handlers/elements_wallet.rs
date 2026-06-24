@@ -443,15 +443,18 @@ pub async fn federation(
         db::list_federation_versions_for_elements_wallet(&state.db, uw.wallet_id()).await?;
     let version_count = versions.len();
 
+    let signer_count = versions
+        .last()
+        .map_or(state.config.fed_signer_indices.len(), |v| {
+            usize::try_from(v.signer_count).unwrap_or(0)
+        });
     let current_signers: Vec<ElementsSignerView> = state
         .config
-        .hsm_tokens
+        .fed_signer_indices
         .iter()
-        .enumerate()
-        .take(versions.last().map_or(state.config.hsm_tokens.len(), |v| {
-            usize::try_from(v.signer_count).unwrap_or(0)
-        }))
-        .map(|(_, t)| ElementsSignerView {
+        .take(signer_count)
+        .filter_map(|&idx| state.config.hsm_tokens.get(idx))
+        .map(|t| ElementsSignerView {
             id: t.label.clone(),
             label: t.label.clone(),
         })
@@ -534,7 +537,7 @@ fn truncate_descriptor(desc: &str, max_len: usize) -> String {
 
 fn elements_policy_label(state: &AppState) -> String {
     let t = state.config.fed_threshold;
-    let n = state.config.hsm_tokens.len();
+    let n = state.config.fed_signer_indices.len();
     format!("{t}-of-{n} (HSMs)")
 }
 

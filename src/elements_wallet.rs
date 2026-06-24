@@ -81,6 +81,7 @@ pub struct ElementsWalletManager {
     network: ElementsNetwork,
     bip48_coin_index: u32,
     fed_threshold: u32,
+    fed_signer_indices: Vec<usize>,
     hsm: Arc<HsmFleet>,
     cache: AsyncMutex<HashMap<Uuid, Arc<UserElementsWallet>>>,
 }
@@ -99,6 +100,7 @@ impl ElementsWalletManager {
             network: config.elements_network,
             bip48_coin_index: config.bip48_coin_index,
             fed_threshold: config.fed_threshold,
+            fed_signer_indices: config.fed_signer_indices.clone(),
             hsm,
             cache: AsyncMutex::new(HashMap::new()),
         }
@@ -159,11 +161,11 @@ impl ElementsWalletManager {
         let account_idx_u32 = u32::try_from(account_idx).unwrap_or(0);
         let path = self.derivation_path_for(account_idx_u32)?;
 
-        let signers_arc = self.hsm.signers_for(user_id, &path).await?;
-        let patched: Vec<NetworkPatchedSigner> = signers_arc
+        let all_signers = self.hsm.signers_for(user_id, &path).await?;
+        let patched: Vec<NetworkPatchedSigner> = self
+            .fed_signer_indices
             .iter()
-            .cloned()
-            .map(|s| NetworkPatchedSigner::new(s, self.hsm.network()))
+            .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), self.hsm.network()))
             .collect();
 
         // Generate a deterministic MBK from user_id + account_idx.
@@ -312,7 +314,7 @@ impl ElementsWalletManager {
         let version_count = db::federation_version_count_for_elements_wallet(&self.pool, row.id)
             .await
             .unwrap_or(0);
-        let signer_count = i32::try_from(signers_arc.len()).unwrap_or(0);
+        let signer_count = i32::try_from(self.fed_signer_indices.len()).unwrap_or(0);
         let threshold = i32::try_from(self.fed_threshold).unwrap_or(0);
         if version_count == 0 {
             let snapshot = serde_json::json!({

@@ -497,11 +497,14 @@ pub async fn federation(
     let version_count = versions.len();
 
     let current_fed = uw.federation();
+    let acct_idx_u32 = u32::try_from(uw.account_idx()).unwrap_or(0);
+    let path = state.wallet_manager.derivation_path_for(acct_idx_u32)?;
+    let all_signers = state.hsm.signers_for(user.id, &path).await?;
     let current = FederationVersionView {
         version_index: version_count.saturating_sub(1) as i32,
         threshold: current_fed.threshold() as i32,
         signer_count: current_fed.total_signers() as i32,
-        signers: build_signer_views(current_fed, &state),
+        signers: build_signer_views(current_fed, &all_signers, &state),
     };
 
     let history: Vec<FederationHistoryView> = versions
@@ -545,19 +548,21 @@ pub async fn federation(
 
 fn build_signer_views(
     federation: &asterism_core::Federation<crate::wallet::NetworkPatchedSigner>,
+    all_signers: &[asterism_pkcs11::Pkcs11Signer],
     state: &AppState,
 ) -> Vec<SignerView> {
     use asterism_core::signer::Signer;
     federation
         .signers()
         .iter()
-        .enumerate()
-        .map(|(i, s)| {
+        .map(|s| {
             let id_str = s.id().as_str().to_string();
-            let label = state
-                .config
-                .hsm_tokens
-                .get(i)
+            let fp = format!("{}", s.fingerprint());
+            let label = all_signers
+                .iter()
+                .enumerate()
+                .find(|(_, ps)| format!("{}", ps.fingerprint()) == fp)
+                .and_then(|(idx, _)| state.config.hsm_tokens.get(idx))
                 .map(|t| t.label.clone())
                 .unwrap_or_default();
             SignerView { id: id_str, label }
@@ -576,7 +581,7 @@ fn truncate_descriptor(desc: &str, max_len: usize) -> String {
 
 fn policy_label(state: &AppState) -> String {
     let t = state.config.fed_threshold;
-    let n = state.config.hsm_tokens.len();
+    let n = state.config.fed_signer_indices.len();
     format!("{t}-of-{n} (HSMs)")
 }
 

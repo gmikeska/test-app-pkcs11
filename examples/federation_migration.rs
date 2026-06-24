@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use asterism_core::descriptor::KeyMode;
 use asterism_core::signer::Signer;
 use bitcoin::Amount;
 use serde::Deserialize;
@@ -737,10 +738,11 @@ async fn main() {
                 .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
                 .collect();
 
-            let new_fed = match asterism_core::Federation::new(
+            let new_fed = match asterism_core::Federation::with_key_mode(
                 cfg.federation.threshold,
                 new_signers,
                 asterism_core::network::NetworkType::Bitcoin(app_config.network),
+                KeyMode::Ranged,
             ) {
                 Ok(f) => f,
                 Err(e) => {
@@ -901,10 +903,11 @@ async fn main() {
             .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
             .collect();
 
-        let new_federation = match asterism_core::Federation::new(
+        let new_federation = match asterism_core::Federation::with_key_mode(
             cfg.federation.threshold,
             new_signers,
             asterism_core::network::NetworkType::Bitcoin(app_config.network),
+            KeyMode::Ranged,
         ) {
             Ok(f) => f,
             Err(e) => {
@@ -1048,10 +1051,11 @@ async fn main() {
                 .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
                 .collect();
 
-            let new_fed = match asterism_core::Federation::new(
+            let new_fed = match asterism_core::Federation::with_key_mode(
                 cfg.federation.threshold,
                 new_signers,
                 asterism_core::network::NetworkType::Bitcoin(app_config.network),
+                KeyMode::Ranged,
             ) {
                 Ok(f) => f,
                 Err(e) => {

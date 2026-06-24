@@ -61,6 +61,10 @@ pub struct AppConfig {
     pub hsm_tokens: Vec<HsmTokenConfig>,
     /// Federation threshold (m in m-of-n). Must satisfy `1 ≤ t ≤ n`.
     pub fed_threshold: u32,
+    /// Zero-based indices into `hsm_tokens` for the default federation.
+    /// When set, only these tokens participate in new wallet federations.
+    /// The full HSM pool remains available for migration tools.
+    pub fed_signer_indices: Vec<usize>,
 
     // -- Elements chain config --
     /// Elements daemon JSON-RPC base URL.
@@ -161,10 +165,45 @@ impl AppConfig {
                 })?,
             None => n,
         };
-        if fed_threshold < 1 || fed_threshold > n {
+        let fed_signer_indices: Vec<usize> = match optional("APP_FED_SIGNERS") {
+            Some(s) => {
+                let mut indices = Vec::new();
+                for part in s.split(',') {
+                    let idx: usize = part.trim().parse().map_err(|e: std::num::ParseIntError| {
+                        ConfigError::Parse {
+                            var: "APP_FED_SIGNERS",
+                            reason: format!("invalid index \"{}\": {e}", part.trim()),
+                        }
+                    })?;
+                    if idx == 0 || idx > hsm_tokens.len() {
+                        return Err(ConfigError::Parse {
+                            var: "APP_FED_SIGNERS",
+                            reason: format!(
+                                "signer index {idx} out of range (must be 1..={})",
+                                hsm_tokens.len()
+                            ),
+                        });
+                    }
+                    indices.push(idx - 1);
+                }
+                if indices.is_empty() {
+                    return Err(ConfigError::Parse {
+                        var: "APP_FED_SIGNERS",
+                        reason: "empty signer list".into(),
+                    });
+                }
+                indices
+            }
+            None => (0..hsm_tokens.len()).collect(),
+        };
+
+        let fed_signer_count = u32::try_from(fed_signer_indices.len()).unwrap_or(u32::MAX);
+        if fed_threshold < 1 || fed_threshold > fed_signer_count {
             return Err(ConfigError::Parse {
                 var: "APP_FED_THRESHOLD",
-                reason: format!("threshold must satisfy 1 ≤ t ≤ {n} (got {fed_threshold})"),
+                reason: format!(
+                    "threshold must satisfy 1 ≤ t ≤ {fed_signer_count} (got {fed_threshold})"
+                ),
             });
         }
 
@@ -205,6 +244,7 @@ impl AppConfig {
             pkcs11_library_path,
             hsm_tokens,
             fed_threshold,
+            fed_signer_indices,
             elements_rpc_url,
             elements_rpc_user,
             elements_rpc_password,

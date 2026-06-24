@@ -48,12 +48,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
     let config = AppConfig::from_env()?;
+    let fed_labels: Vec<&str> = config
+        .fed_signer_indices
+        .iter()
+        .filter_map(|&i| config.hsm_tokens.get(i).map(|t| t.label.as_str()))
+        .collect();
     tracing::info!(
         bind = %config.bind,
         network = %config.network,
         bip48_coin_index = config.bip48_coin_index,
-        threshold = config.fed_threshold,
-        hsm_count = config.hsm_tokens.len(),
+        federation = %format!("{}-of-{}", config.fed_threshold, config.fed_signer_indices.len()),
+        hsm_pool = config.hsm_tokens.len(),
+        fed_signers = ?fed_labels,
         "starting test-app-pkcs11"
     );
 

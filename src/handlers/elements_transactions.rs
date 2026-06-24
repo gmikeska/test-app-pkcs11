@@ -62,7 +62,7 @@ pub async fn show(
 
     let policy = {
         let t = state.config.fed_threshold;
-        let n = state.config.hsm_tokens.len();
+        let n = state.config.fed_signer_indices.len();
         format!("{t}-of-{n} (HSMs)")
     };
 
