@@ -204,7 +204,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn seed_test_wallets(pool: &sqlx::PgPool, wallet_manager: &WalletManager) {
-    const EMAILS: &[&str] = &["test1@test.com", "test2@test.com", "test3@test.com", "admin@test.com"];
+    const EMAILS: &[&str] = &[
+        "test1@test.com",
+        "test2@test.com",
+        "test3@test.com",
+        "admin@test.com",
+    ];
     for email in EMAILS {
         let user = match db::find_user_by_email(pool, email).await {
             Ok(Some(u)) => u,
@@ -238,7 +243,12 @@ async fn seed_test_wallets(pool: &sqlx::PgPool, wallet_manager: &WalletManager) 
 }
 
 async fn seed_test_elements_wallets(pool: &sqlx::PgPool, manager: &ElementsWalletManager) {
-    const EMAILS: &[&str] = &["test1@test.com", "test2@test.com", "test3@test.com", "admin@test.com"];
+    const EMAILS: &[&str] = &[
+        "test1@test.com",
+        "test2@test.com",
+        "test3@test.com",
+        "admin@test.com",
+    ];
     for email in EMAILS {
         let user = match db::find_user_by_email(pool, email).await {
             Ok(Some(u)) => u,

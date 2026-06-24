@@ -880,122 +880,122 @@ async fn main() {
     if sweep_only {
         println!("\n  --sweep-only: skipping Step 1 (federation change already recorded).");
     } else {
+        if !confirm("Step 1/3: Apply this federation change to all accounts?") {
+            println!("Aborted.");
+            std::process::exit(0);
+        }
 
-    if !confirm("Step 1/3: Apply this federation change to all accounts?") {
-        println!("Aborted.");
-        std::process::exit(0);
-    }
+        println!("\n  Creating new federation for all accounts...");
 
-    println!("\n  Creating new federation for all accounts...");
+        for wallet in &user_wallets {
+            let acct_idx = wallet.account_idx() as u32;
+            let path = match wallet_manager.derivation_path_for(acct_idx) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: invalid derivation path for account {acct_idx}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let new_signer_indices: Vec<usize> = cfg
+                .federation
+                .signers
+                .iter()
+                .map(|label| {
+                    app_config
+                        .hsm_tokens
+                        .iter()
+                        .position(|t| t.label == *label)
+                        .expect("validated earlier")
+                })
+                .collect();
 
-    for wallet in &user_wallets {
-        let acct_idx = wallet.account_idx() as u32;
-        let path = match wallet_manager.derivation_path_for(acct_idx) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("error: invalid derivation path for account {acct_idx}: {e}");
-                std::process::exit(1);
-            }
-        };
-        let new_signer_indices: Vec<usize> = cfg
-            .federation
-            .signers
-            .iter()
-            .map(|label| {
-                app_config
-                    .hsm_tokens
-                    .iter()
-                    .position(|t| t.label == *label)
-                    .expect("validated earlier")
-            })
-            .collect();
+            let all_signers = match hsm.signers_for(wallet.user_id(), &path).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: failed to derive signers for account {acct_idx}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let new_signers: Vec<NetworkPatchedSigner> = new_signer_indices
+                .iter()
+                .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
+                .collect();
 
-        let all_signers = match hsm.signers_for(wallet.user_id(), &path).await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("error: failed to derive signers for account {acct_idx}: {e}");
-                std::process::exit(1);
-            }
-        };
-        let new_signers: Vec<NetworkPatchedSigner> = new_signer_indices
-            .iter()
-            .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
-            .collect();
+            let new_federation = match asterism_core::Federation::with_key_mode(
+                cfg.federation.threshold,
+                new_signers,
+                asterism_core::network::NetworkType::Bitcoin(app_config.network),
+                KeyMode::Ranged,
+            ) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("error: failed to create new federation for account {acct_idx}: {e}");
+                    std::process::exit(1);
+                }
+            };
 
-        let new_federation = match asterism_core::Federation::with_key_mode(
-            cfg.federation.threshold,
-            new_signers,
-            asterism_core::network::NetworkType::Bitcoin(app_config.network),
-            KeyMode::Ranged,
-        ) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("error: failed to create new federation for account {acct_idx}: {e}");
-                std::process::exit(1);
-            }
-        };
+            let versions =
+                match db::list_federation_versions_for_wallet(&pool, wallet.wallet_id()).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!(
+                            "error: failed to list federation versions for account {acct_idx}: {e}"
+                        );
+                        std::process::exit(1);
+                    }
+                };
+            let new_version_index = i32::try_from(versions.len()).unwrap_or(0);
 
-        let versions = match db::list_federation_versions_for_wallet(&pool, wallet.wallet_id())
+            let descriptor_str = asterism_core::descriptor::to_multipath_string(
+                new_federation
+                    .try_descriptor()
+                    .expect("Bitcoin federation has a descriptor"),
+            );
+            let snapshot =
+                asterism_core::snapshot::FederationSnapshot::from_federation(&new_federation);
+            let snapshot_json = serde_json::to_value(&snapshot).expect("snapshot serializes");
+
+            match db::insert_federation_version(
+                &pool,
+                &db::NewFederationVersion {
+                    wallet_id: Some(wallet.wallet_id()),
+                    elements_wallet_id: None,
+                    version_index: new_version_index,
+                    descriptor: &descriptor_str,
+                    threshold: i32::try_from(cfg.federation.threshold).unwrap_or(0),
+                    signer_count: i32::try_from(cfg.federation.signers.len()).unwrap_or(0),
+                    federation_snapshot: &snapshot_json,
+                    wallet_handle: &wallet.wallet_id().to_string(),
+                    blinding_key: None,
+                },
+            )
             .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("error: failed to list federation versions for account {acct_idx}: {e}");
-                std::process::exit(1);
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!(
+                        "error: failed to persist federation version for account {acct_idx}: {e}"
+                    );
+                    std::process::exit(1);
+                }
             }
-        };
-        let new_version_index = i32::try_from(versions.len()).unwrap_or(0);
 
-        let descriptor_str = asterism_core::descriptor::to_multipath_string(
-            new_federation
-                .try_descriptor()
-                .expect("Bitcoin federation has a descriptor"),
-        );
-        let snapshot =
-            asterism_core::snapshot::FederationSnapshot::from_federation(&new_federation);
-        let snapshot_json = serde_json::to_value(&snapshot).expect("snapshot serializes");
-
-        match db::insert_federation_version(
-            &pool,
-            &db::NewFederationVersion {
-                wallet_id: Some(wallet.wallet_id()),
-                elements_wallet_id: None,
-                version_index: new_version_index,
-                descriptor: &descriptor_str,
-                threshold: i32::try_from(cfg.federation.threshold).unwrap_or(0),
-                signer_count: i32::try_from(cfg.federation.signers.len()).unwrap_or(0),
-                federation_snapshot: &snapshot_json,
-                wallet_handle: &wallet.wallet_id().to_string(),
-                blinding_key: None,
-            },
-        )
-        .await
-        {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!(
-                    "error: failed to persist federation version for account {acct_idx}: {e}"
-                );
-                std::process::exit(1);
+            if let Err(e) = db::set_pending_migration_for_older_versions(
+                &pool,
+                wallet.wallet_id(),
+                new_version_index,
+            )
+            .await
+            {
+                eprintln!("warning: failed to update migration status for account {acct_idx}: {e}");
             }
-        }
 
-        if let Err(e) = db::set_pending_migration_for_older_versions(
-            &pool,
-            wallet.wallet_id(),
-            new_version_index,
-        )
-        .await
-        {
-            eprintln!("warning: failed to update migration status for account {acct_idx}: {e}");
+            println!(
+                "  Account {acct_idx}: federation v{new_version_index} created ({}-of-{})",
+                cfg.federation.threshold,
+                cfg.federation.signers.len()
+            );
         }
-
-        println!(
-            "  Account {acct_idx}: federation v{new_version_index} created ({}-of-{})",
-            cfg.federation.threshold,
-            cfg.federation.signers.len()
-        );
-    }
     } // end if !sweep_only
 
     // =====================================================================
@@ -1032,90 +1032,90 @@ async fn main() {
         }
 
         let path = match wallet_manager.derivation_path_for(acct_idx) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("error: invalid derivation path for account {acct_idx}: {e}");
-                    std::process::exit(1);
-                }
-            };
-            let new_signer_indices: Vec<usize> = cfg
-                .federation
-                .signers
-                .iter()
-                .map(|label| {
-                    app_config
-                        .hsm_tokens
-                        .iter()
-                        .position(|t| t.label == *label)
-                        .expect("validated earlier")
-                })
-                .collect();
-
-            let all_signers = match hsm.signers_for(wallet.user_id(), &path).await {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("error: failed to derive signers for account {acct_idx}: {e}");
-                    std::process::exit(1);
-                }
-            };
-            let new_signers: Vec<NetworkPatchedSigner> = new_signer_indices
-                .iter()
-                .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
-                .collect();
-
-            let new_fed = match asterism_core::Federation::with_key_mode(
-                cfg.federation.threshold,
-                new_signers,
-                asterism_core::network::NetworkType::Bitcoin(app_config.network),
-                KeyMode::Ranged,
-            ) {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("error: failed to create federation for account {acct_idx}: {e}");
-                    std::process::exit(1);
-                }
-            };
-
-            let dest_desc_str = asterism_core::descriptor::to_multipath_string(
-                new_fed
-                    .try_descriptor()
-                    .expect("Bitcoin federation has a descriptor"),
-            );
-            let sweep_dest = {
-                let desc: bdk_wallet::miniscript::Descriptor<
-                    bdk_wallet::miniscript::DescriptorPublicKey,
-                > = dest_desc_str.parse().expect("valid descriptor");
-                let mut temp_wallet = bdk_wallet::Wallet::create_from_two_path_descriptor(desc)
-                    .network(app_config.network)
-                    .create_wallet_no_persist()
-                    .expect("valid wallet from new descriptor");
-                temp_wallet
-                    .reveal_next_address(bdk_wallet::KeychainKind::External)
-                    .address
-            };
-
-            match wallet
-                .sweep_to(
-                    &sweep_dest,
-                    cfg.migration.fee_rate_sat_per_vb,
-                    Some(format!("federation-migration-account-{acct_idx}")),
-                )
-                .await
-            {
-                Ok(result) => {
-                    println!(
-                        "  Account {acct_idx}: swept {} sat (txid: {}, fee: {} sat)",
-                        result.amount_sat, result.txid, result.fee_sat
-                    );
-                }
-                Err(e) => {
-                    eprintln!(
-                        "error: sweep failed for account {acct_idx}: {e}\n\n\
-                         Continuing with remaining accounts..."
-                    );
-                    continue;
-                }
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: invalid derivation path for account {acct_idx}: {e}");
+                std::process::exit(1);
             }
+        };
+        let new_signer_indices: Vec<usize> = cfg
+            .federation
+            .signers
+            .iter()
+            .map(|label| {
+                app_config
+                    .hsm_tokens
+                    .iter()
+                    .position(|t| t.label == *label)
+                    .expect("validated earlier")
+            })
+            .collect();
+
+        let all_signers = match hsm.signers_for(wallet.user_id(), &path).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: failed to derive signers for account {acct_idx}: {e}");
+                std::process::exit(1);
+            }
+        };
+        let new_signers: Vec<NetworkPatchedSigner> = new_signer_indices
+            .iter()
+            .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
+            .collect();
+
+        let new_fed = match asterism_core::Federation::with_key_mode(
+            cfg.federation.threshold,
+            new_signers,
+            asterism_core::network::NetworkType::Bitcoin(app_config.network),
+            KeyMode::Ranged,
+        ) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("error: failed to create federation for account {acct_idx}: {e}");
+                std::process::exit(1);
+            }
+        };
+
+        let dest_desc_str = asterism_core::descriptor::to_multipath_string(
+            new_fed
+                .try_descriptor()
+                .expect("Bitcoin federation has a descriptor"),
+        );
+        let sweep_dest = {
+            let desc: bdk_wallet::miniscript::Descriptor<
+                bdk_wallet::miniscript::DescriptorPublicKey,
+            > = dest_desc_str.parse().expect("valid descriptor");
+            let mut temp_wallet = bdk_wallet::Wallet::create_from_two_path_descriptor(desc)
+                .network(app_config.network)
+                .create_wallet_no_persist()
+                .expect("valid wallet from new descriptor");
+            temp_wallet
+                .reveal_next_address(bdk_wallet::KeychainKind::External)
+                .address
+        };
+
+        match wallet
+            .sweep_to(
+                &sweep_dest,
+                cfg.migration.fee_rate_sat_per_vb,
+                Some(format!("federation-migration-account-{acct_idx}")),
+            )
+            .await
+        {
+            Ok(result) => {
+                println!(
+                    "  Account {acct_idx}: swept {} sat (txid: {}, fee: {} sat)",
+                    result.amount_sat, result.txid, result.fee_sat
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "error: sweep failed for account {acct_idx}: {e}\n\n\
+                         Continuing with remaining accounts..."
+                );
+                continue;
+            }
+        }
 
         // Mark old federation versions as migrated for this account.
         let versions =
