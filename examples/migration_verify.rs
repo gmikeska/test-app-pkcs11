@@ -100,7 +100,10 @@ async fn main() {
 
         println!(
             "  Account {:>3} (idx {acct_idx}):  {}  │  {} UTXOs  │  {} federation version(s)",
-            wallet_ids.iter().position(|&id| id == wallet_id).unwrap_or(0),
+            wallet_ids
+                .iter()
+                .position(|&id| id == wallet_id)
+                .unwrap_or(0),
             balance,
             utxos.len(),
             versions.len(),
@@ -151,10 +154,7 @@ async fn main() {
 
             println!(
                 "  {icon}  Wallet {:.8}…  v{}  │  {}-of-{}  │  {label}",
-                wallet_id,
-                v.version_index,
-                v.threshold,
-                v.signer_count,
+                wallet_id, v.version_index, v.threshold, v.signer_count,
             );
         }
     }

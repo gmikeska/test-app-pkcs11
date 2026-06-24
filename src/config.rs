@@ -169,12 +169,13 @@ impl AppConfig {
             Some(s) => {
                 let mut indices = Vec::new();
                 for part in s.split(',') {
-                    let idx: usize = part.trim().parse().map_err(|e: std::num::ParseIntError| {
-                        ConfigError::Parse {
-                            var: "APP_FED_SIGNERS",
-                            reason: format!("invalid index \"{}\": {e}", part.trim()),
-                        }
-                    })?;
+                    let idx: usize =
+                        part.trim().parse().map_err(|e: std::num::ParseIntError| {
+                            ConfigError::Parse {
+                                var: "APP_FED_SIGNERS",
+                                reason: format!("invalid index \"{}\": {e}", part.trim()),
+                            }
+                        })?;
                     if idx == 0 || idx > hsm_tokens.len() {
                         return Err(ConfigError::Parse {
                             var: "APP_FED_SIGNERS",

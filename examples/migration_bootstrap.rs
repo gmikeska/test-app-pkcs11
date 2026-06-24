@@ -133,10 +133,7 @@ async fn run_bootstrap(pool: &sqlx::PgPool, wm: &WalletManager) {
     // Check for existing wallets.
     let existing = db::list_all_wallets(pool).await.expect("list wallets");
     if !existing.is_empty() {
-        eprintln!(
-            "  Database already has {} wallets.",
-            existing.len()
-        );
+        eprintln!("  Database already has {} wallets.", existing.len());
         eprintln!("  Run ./reset-dev.sh --yes to start fresh, or use --sync to check balances.");
         std::process::exit(1);
     }
@@ -187,10 +184,7 @@ async fn run_bootstrap(pool: &sqlx::PgPool, wm: &WalletManager) {
         );
         for (j, &amount_sat) in acct.fund_amounts.iter().enumerate() {
             let btc = Amount::from_sat(amount_sat).to_btc();
-            println!(
-                "  paytoaddress.sh {} {btc}",
-                addrs[j].address,
-            );
+            println!("  paytoaddress.sh {} {btc}", addrs[j].address,);
         }
         println!();
     }

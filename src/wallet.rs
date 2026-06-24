@@ -455,7 +455,8 @@ impl WalletManager {
         // when APP_FED_SIGNERS changes between restarts or after a
         // migration tool run.
         let first = &versions[0];
-        let first_fed = Self::reconstruct_federation_from_version(first, all_signers, self.network)?;
+        let first_fed =
+            Self::reconstruct_federation_from_version(first, all_signers, self.network)?;
         let first_wallet = Self::create_metadata_wallet(&first_fed, self.network)?;
         let mut fw = BtcFederatedWallet::new(first_fed, first_wallet)
             .map_err(|e| WalletError::CreateWallet(e.to_string()))?;
