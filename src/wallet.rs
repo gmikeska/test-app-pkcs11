@@ -1349,6 +1349,22 @@ impl UserWallet {
         Ok(())
     }
 
+    /// Insert an unconfirmed transaction into all version wallets and the
+    /// inner wallet. Used during migration to make chained outputs visible
+    /// to `psbt_input_for_utxo` without a full sync round-trip.
+    pub async fn insert_unconfirmed_tx(&self, tx: &bitcoin::Transaction) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        for vw_mutex in &self.version_wallets {
+            let mut vw = vw_mutex.lock().await;
+            vw.apply_unconfirmed_txs(vec![(tx.clone(), now)]);
+        }
+        let mut inner = self.inner.lock().await;
+        inner.apply_unconfirmed_txs(vec![(tx.clone(), now)]);
+    }
+
     /// Lock and return a guard to the inner BDK wallet.
     /// Used by the migration tool to build multi-wallet PSBTs.
     pub async fn inner_wallet(&self) -> tokio::sync::MutexGuard<'_, Wallet> {

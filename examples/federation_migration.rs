@@ -1980,8 +1980,23 @@ async fn main() {
     // STEP 1: Confirm and apply the federation change (all accounts)
     // =====================================================================
 
+    // New federation descriptor strings per account — needed to build temp
+    // wallets that can produce PSBT inputs for chained outputs.
+    let mut new_fed_descriptors: std::collections::HashMap<u32, String> =
+        std::collections::HashMap::new();
+
     if sweep_only {
         println!("\n  --sweep-only: skipping Step 1 (federation change already recorded).");
+        for wallet in &user_wallets {
+            let acct_idx = wallet.account_idx() as u32;
+            if let Ok(versions) =
+                db::list_federation_versions_for_wallet(&pool, wallet.wallet_id()).await
+            {
+                if let Some(latest) = versions.last() {
+                    new_fed_descriptors.insert(acct_idx, latest.descriptor.clone());
+                }
+            }
+        }
     } else {
         if !confirm("Step 1/3: Apply this federation change to all accounts?") {
             println!("Aborted.");
@@ -2093,6 +2108,8 @@ async fn main() {
                 eprintln!("warning: failed to update migration status for account {acct_idx}: {e}");
             }
 
+            new_fed_descriptors.insert(acct_idx, descriptor_str.clone());
+
             println!(
                 "  Account {acct_idx}: federation v{new_version_index} created ({}-of-{})",
                 cfg.federation.threshold,
@@ -2144,6 +2161,15 @@ async fn main() {
     let fee_acct_idx = fee_account_idx.expect("validated earlier");
     let fee_wallet_idx = *wallet_by_acct.get(&fee_acct_idx).expect("fee account exists");
 
+    // Chained fee-change data from the previous broadcast: outpoint +
+    // pre-built PSBT input (because the UserWallet's version_wallets were
+    // loaded before Step 1 and don't include the new federation).
+    let mut fee_change_data: Option<(
+        bitcoin::OutPoint,
+        bitcoin::psbt::Input,
+        bitcoin::Weight,
+    )> = None;
+
     for (tx_num, sweep_tx) in plan.sweep_transactions.iter().enumerate() {
         println!(
             "\n  Transaction {}/{}:",
@@ -2151,9 +2177,16 @@ async fn main() {
             plan.sweep_transactions.len()
         );
 
-        // Skip synthetic change outpoints (zeroed txid) — they represent
-        // the chained fee-account change from a preceding tx. The actual
-        // UTXO is resolved at execution time from the prior broadcast.
+        // Separate real outpoints from synthetic change placeholders (zeroed
+        // txid). Synthetic entries represent the chained fee-account change
+        // from the preceding broadcast.
+        let has_synthetic_fee_input = {
+            use bitcoin::hashes::Hash;
+            sweep_tx.source_utxos.iter().any(|op| {
+                op.txid == bitcoin::Txid::from_byte_array([0u8; 32])
+            })
+        };
+
         let real_utxos: Vec<&bitcoin::OutPoint> = sweep_tx
             .source_utxos
             .iter()
@@ -2166,32 +2199,44 @@ async fn main() {
         // Build the PSBT using the fee account's BDK wallet.
         let fee_wallet = &user_wallets[fee_wallet_idx];
 
-        // Collect foreign UTXOs (non-fee-account inputs) with their psbt::Input data.
-        let mut foreign_utxo_data: Vec<(
+        // Collect PSBT input data for ALL UTXOs via psbt_input_for_utxo(),
+        // which searches across all federation version wallets. This is
+        // necessary because the inner wallet may use the latest federation's
+        // descriptor and won't find UTXOs locked to an older federation.
+        let mut all_utxo_data: Vec<(
             bitcoin::OutPoint,
             bitcoin::psbt::Input,
             bitcoin::Weight,
             usize, // owning wallet index
         )> = Vec::new();
-        let mut fee_utxos: Vec<bitcoin::OutPoint> = Vec::new();
+
+        // If a synthetic fee-change placeholder exists, resolve it with the
+        // pre-built PSBT input from the previous broadcast.
+        if has_synthetic_fee_input {
+            if let Some((change_op, change_psbt_input, change_weight)) = fee_change_data.take() {
+                all_utxo_data.push((change_op, change_psbt_input, change_weight, fee_wallet_idx));
+            } else {
+                eprintln!(
+                    "error: transaction {} expects chained fee change but none available",
+                    tx_num + 1
+                );
+                std::process::exit(1);
+            }
+        }
 
         for &outpoint in &real_utxos {
             if let Some(&(wi, _acct_idx)) = utxo_owner.get(outpoint) {
-                if wi == fee_wallet_idx {
-                    fee_utxos.push(*outpoint);
-                } else {
-                    let wallet = &user_wallets[wi];
-                    match wallet.psbt_input_for_utxo(*outpoint).await {
-                        Ok((psbt_input, weight)) => {
-                            foreign_utxo_data.push((*outpoint, psbt_input, weight, wi));
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "error: failed to build PSBT input for {outpoint}: {e}\n\
-                                 Aborting migration."
-                            );
-                            std::process::exit(1);
-                        }
+                let wallet = &user_wallets[wi];
+                match wallet.psbt_input_for_utxo(*outpoint).await {
+                    Ok((psbt_input, weight)) => {
+                        all_utxo_data.push((*outpoint, psbt_input, weight, wi));
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "error: failed to build PSBT input for {outpoint}: {e}\n\
+                             Aborting migration."
+                        );
+                        std::process::exit(1);
                     }
                 }
             }
@@ -2206,20 +2251,13 @@ async fn main() {
 
             let mut builder = inner.build_tx();
 
-            // Add fee account's own UTXOs.
-            for op in &fee_utxos {
-                if let Err(e) = builder.add_utxo(*op) {
-                    eprintln!("error: failed to add fee UTXO {op}: {e}");
-                    std::process::exit(1);
-                }
-            }
-
-            // Add customer UTXOs as foreign inputs.
-            for (outpoint, psbt_input, weight, _wi) in &foreign_utxo_data {
+            // Add all UTXOs as foreign inputs (they belong to the old
+            // federation's descriptor, not the builder wallet's).
+            for (outpoint, psbt_input, weight, _wi) in &all_utxo_data {
                 if let Err(e) =
                     builder.add_foreign_utxo(*outpoint, psbt_input.clone(), *weight)
                 {
-                    eprintln!("error: failed to add foreign UTXO {outpoint}: {e}");
+                    eprintln!("error: failed to add UTXO {outpoint}: {e}");
                     std::process::exit(1);
                 }
             }
@@ -2262,36 +2300,30 @@ async fn main() {
 
         let mut psbt = psbt;
 
-        // Determine input indices per wallet for targeted signing.
-        // Fee wallet inputs come first (from add_utxo), then foreign inputs.
-        let fee_input_count = fee_utxos.len();
-        let fee_input_indices: Vec<usize> = (0..fee_input_count).collect();
+        // Determine input indices per wallet by matching each PSBT input's
+        // previous_output against known outpoints. BDK applies BIP-69
+        // ordering in finish(), so we cannot assume insertion order.
+        let outpoint_to_wallet: std::collections::HashMap<bitcoin::OutPoint, usize> =
+            all_utxo_data
+                .iter()
+                .map(|(op, _, _, wi)| (*op, *wi))
+                .collect();
 
-        // Foreign inputs follow fee inputs in the PSBT.
-        let mut customer_input_indices_by_wallet: std::collections::HashMap<usize, Vec<usize>> =
+        let mut input_indices_by_wallet: std::collections::HashMap<usize, Vec<usize>> =
             std::collections::HashMap::new();
-        for (offset, (_outpoint, _psbt_input, _weight, wi)) in
-            foreign_utxo_data.iter().enumerate()
-        {
-            customer_input_indices_by_wallet
-                .entry(*wi)
-                .or_default()
-                .push(fee_input_count + offset);
-        }
 
-        // Sign fee account inputs.
-        if !fee_input_indices.is_empty() {
-            if let Err(e) = fee_wallet
-                .sign_migration_inputs(&mut psbt, &fee_input_indices)
-                .await
-            {
-                eprintln!("error: fee account signing failed: {e}");
-                std::process::exit(1);
+        for (i, input) in psbt.unsigned_tx.input.iter().enumerate() {
+            if let Some(&wi) = outpoint_to_wallet.get(&input.previous_output) {
+                input_indices_by_wallet
+                    .entry(wi)
+                    .or_default()
+                    .push(i);
             }
         }
 
-        // Sign each customer account's inputs.
-        for (wi, indices) in &customer_input_indices_by_wallet {
+        // Sign each account's inputs using its wallet (which has the
+        // correct PKCS#11 signers registered for the old federation).
+        for (wi, indices) in &input_indices_by_wallet {
             let wallet = &user_wallets[*wi];
             if let Err(e) = wallet.sign_migration_inputs(&mut psbt, indices).await {
                 eprintln!(
@@ -2357,6 +2389,73 @@ async fn main() {
             Err(e) => {
                 eprintln!("error: broadcast task failed for tx {}: {e}", tx_num + 1);
                 std::process::exit(1);
+            }
+        }
+
+        // Build PSBT input data for the fee account's change output so
+        // the next transaction can spend it without a full wallet sync.
+        // The UserWallet's version_wallets were loaded before Step 1 and
+        // don't include the new federation, so we use a temp wallet built
+        // from the stored descriptor instead.
+        let fee_dest_script = account_utxo_sets
+            .iter()
+            .find(|a| a.account_idx == fee_acct_idx)
+            .map(|a| a.destination_address.script_pubkey());
+        if let Some(ref fee_script) = fee_dest_script {
+            for (vout, output) in tx.output.iter().enumerate() {
+                if output.script_pubkey == *fee_script {
+                    let change_op = bitcoin::OutPoint {
+                        txid,
+                        vout: vout as u32,
+                    };
+                    // Build the PSBT input via a temp wallet with the new
+                    // federation's descriptor.
+                    if let Some(desc_str) = new_fed_descriptors.get(&fee_acct_idx) {
+                        let desc: bdk_wallet::miniscript::Descriptor<
+                            bdk_wallet::miniscript::DescriptorPublicKey,
+                        > = desc_str.parse().expect("valid descriptor");
+                        let mut temp_wallet =
+                            bdk_wallet::Wallet::create_from_two_path_descriptor(desc)
+                                .network(app_config.network)
+                                .create_wallet_no_persist()
+                                .expect("valid temp wallet");
+                        // Reveal at least one address so the script index
+                        // recognises index 0.
+                        let _ = temp_wallet
+                            .reveal_next_address(bdk_wallet::KeychainKind::External);
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        temp_wallet
+                            .apply_unconfirmed_txs(vec![(tx.clone(), now)]);
+                        if let Some(local) = temp_wallet.get_utxo(change_op) {
+                            let satisfaction_weight =
+                                bitcoin::Weight::from_witness_data_size(260);
+                            match temp_wallet.get_psbt_input(local, None, false) {
+                                Ok(psbt_input) => {
+                                    fee_change_data = Some((
+                                        change_op,
+                                        psbt_input,
+                                        satisfaction_weight,
+                                    ));
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "warning: could not build PSBT input for \
+                                         fee change {change_op}: {e}"
+                                    );
+                                }
+                            }
+                        } else {
+                            eprintln!(
+                                "warning: fee change {change_op} not found in \
+                                 temp wallet after insert"
+                            );
+                        }
+                    }
+                    break;
+                }
             }
         }
 
