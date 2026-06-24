@@ -203,6 +203,30 @@ impl ElementsRpc {
         Ok(result)
     }
 
+    pub fn wallet_create_funded_psbt_drain(
+        &self,
+        wallet: &str,
+        outputs: &[Value],
+        fee_rate_btc_per_kb: f64,
+    ) -> Result<FundedPsbt, ElementsRpcError> {
+        let client = self.client_for_wallet(wallet)?;
+        let output_indices: Vec<u32> = (0..outputs.len() as u32).collect();
+        let result: FundedPsbt = client.call(
+            "walletcreatefundedpsbt",
+            &[
+                json!([]),
+                json!(outputs),
+                json!(0),
+                json!({
+                    "feeRate": fee_rate_btc_per_kb,
+                    "subtractFeeFromOutputs": output_indices,
+                }),
+                json!(true),
+            ],
+        )?;
+        Ok(result)
+    }
+
     pub fn list_transactions(
         &self,
         wallet: &str,

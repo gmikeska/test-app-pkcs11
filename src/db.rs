@@ -567,3 +567,45 @@ pub async fn has_in_progress_migration(pool: &PgPool, wallet_id: Uuid) -> sqlx::
     .await?;
     Ok(count.unwrap_or(0) > 0)
 }
+
+pub async fn list_all_elements_wallets(pool: &PgPool) -> sqlx::Result<Vec<ElementsWalletRow>> {
+    sqlx::query_as::<_, ElementsWalletRow>(
+        "SELECT id, user_id, account_idx, descriptor, master_blinding_key, \
+                daemon_wallet_name, chain_tip_height, created_at \
+         FROM elements_wallets ORDER BY account_idx",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn set_pending_migration_for_older_elements_versions(
+    pool: &PgPool,
+    elements_wallet_id: Uuid,
+    current_version_index: i32,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE federation_versions \
+         SET migration_status = 'pending' \
+         WHERE elements_wallet_id = $1 AND version_index < $2 \
+           AND migration_status = 'not_applicable'",
+    )
+    .bind(elements_wallet_id)
+    .bind(current_version_index)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn has_in_progress_elements_migration(
+    pool: &PgPool,
+    elements_wallet_id: Uuid,
+) -> sqlx::Result<bool> {
+    let count: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM federation_versions \
+         WHERE elements_wallet_id = $1 AND migration_status = 'in_progress'",
+    )
+    .bind(elements_wallet_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(count.unwrap_or(0) > 0)
+}

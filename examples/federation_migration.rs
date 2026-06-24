@@ -30,6 +30,7 @@ use sqlx::postgres::PgPoolOptions;
 
 use test_app_pkcs11::config::AppConfig;
 use test_app_pkcs11::db;
+use test_app_pkcs11::elements_wallet::ElementsWalletManager;
 use test_app_pkcs11::hsm::HsmFleet;
 use test_app_pkcs11::wallet::{NetworkPatchedSigner, WalletManager};
 
@@ -87,7 +88,7 @@ struct ElementsConfig {
 fn print_usage() {
     eprintln!(
         "\
-Usage: federation_migration --config <path>
+Usage: federation_migration --config <path> [--elements]
 
 Performs a federation membership change and optional fund migration.
 
@@ -95,6 +96,7 @@ Options:
   --config <path>   Path to a TOML configuration file describing
                     the federation change. See the example at:
                     examples/federation_change.example.toml
+  --elements        Run the Elements/Liquid migration instead of Bitcoin
   --dry-run         Validate and display the plan without executing
   --sweep-only      Skip Step 1 (federation already recorded); sweep funds only
   --help            Show this help message"
@@ -105,6 +107,7 @@ struct CliArgs {
     config_path: PathBuf,
     dry_run: bool,
     sweep_only: bool,
+    elements: bool,
 }
 
 fn parse_args() -> Result<CliArgs, String> {
@@ -112,6 +115,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut config_path: Option<PathBuf> = None;
     let mut dry_run = false;
     let mut sweep_only = false;
+    let mut elements = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -124,6 +128,7 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--dry-run" => dry_run = true,
             "--sweep-only" => sweep_only = true,
+            "--elements" => elements = true,
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -141,6 +146,7 @@ fn parse_args() -> Result<CliArgs, String> {
         config_path: path,
         dry_run,
         sweep_only,
+        elements,
     })
 }
 
@@ -467,6 +473,585 @@ fn display_sweep_plan(
 // =========================================================================
 // Main
 // =========================================================================
+// Elements migration
+// =========================================================================
+
+#[allow(clippy::too_many_lines)]
+async fn run_elements_migration(
+    cfg: &MigrationConfig,
+    app_config: &AppConfig,
+    pool: &sqlx::PgPool,
+    hsm: &Arc<HsmFleet>,
+    dry_run: bool,
+    sweep_only: bool,
+) {
+    use std::str::FromStr;
+
+    use asterism_elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
+
+    println!();
+    println!("  Chain:   Elements/Liquid");
+    println!("  Elements network: {}", app_config.elements_network);
+
+    let elements_manager = ElementsWalletManager::new(pool.clone(), app_config, hsm.clone());
+
+    let wallet_rows = match db::list_all_elements_wallets(pool).await {
+        Ok(rows) if rows.is_empty() => {
+            eprintln!("error: no Elements wallets found in the database");
+            std::process::exit(1);
+        }
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("error: failed to list Elements wallets: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("  Wallets: {} discovered", wallet_rows.len());
+
+    let mut user_wallets = Vec::new();
+
+    for row in wallet_rows {
+        let acct_idx = row.account_idx;
+
+        match db::has_in_progress_elements_migration(pool, row.id).await {
+            Ok(true) => {
+                eprintln!(
+                    "error: Elements account {acct_idx} has a migration already in progress\n\n\
+                     Complete or resolve the existing migration before starting a new one."
+                );
+                std::process::exit(1);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!(
+                    "error: migration status check failed for Elements account {acct_idx}: {e}"
+                );
+                std::process::exit(1);
+            }
+        }
+
+        let wallet = match elements_manager.load_wallet_from_row(row).await {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("error: failed to load Elements wallet for account {acct_idx}: {e}");
+                std::process::exit(1);
+            }
+        };
+        user_wallets.push(wallet);
+    }
+
+    // Show balances.
+    let mut total_balance_btc = 0.0_f64;
+    for wallet in &user_wallets {
+        let acct_idx = wallet.account_idx();
+        match wallet.balance().await {
+            Ok(bal) => {
+                let btc = bal.trusted + bal.untrusted_pending;
+                total_balance_btc += btc;
+                println!("  Account {acct_idx}: {btc:.8} L-BTC");
+            }
+            Err(e) => {
+                eprintln!("warning: failed to get balance for Elements account {acct_idx}: {e}");
+            }
+        }
+    }
+    println!("  Total:   {total_balance_btc:.8} L-BTC");
+
+    if dry_run {
+        println!();
+        println!("  Dry Run — no changes were made.");
+        std::process::exit(0);
+    }
+
+    // =====================================================================
+    // STEP 1: Record new federation for each Elements wallet
+    // =====================================================================
+
+    if sweep_only {
+        println!("\n  --sweep-only: skipping Step 1 (federation change already recorded).");
+    } else {
+        if !confirm("Step 1/3: Apply federation change to all Elements accounts?") {
+            println!("Aborted.");
+            std::process::exit(0);
+        }
+
+        println!("\n  Creating new federation for all Elements accounts...");
+
+        let rotate_blinding_key = cfg.elements.rotate_blinding_key;
+
+        for wallet in &user_wallets {
+            let acct_idx = wallet.account_idx() as u32;
+            let path = match elements_manager.derivation_path_for(acct_idx) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!(
+                        "error: invalid derivation path for Elements account {acct_idx}: {e}"
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let new_signer_indices: Vec<usize> = cfg
+                .federation
+                .signers
+                .iter()
+                .map(|label| {
+                    app_config
+                        .hsm_tokens
+                        .iter()
+                        .position(|t| t.label == *label)
+                        .expect("validated earlier")
+                })
+                .collect();
+
+            let all_signers = match hsm.signers_for(wallet.user_id(), &path).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "error: failed to derive signers for Elements account {acct_idx}: {e}"
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let patched: Vec<NetworkPatchedSigner> = new_signer_indices
+                .iter()
+                .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
+                .collect();
+
+            // Get existing MBK or derive a new one.
+            let versions =
+                match db::list_federation_versions_for_elements_wallet(pool, wallet.wallet_id())
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!(
+                        "error: failed to list federation versions for Elements account {acct_idx}: {e}"
+                    );
+                        std::process::exit(1);
+                    }
+                };
+
+            let mbk_hex = if rotate_blinding_key {
+                // Derive fresh MBK using a version-salted derivation.
+                let new_version = i32::try_from(versions.len()).unwrap_or(0);
+                let key = crate::derive_elements_mbk(
+                    wallet.user_id(),
+                    wallet.account_idx(),
+                    new_version,
+                );
+                hex_encode_bytes(&key)
+            } else {
+                // Reuse existing MBK from the latest federation version.
+                versions
+                    .last()
+                    .and_then(|v| v.blinding_key.clone())
+                    .unwrap_or_else(|| {
+                        hex_encode_bytes(&crate::derive_elements_mbk(
+                            wallet.user_id(),
+                            wallet.account_idx(),
+                            0,
+                        ))
+                    })
+            };
+
+            let mbk_bytes = hex_decode_bytes(&mbk_hex);
+            let mut builder = match CtDescriptorBuilder::new(cfg.federation.threshold, &mbk_bytes) {
+                Ok(b) => b.key_mode(CtKeyMode::Ranged),
+                Err(e) => {
+                    eprintln!(
+                        "error: CT descriptor builder failed for account {acct_idx}: {e}"
+                    );
+                    std::process::exit(1);
+                }
+            };
+            for signer in &patched {
+                if let Err(e) = builder.add_signer(signer) {
+                    eprintln!("error: failed to add signer for account {acct_idx}: {e}");
+                    std::process::exit(1);
+                }
+            }
+            let ct_desc = match builder.build() {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!(
+                        "error: failed to build CT descriptor for account {acct_idx}: {e}"
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let multipath = to_multipath_string(&ct_desc);
+
+            // Set up the new daemon wallet.
+            let new_version_index = i32::try_from(versions.len()).unwrap_or(0);
+            let daemon_wallet_name =
+                format!("asterism-elements-user-{}-v{new_version_index}", wallet.account_idx());
+
+            let rpc = elements_manager.rpc().clone();
+            let wallet_name = daemon_wallet_name.clone();
+            let inner_multipath = extract_inner_wsh(&multipath).unwrap_or_else(|| {
+                eprintln!("error: could not extract inner wsh for account {acct_idx}");
+                std::process::exit(1);
+            });
+            let inner_receive = inner_multipath.replace("/<0;1>/*", "/0/*");
+            let inner_change = inner_multipath.replace("/<0;1>/*", "/1/*");
+            let mbk_for_import = mbk_bytes;
+            let ct_desc_for_import = ct_desc.clone();
+            let network = elements_manager.network();
+
+            if let Err(e) = tokio::task::spawn_blocking(move || -> Result<(), String> {
+                use asterism_elements::elements_miniscript::slip77::MasterBlindingKey;
+                use std::str::FromStr;
+
+                type CtDesc = asterism_elements::elements_miniscript::confidential::Descriptor<
+                    asterism_elements::elements_miniscript::descriptor::DescriptorPublicKey,
+                >;
+
+                rpc.ensure_wallet_loaded(&wallet_name)
+                    .map_err(|e| e.to_string())?;
+
+                for (desc, is_internal) in [(&inner_receive, false), (&inner_change, true)] {
+                    let info = rpc
+                        .get_descriptor_info(desc)
+                        .map_err(|e| e.to_string())?;
+                    let desc_with_checksum = format!("{desc}#{}", info.checksum);
+                    let results = rpc
+                        .import_descriptors(
+                            &wallet_name,
+                            &[test_app_pkcs11::elements_rpc::ImportDescriptorRequest {
+                                descriptor: desc_with_checksum,
+                                active: true,
+                                internal: is_internal,
+                            }],
+                        )
+                        .map_err(|e| e.to_string())?;
+                    for r in &results {
+                        if let (false, Some(err)) = (r.success, &r.error) {
+                            tracing::warn!(
+                                code = err.code,
+                                msg = %err.message,
+                                internal = is_internal,
+                                "import_descriptors warning"
+                            );
+                        }
+                    }
+                }
+
+                let slip77_mbk = MasterBlindingKey::from(mbk_for_import);
+                let secp =
+                    asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new();
+                let multipath_str = ct_desc_for_import.to_string();
+                let receive_str = multipath_str.replace("/<0;1>/*", "/0/*");
+                let change_str = multipath_str.replace("/<0;1>/*", "/1/*");
+
+                let descs: Vec<CtDesc> = [&receive_str, &change_str]
+                    .iter()
+                    .filter_map(|s| CtDesc::from_str(s).ok())
+                    .collect();
+
+                for desc in &descs {
+                    for idx in 0..20u32 {
+                        if let Ok(definite) = desc.at_derivation_index(idx) {
+                            let Ok(addr) = definite.address(&secp, network.address_params()) else {
+                                continue;
+                            };
+                            let spk = definite.descriptor.script_pubkey();
+                            let bk = slip77_mbk.blinding_private_key(&spk);
+                            let bk_hex = {
+                                let bytes = bk.secret_bytes();
+                                let mut s = String::with_capacity(64);
+                                for b in &bytes {
+                                    use std::fmt::Write;
+                                    let _ = write!(s, "{b:02x}");
+                                }
+                                s
+                            };
+                            let _ = rpc.import_blinding_key(
+                                &wallet_name,
+                                &addr.to_string(),
+                                &bk_hex,
+                            );
+                        }
+                    }
+                }
+
+                Ok(())
+            })
+            .await
+            .expect("spawn_blocking join")
+            {
+                eprintln!(
+                    "error: failed to set up Elements daemon wallet for account {acct_idx}: {e}"
+                );
+                std::process::exit(1);
+            }
+
+            let snapshot = serde_json::json!({
+                "descriptor": multipath,
+                "daemon_wallet_name": daemon_wallet_name,
+            });
+
+            match db::insert_federation_version(
+                pool,
+                &db::NewFederationVersion {
+                    wallet_id: None,
+                    elements_wallet_id: Some(wallet.wallet_id()),
+                    version_index: new_version_index,
+                    descriptor: &multipath,
+                    threshold: i32::try_from(cfg.federation.threshold).unwrap_or(0),
+                    signer_count: i32::try_from(cfg.federation.signers.len()).unwrap_or(0),
+                    federation_snapshot: &snapshot,
+                    wallet_handle: &daemon_wallet_name,
+                    blinding_key: Some(&mbk_hex),
+                },
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!(
+                        "error: failed to persist federation version for Elements account {acct_idx}: {e}"
+                    );
+                    std::process::exit(1);
+                }
+            }
+
+            if let Err(e) = db::set_pending_migration_for_older_elements_versions(
+                pool,
+                wallet.wallet_id(),
+                new_version_index,
+            )
+            .await
+            {
+                eprintln!(
+                    "warning: failed to update migration status for Elements account {acct_idx}: {e}"
+                );
+            }
+
+            println!(
+                "  Account {}: federation v{new_version_index} created ({}-of-{}, daemon: {daemon_wallet_name})",
+                wallet.account_idx(),
+                cfg.federation.threshold,
+                cfg.federation.signers.len()
+            );
+        }
+    } // end if !sweep_only
+
+    // =====================================================================
+    // STEP 2: Sweep funds from old daemon wallet to new
+    // =====================================================================
+
+    if total_balance_btc <= 0.0 {
+        println!("\n  No funds to migrate. Federation change is complete.");
+        println!("\n  Restart the web app to pick up the new federation.");
+        std::process::exit(0);
+    }
+
+    if !confirm("Step 2/3: Execute the fund migration for all Elements accounts?") {
+        println!(
+            "\n  Federation change recorded but funds NOT migrated.\n  \
+             Re-run this tool later to complete the migration."
+        );
+        std::process::exit(0);
+    }
+
+    println!("\n  Executing Elements migration...");
+
+    for wallet in &user_wallets {
+        let acct_idx = wallet.account_idx();
+        let balance = match wallet.balance().await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("warning: failed to get balance for Elements account {acct_idx}: {e}");
+                continue;
+            }
+        };
+        let btc = balance.trusted + balance.untrusted_pending;
+        if btc <= 0.0 {
+            println!("  Account {acct_idx}: no funds, skipping sweep.");
+            continue;
+        }
+
+        // Get the new federation's receive address from the new daemon wallet.
+        let versions =
+            match db::list_federation_versions_for_elements_wallet(pool, wallet.wallet_id()).await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "warning: failed to list versions for Elements account {acct_idx}: {e}"
+                    );
+                    continue;
+                }
+            };
+        let latest = match versions.last() {
+            Some(v) => v,
+            None => {
+                eprintln!("warning: no federation versions for Elements account {acct_idx}");
+                continue;
+            }
+        };
+
+        // Derive the new federation's first receive address.
+        let dest_address = {
+            type CtDesc = asterism_elements::elements_miniscript::confidential::Descriptor<
+                asterism_elements::elements_miniscript::descriptor::DescriptorPublicKey,
+            >;
+
+            let receive_str = latest.descriptor.replace("/<0;1>/*", "/0/*");
+            let ct_desc = match CtDesc::from_str(&receive_str) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("error: failed to parse descriptor for account {acct_idx}: {e}");
+                    continue;
+                }
+            };
+            let secp =
+                asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new();
+            match ct_desc.at_derivation_index(0) {
+                Ok(definite) => {
+                    match definite.address(&secp, elements_manager.network().address_params()) {
+                        Ok(addr) => addr.to_string(),
+                        Err(e) => {
+                            eprintln!(
+                                "error: failed to derive address for account {acct_idx}: {e}"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "error: failed to derive address for account {acct_idx}: {e}"
+                    );
+                    continue;
+                }
+            }
+        };
+
+        match wallet
+            .sweep_to(
+                &dest_address,
+                cfg.migration.fee_rate_sat_per_vb,
+                Some(format!("federation-migration-elements-account-{acct_idx}")),
+            )
+            .await
+        {
+            Ok(result) => {
+                println!(
+                    "  Account {acct_idx}: swept {} sat (txid: {}, fee: {} sat)",
+                    result.amount_sat, result.txid, result.fee_sat
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "error: sweep failed for Elements account {acct_idx}: {e}\n\
+                     Continuing with remaining accounts..."
+                );
+                continue;
+            }
+        }
+
+        // Mark old federation versions as migrated.
+        let max_version = versions.iter().map(|v| v.version_index).max().unwrap_or(0);
+        for v in &versions {
+            if v.version_index < max_version {
+                let _ = db::update_migration_status(pool, v.id, "complete").await;
+            }
+        }
+    }
+
+    // =====================================================================
+    // STEP 3: Verify
+    // =====================================================================
+
+    if !confirm("Step 3/3: Verify the Elements migration?") {
+        println!("  Skipping verification.");
+        println!("\n  Restart the web app to pick up the new federation.");
+        std::process::exit(0);
+    }
+
+    println!();
+    for wallet in &user_wallets {
+        let acct_idx = wallet.account_idx();
+        match wallet.balance().await {
+            Ok(bal) => {
+                let btc = bal.trusted + bal.untrusted_pending;
+                println!("  Account {acct_idx}: {btc:.8} L-BTC");
+            }
+            Err(e) => {
+                eprintln!("warning: post-migration balance check failed for account {acct_idx}: {e}");
+            }
+        }
+    }
+
+    println!();
+    println!("  Elements federation migration complete.");
+    println!(
+        "    New: {}-of-{}",
+        cfg.federation.threshold,
+        cfg.federation.signers.len()
+    );
+    println!("    Accounts migrated: {}", user_wallets.len());
+    println!();
+    println!("  Restart the web app to pick up the new federation.");
+}
+
+fn hex_encode_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+fn hex_decode_bytes(s: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let offset = i * 2;
+        if offset + 2 <= s.len() {
+            *byte = u8::from_str_radix(&s[offset..offset + 2], 16).unwrap_or(0);
+        }
+    }
+    out
+}
+
+fn extract_inner_wsh(ct_desc: &str) -> Option<String> {
+    let body = ct_desc.split_once('#').map_or(ct_desc, |(b, _)| b);
+    let inner_start = body.find("elwsh(").or_else(|| body.find("wsh("))?;
+    let inner = &body[inner_start..body.len() - 1];
+    Some(inner.replace("elwsh(", "wsh("))
+}
+
+/// Derive a deterministic MBK. For version 0, matches the original derivation.
+/// For version > 0, includes version salt for rotation.
+fn derive_elements_mbk(user_id: uuid::Uuid, account_idx: i32, version: i32) -> [u8; 32] {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    user_id.hash(&mut hasher);
+    account_idx.hash(&mut hasher);
+    if version > 0 {
+        version.hash(&mut hasher);
+        "asterism-elements-mbk-rotated".hash(&mut hasher);
+    }
+    let h1 = hasher.finish();
+    let mut hasher2 = DefaultHasher::new();
+    h1.hash(&mut hasher2);
+    "asterism-elements-mbk-v1".hash(&mut hasher2);
+    let h2 = hasher2.finish();
+
+    let mut key = [0u8; 32];
+    key[..8].copy_from_slice(&h1.to_le_bytes());
+    key[8..16].copy_from_slice(&h2.to_le_bytes());
+    key[16..24].copy_from_slice(&h1.to_be_bytes());
+    key[24..32].copy_from_slice(&h2.to_be_bytes());
+    key
+}
+
+// =========================================================================
+// Main
+// =========================================================================
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
@@ -562,7 +1147,13 @@ async fn main() {
         }
     };
 
-    // -- Discover all accounts ----------------------------------------------
+    // -- Branch: Elements or Bitcoin -----------------------------------------
+    if cli.elements {
+        run_elements_migration(&cfg, &app_config, &pool, &hsm, dry_run, sweep_only).await;
+        return;
+    }
+
+    // -- Discover all accounts (Bitcoin) -------------------------------------
     let wallet_rows = match db::list_all_wallets(&pool).await {
         Ok(rows) if rows.is_empty() => {
             eprintln!("error: no wallets found in the database");

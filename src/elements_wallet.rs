@@ -110,7 +110,7 @@ impl ElementsWalletManager {
         self.network
     }
 
-    fn derivation_path_for(
+    pub fn derivation_path_for(
         &self,
         account_idx: u32,
     ) -> Result<bitcoin::bip32::DerivationPath, ElementsWalletError> {
@@ -311,6 +311,17 @@ impl ElementsWalletManager {
             "created Elements user wallet"
         );
         Ok(row)
+    }
+
+    pub async fn load_wallet_from_row(
+        &self,
+        row: ElementsWalletRow,
+    ) -> Result<UserElementsWallet, ElementsWalletError> {
+        self.build_user_wallet(row.user_id, row).await
+    }
+
+    pub fn rpc(&self) -> &Arc<ElementsRpc> {
+        &self.rpc
     }
 
     async fn build_user_wallet(
@@ -742,6 +753,110 @@ impl UserElementsWallet {
             amount_sat,
             fee_sat,
         })
+    }
+
+    pub async fn sweep_to(
+        &self,
+        recipient: &str,
+        fee_rate_sat_vb: u64,
+        label: Option<String>,
+    ) -> Result<ElementsBroadcastTransaction, ElementsWalletError> {
+        #[allow(clippy::cast_precision_loss)]
+        let fee_rate_btc_kb = (fee_rate_sat_vb as f64) * 1000.0 / 100_000_000.0;
+
+        let rpc = self.rpc.clone();
+        let wallet = self.daemon_wallet_name.clone();
+        let recipient_owned = recipient.to_string();
+        let signers: Vec<_> = self.signers.iter().cloned().collect();
+        let mbk_bytes = derive_master_blinding_key(self.user_id, self.account_idx);
+
+        let result = tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
+            let balances = rpc.get_balances(&wallet)?;
+            let total_btc = balances.trusted + balances.untrusted_pending;
+            if total_btc <= 0.0 {
+                return Err(ElementsWalletError::BuildPset(
+                    "no balance to sweep".into(),
+                ));
+            }
+
+            let outputs = vec![serde_json::json!({ recipient_owned.clone(): total_btc })];
+            let funded =
+                rpc.wallet_create_funded_psbt_drain(&wallet, &outputs, fee_rate_btc_kb)?;
+
+            let pset_bytes = BASE64
+                .decode(funded.psbt.as_bytes())
+                .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
+            let pset: Pset = consensus_deserialize(&pset_bytes)
+                .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
+            let unsigned = asterism_elements::UnsignedPset::new(pset)
+                .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
+
+            let mbk = MasterBlindingKey::from(mbk_bytes);
+            let inp_secrets =
+                derive_input_secrets_with_rpc(unsigned.as_pset(), &mbk, &rpc, &wallet)?;
+            let blinded = asterism_elements::blind_pset(unsigned, &inp_secrets)
+                .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
+
+            let mut pset = blinded.into_pset();
+            for signer in &signers {
+                signer
+                    .sign_pset(&mut pset)
+                    .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
+            }
+
+            asterism_elements::finalize_p2wsh_pset(&mut pset)
+                .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
+            let tx = pset
+                .extract_tx()
+                .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
+            let raw_hex = {
+                let bytes = consensus_serialize(&tx);
+                let mut hex = String::with_capacity(bytes.len() * 2);
+                for b in &bytes {
+                    use std::fmt::Write;
+                    let _ = write!(hex, "{b:02x}");
+                }
+                hex
+            };
+
+            let txid = rpc.send_raw_transaction(&raw_hex)?;
+            #[allow(clippy::cast_possible_truncation)]
+            let fee_sat = (funded.fee * 100_000_000.0).round() as i64;
+            #[allow(clippy::cast_possible_truncation)]
+            let amount_sat = ((total_btc - funded.fee) * 100_000_000.0).round() as i64;
+
+            Ok((txid, recipient_owned, amount_sat, fee_sat, raw_hex))
+        })
+        .await
+        .expect("spawn_blocking join")?;
+
+        let (txid, recipient_str, amount_sat, fee_sat, raw_hex) = result;
+
+        db::insert_elements_transaction(
+            &self.pool,
+            &db::NewElementsTransaction {
+                wallet_id: self.wallet_id,
+                txid: &txid,
+                recipient: &recipient_str,
+                amount_sat,
+                fee_sat,
+                raw_tx_hex: &raw_hex,
+                label: label.as_deref(),
+            },
+        )
+        .await?;
+
+        Ok(ElementsBroadcastTransaction {
+            txid,
+            recipient: recipient_str,
+            amount_sat,
+            fee_sat,
+        })
+    }
+
+    #[must_use]
+    pub fn daemon_wallet_name(&self) -> &str {
+        &self.daemon_wallet_name
     }
 }
 
