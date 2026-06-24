@@ -14,7 +14,7 @@
 //!   requests for the same user serialize. Different users sign in
 //!   parallel.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use asterism_core::descriptor::{KeyMode, to_multipath_string};
@@ -1070,51 +1070,57 @@ impl UserWallet {
     pub async fn address_history(&self, address: &Address) -> Result<AddressActivity, WalletError> {
         let target_spk: ScriptBuf = address.script_pubkey();
 
-        let wallet = self.inner.lock().await;
-        let tip_height = wallet.latest_checkpoint().height();
+        let tip_height = self.inner.lock().await.latest_checkpoint().height();
 
-        let spent_status: HashMap<_, _> = wallet
-            .list_output()
-            .map(|o| (o.outpoint, o.is_spent))
-            .collect();
-
+        let mut seen_outpoints = HashSet::new();
         let mut receipts: Vec<AddressReceipt> = Vec::new();
         let mut total_received = Amount::ZERO;
         let mut unspent = Amount::ZERO;
 
-        for wtx in wallet.transactions() {
-            let txid = wtx.tx_node.txid;
-            let tx = wtx.tx_node.tx.as_ref();
-            for (vout, txout) in tx.output.iter().enumerate() {
-                if txout.script_pubkey != target_spk {
-                    continue;
-                }
-                let vout32 = u32::try_from(vout).unwrap_or(u32::MAX);
-                let outpoint = bitcoin::OutPoint::new(txid, vout32);
-                let is_spent = spent_status.get(&outpoint).copied().unwrap_or(false);
-                let (confirmation_height, confirmations) = match wtx.chain_position {
-                    ChainPosition::Confirmed { anchor, .. } => {
-                        let h = anchor.block_id.height;
-                        let confs = tip_height.saturating_sub(h).saturating_add(1);
-                        (Some(h), confs)
+        for vw_mutex in &self.version_wallets {
+            let vw = vw_mutex.lock().await;
+
+            let spent_status: HashMap<_, _> = vw
+                .list_output()
+                .map(|o| (o.outpoint, o.is_spent))
+                .collect();
+
+            for wtx in vw.transactions() {
+                let txid = wtx.tx_node.txid;
+                let tx = wtx.tx_node.tx.as_ref();
+                for (vout, txout) in tx.output.iter().enumerate() {
+                    if txout.script_pubkey != target_spk {
+                        continue;
                     }
-                    ChainPosition::Unconfirmed { .. } => (None, 0),
-                };
-                total_received += txout.value;
-                if !is_spent {
-                    unspent += txout.value;
+                    let vout32 = u32::try_from(vout).unwrap_or(u32::MAX);
+                    let outpoint = bitcoin::OutPoint::new(txid, vout32);
+                    if !seen_outpoints.insert(outpoint) {
+                        continue;
+                    }
+                    let is_spent = spent_status.get(&outpoint).copied().unwrap_or(false);
+                    let (confirmation_height, confirmations) = match wtx.chain_position {
+                        ChainPosition::Confirmed { anchor, .. } => {
+                            let h = anchor.block_id.height;
+                            let confs = tip_height.saturating_sub(h).saturating_add(1);
+                            (Some(h), confs)
+                        }
+                        ChainPosition::Unconfirmed { .. } => (None, 0),
+                    };
+                    total_received += txout.value;
+                    if !is_spent {
+                        unspent += txout.value;
+                    }
+                    receipts.push(AddressReceipt {
+                        txid,
+                        vout: vout32,
+                        amount: txout.value,
+                        confirmation_height,
+                        confirmations,
+                        is_spent,
+                    });
                 }
-                receipts.push(AddressReceipt {
-                    txid,
-                    vout: vout32,
-                    amount: txout.value,
-                    confirmation_height,
-                    confirmations,
-                    is_spent,
-                });
             }
         }
-        drop(wallet);
 
         receipts.sort_by_key(|r| r.confirmation_height.unwrap_or(u32::MAX));
 

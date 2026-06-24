@@ -45,17 +45,7 @@ signers = [
 
 # How to sweep funds from old federation addresses to the new federation.
 #
-# Single-account strategies (operate within one account):
-#
-#   "consolidation"        - All UTXOs into a single output at the new
-#                            federation's first receive address. Best for
-#                            simple treasuries with a single pooled balance.
-#
-#   "batched"              - Like consolidation, but splits into multiple
-#                            transactions with at most `max_inputs_per_tx`
-#                            inputs each. For large UTXO sets.
-#
-# Multi-account strategies (operate across all account indices):
+# Available strategies:
 #
 #   "account-for-account"  - All accounts swept in a SINGLE transaction.
 #                            Inputs from every account index, one output per
@@ -76,9 +66,6 @@ signers = [
 #
 strategy = "account-for-account-batched"
 
-# Only used when strategy = "batched". Maximum inputs per sweep transaction.
-# max_inputs_per_tx = 50
-
 # Only used when strategy = "account-for-account-batched".
 # Accounts with a total balance below this threshold (in satoshis) are
 # bundled into a single "small accounts" sweep transaction instead of
@@ -88,10 +75,10 @@ strategy = "account-for-account-batched"
 # small_account_threshold = 100000
 
 # Account index of the internal/house account that pays migration fees.
-# Required for account-for-account strategies. This account MUST exist
-# and have sufficient balance to cover all transaction fees before the
-# migration begins. For account-for-account-batched, this account is
-# migrated last so it can fund fees for all preceding transactions.
+# This account MUST exist and have sufficient balance to cover all
+# transaction fees before the migration begins. For
+# account-for-account-batched, this account is migrated last so it can
+# fund fees for all preceding transactions.
 fee_account_idx = 99
 
 # Fee rate in sat/vB for the sweep transactions.

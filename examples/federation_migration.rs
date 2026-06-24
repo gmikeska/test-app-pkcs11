@@ -56,8 +56,6 @@ struct NewFederationConfig {
 struct MigrationStrategyConfig {
     strategy: String,
     #[serde(default)]
-    max_inputs_per_tx: Option<usize>,
-    #[serde(default)]
     fee_account_idx: Option<u32>,
     #[serde(default = "default_small_account_threshold")]
     small_account_threshold: u64,
@@ -152,41 +150,19 @@ fn parse_args() -> Result<CliArgs, String> {
 
 fn validate_config(cfg: &MigrationConfig, app_config: &AppConfig) -> Result<(), String> {
     match cfg.migration.strategy.as_str() {
-        "consolidation" | "batched" | "account-for-account" | "account-for-account-batched" => {}
+        "account-for-account" | "account-for-account-batched" => {}
         other => {
             return Err(format!(
                 "unrecognized migration strategy: \"{other}\"\n\
                  \n\
                  Valid strategies are:\n\
-                   consolidation              — all UTXOs into a single output\n\
-                   batched                    — consolidation in fixed-size batches\n\
                    account-for-account        — all accounts in one transaction\n\
                    account-for-account-batched — one tx per account, small accounts bundled"
             ));
         }
     }
 
-    if cfg.migration.strategy == "batched" {
-        match cfg.migration.max_inputs_per_tx {
-            None => {
-                return Err(
-                    "strategy \"batched\" requires max_inputs_per_tx to be set\n\
-                     \n\
-                     Add to [migration]:\n\
-                       max_inputs_per_tx = 50"
-                        .to_string(),
-                );
-            }
-            Some(0) => {
-                return Err("max_inputs_per_tx must be at least 1".to_string());
-            }
-            Some(_) => {}
-        }
-    }
-
-    if cfg.migration.strategy.starts_with("account-for-account")
-        && cfg.migration.fee_account_idx.is_none()
-    {
+    if cfg.migration.fee_account_idx.is_none() {
         return Err(
             "account-for-account strategies require fee_account_idx to be set\n\
              \n\
@@ -698,23 +674,16 @@ async fn main() {
 
     let total_balance: Amount = account_summaries.iter().map(|a| a.balance).sum();
 
-    // For account-for-account strategies, build and display the sweep plan.
     let fee_rate = bitcoin::FeeRate::from_sat_per_vb(cfg.migration.fee_rate_sat_per_vb)
         .unwrap_or(bitcoin::FeeRate::BROADCAST_MIN);
-    let is_account_strategy = cfg.migration.strategy.starts_with("account-for-account");
 
-    // Display the account table now for non-account strategies; account
-    // strategies display it after enriching with destination addresses.
-    if !is_account_strategy {
-        display_account_table(&account_summaries, fee_account_idx);
-    }
     display_migration_plan(
         &cfg.migration.strategy,
         total_balance,
         cfg.migration.fee_rate_sat_per_vb,
     );
 
-    if is_account_strategy && total_balance > Amount::ZERO {
+    if total_balance > Amount::ZERO {
         let mut account_utxo_sets = Vec::new();
         for wallet in &user_wallets {
             let acct_idx = wallet.account_idx() as u32;
