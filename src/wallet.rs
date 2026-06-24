@@ -1080,10 +1080,8 @@ impl UserWallet {
         for vw_mutex in &self.version_wallets {
             let vw = vw_mutex.lock().await;
 
-            let spent_status: HashMap<_, _> = vw
-                .list_output()
-                .map(|o| (o.outpoint, o.is_spent))
-                .collect();
+            let spent_status: HashMap<_, _> =
+                vw.list_output().map(|o| (o.outpoint, o.is_spent)).collect();
 
             for wtx in vw.transactions() {
                 let txid = wtx.tx_node.txid;
