@@ -64,7 +64,11 @@ signers = [
 #                            and fund managers — balances audit/compliance
 #                            needs against fee efficiency for small accounts.
 #
-strategy = "account-for-account-batched"
+# NOTE: the Elements (`--elements`) migration currently implements
+# "account-for-account" only (all accounts in one fee-account-pays
+# transaction). "account-for-account-batched" for Elements (small-account
+# bundling + chained confidential fee-change) is the next milestone.
+strategy = "account-for-account"
 
 # Only used when strategy = "account-for-account-batched".
 # Accounts with a total balance below this threshold (in satoshis) are
@@ -91,8 +95,10 @@ fee_rate_sat_per_vb = 2
 [elements]
 
 # Whether to also migrate the Elements wallet alongside the Bitcoin wallet.
-# When true, the tool performs the same federation change on the Elements
-# side, including creating a new daemon watch-only wallet.
+# When true (and run with `--elements`), the tool performs the same federation
+# change on the Elements side using the client-side wollet model: it records
+# the new federation, then sweeps all accounts' captured UTXOs into the new
+# federation in one fee-account-pays transaction (no daemon wallets).
 enabled = true
 
 # Whether to rotate the SLIP-77 master blinding key for the new federation.

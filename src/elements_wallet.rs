@@ -437,6 +437,35 @@ impl UserElementsWallet {
         &self.daemon_wallet_name
     }
 
+    /// The concrete LWK network (node policy asset + genesis).
+    #[must_use]
+    pub fn lwk_network(&self) -> LwkNetwork {
+        self.lwk_net
+    }
+
+    /// This wallet's 32-byte SLIP-77 master blinding key.
+    #[must_use]
+    pub fn master_blinding_key(&self) -> [u8; 32] {
+        self.mbk
+    }
+
+    /// A clone of this wallet's HSM signer set (for migration signing).
+    #[must_use]
+    pub fn signer_set(&self) -> SignerSet {
+        self.signers.clone()
+    }
+
+    /// All unspent captured UTXOs for this wallet (from the block-scan store).
+    pub async fn captured_utxos(
+        &self,
+    ) -> Result<Vec<asterism_elements::CapturedUtxo>, ElementsWalletError> {
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        tokio::task::spawn_blocking(move || store.list_unspent(wid).map_err(pipeline_err))
+            .await
+            .expect("spawn_blocking join")
+    }
+
     pub async fn tip_height(&self) -> Result<u64, ElementsWalletError> {
         let (url, user, pass) = self.rpc_cfg();
         let h = tokio::task::spawn_blocking(move || -> Result<u32, ElementsWalletError> {
@@ -814,6 +843,33 @@ impl UserElementsWallet {
     pub fn sign_pset_with_signers(&self, pset: &mut elements::pset::PartiallySignedTransaction) {
         for signer in self.signers.iter() {
             let _ = signer.sign_pset(pset);
+        }
+    }
+
+    /// Sign only the inputs at `input_indices` with this account's HSM signers.
+    ///
+    /// In a cross-account migration PSET every account is signed by the *same*
+    /// physical HSM tokens (same master fingerprints, different derivation
+    /// paths), so a naive sign would mis-derive other accounts' inputs. We
+    /// temporarily clear `bip32_derivation` on the other inputs so this
+    /// account's signers skip them, then restore it — mirroring the Bitcoin
+    /// `sign_migration_inputs`.
+    pub fn sign_migration_pset_inputs(
+        &self,
+        pset: &mut elements::pset::PartiallySignedTransaction,
+        input_indices: &[usize],
+    ) {
+        let mut saved = Vec::new();
+        for (i, inp) in pset.inputs_mut().iter_mut().enumerate() {
+            if !input_indices.contains(&i) {
+                saved.push((i, std::mem::take(&mut inp.bip32_derivation)));
+            }
+        }
+        for signer in self.signers.iter() {
+            let _ = signer.sign_pset(pset);
+        }
+        for (i, derivation) in saved {
+            pset.inputs_mut()[i].bip32_derivation = derivation;
         }
     }
 }
