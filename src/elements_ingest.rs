@@ -7,9 +7,9 @@
 
 use std::time::Duration;
 
-use asterism_elements::sync::{BlockScanEngine, WalletId};
 use asterism_elements::ElementsNetwork;
 use asterism_elements::ElementsWollet;
+use asterism_elements::sync::{BlockScanEngine, WalletId};
 use sqlx::PgPool;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -93,12 +93,18 @@ async fn run_once(
                 .register_wallet(*wid, w, SCAN_GAP)
                 .map_err(|e| e.to_string())?;
         }
-        let s = engine.sync(&chain, &blocks, &utxos).map_err(|e| e.to_string())?;
+        let s = engine
+            .sync(&chain, &blocks, &utxos)
+            .map_err(|e| e.to_string())?;
         Ok((
             s.blocks_scanned,
             format!(
                 "scanned={} captured={} spent={} skipped_unblindable={} reorg_to={:?}",
-                s.blocks_scanned, s.utxos_captured, s.utxos_spent, s.skipped_unblindable, s.reorg_to
+                s.blocks_scanned,
+                s.utxos_captured,
+                s.utxos_spent,
+                s.skipped_unblindable,
+                s.reorg_to
             ),
         ))
     })

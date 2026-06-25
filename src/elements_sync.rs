@@ -101,20 +101,21 @@ impl PgBlockStore {
 
 impl BlockStore for PgBlockStore {
     fn store_block(&self, height: u32, hash: BlockHash, raw: &[u8]) -> Result<(), SyncError> {
-        self.rt.block_on(async {
-            sqlx::query(
-                "INSERT INTO elements_blocks (height, block_hash, raw_block) \
+        self.rt
+            .block_on(async {
+                sqlx::query(
+                    "INSERT INTO elements_blocks (height, block_hash, raw_block) \
                  VALUES ($1, $2, $3) \
                  ON CONFLICT (height) DO UPDATE \
                    SET block_hash = EXCLUDED.block_hash, raw_block = EXCLUDED.raw_block",
-            )
-            .bind(i64::from(height))
-            .bind(hash.to_string())
-            .bind(raw)
-            .execute(&self.pool)
-            .await
-        })
-        .map_err(store_err)?;
+                )
+                .bind(i64::from(height))
+                .bind(hash.to_string())
+                .bind(raw)
+                .execute(&self.pool)
+                .await
+            })
+            .map_err(store_err)?;
         Ok(())
     }
 
@@ -322,22 +323,25 @@ impl WalletUtxoStore for PgWalletUtxoStore {
             .map_err(store_err)?;
 
         rows.into_iter()
-            .map(|(txid, vout, raw_txout, secrets_json, chain, widx, height)| {
-                let outpoint = OutPoint::new(Txid::from_str(&txid).map_err(enc_err)?, vout as u32);
-                let txout: TxOut = deserialize(&raw_txout).map_err(enc_err)?;
-                let secrets: TxOutSecrets =
-                    serde_json::from_str(&secrets_json).map_err(enc_err)?;
-                Ok(CapturedUtxo {
-                    wallet_id: wallet,
-                    outpoint,
-                    txout,
-                    secrets,
-                    chain: i16_to_chain(chain),
-                    wildcard_index: widx as u32,
-                    height: height as u32,
-                    is_spent: false,
-                })
-            })
+            .map(
+                |(txid, vout, raw_txout, secrets_json, chain, widx, height)| {
+                    let outpoint =
+                        OutPoint::new(Txid::from_str(&txid).map_err(enc_err)?, vout as u32);
+                    let txout: TxOut = deserialize(&raw_txout).map_err(enc_err)?;
+                    let secrets: TxOutSecrets =
+                        serde_json::from_str(&secrets_json).map_err(enc_err)?;
+                    Ok(CapturedUtxo {
+                        wallet_id: wallet,
+                        outpoint,
+                        txout,
+                        secrets,
+                        chain: i16_to_chain(chain),
+                        wildcard_index: widx as u32,
+                        height: height as u32,
+                        is_spent: false,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -419,9 +423,9 @@ impl RpcChainSource {
             .client
             .call("getsidechaininfo", &[])
             .map_err(Self::rpc_err)?;
-        let s = v["pegged_asset"]
-            .as_str()
-            .ok_or_else(|| SyncError::ChainSource("getsidechaininfo missing pegged_asset".into()))?;
+        let s = v["pegged_asset"].as_str().ok_or_else(|| {
+            SyncError::ChainSource("getsidechaininfo missing pegged_asset".into())
+        })?;
         AssetId::from_str(s).map_err(enc_err)
     }
 }
@@ -487,9 +491,7 @@ impl ElementsChainSource for RpcChainSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use elements::confidential::{
-        Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor,
-    };
+    use elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
     use elements::{AssetId, Script, TxOutWitness};
 
     /// Connect to the test database, or return `None` to skip when no DB is
@@ -580,8 +582,12 @@ mod tests {
                 .upsert_utxos(&[captured(wallet, 1, 100, 0), captured(wallet, 1, 200, 1)])
                 .unwrap();
             utxos.upsert_utxos(&[captured(wallet, 1, 100, 0)]).unwrap(); // re-upsert
-            let mut vals: Vec<u64> =
-                utxos.list_unspent(wallet).unwrap().iter().map(CapturedUtxo::value).collect();
+            let mut vals: Vec<u64> = utxos
+                .list_unspent(wallet)
+                .unwrap()
+                .iter()
+                .map(CapturedUtxo::value)
+                .collect();
             vals.sort_unstable();
             assert_eq!(vals, vec![100, 200], "idempotent upsert + list");
 
@@ -597,25 +603,45 @@ mod tests {
                 op
             };
             utxos.mark_spent(&[op0], 2).unwrap();
-            let vals: Vec<u64> =
-                utxos.list_unspent(wallet).unwrap().iter().map(CapturedUtxo::value).collect();
+            let vals: Vec<u64> = utxos
+                .list_unspent(wallet)
+                .unwrap()
+                .iter()
+                .map(CapturedUtxo::value)
+                .collect();
             assert_eq!(vals, vec![200], "spent excluded from list");
 
             // --- unspent_outpoints across wallets ---
-            assert_eq!(utxos.unspent_outpoints().unwrap().iter().filter(|(_, w)| *w == wallet).count(), 1);
+            assert_eq!(
+                utxos
+                    .unspent_outpoints()
+                    .unwrap()
+                    .iter()
+                    .filter(|(_, w)| *w == wallet)
+                    .count(),
+                1
+            );
 
             // --- rollback drops captured-above + un-spends spent-above ---
             // State: op0(100,h1) spent at h2; op1(200,h1) unspent. Add op9(900,h9).
             utxos.upsert_utxos(&[captured(wallet, 9, 900, 9)]).unwrap();
             utxos.rollback_above(1).unwrap();
             let vals: Vec<u64> = {
-                let mut v: Vec<u64> =
-                    utxos.list_unspent(wallet).unwrap().iter().map(CapturedUtxo::value).collect();
+                let mut v: Vec<u64> = utxos
+                    .list_unspent(wallet)
+                    .unwrap()
+                    .iter()
+                    .map(CapturedUtxo::value)
+                    .collect();
                 v.sort_unstable();
                 v
             };
             // height-9 (900) dropped (captured > 1); op0 (100) un-spent (spent at h2 > 1)
-            assert_eq!(vals, vec![100, 200], "rollback dropped above + un-spent above");
+            assert_eq!(
+                vals,
+                vec![100, 200],
+                "rollback dropped above + un-spent above"
+            );
 
             // --- block store: cursor + hash + rollback ---
             let h3 = BlockHash::from_str(
@@ -623,8 +649,19 @@ mod tests {
             )
             .unwrap();
             blocks.store_block(3, h3, b"rawbytes").unwrap();
-            blocks.set_synced_tip(SyncedTip { height: 3, hash: h3 }).unwrap();
-            assert_eq!(blocks.synced_tip().unwrap(), Some(SyncedTip { height: 3, hash: h3 }));
+            blocks
+                .set_synced_tip(SyncedTip {
+                    height: 3,
+                    hash: h3,
+                })
+                .unwrap();
+            assert_eq!(
+                blocks.synced_tip().unwrap(),
+                Some(SyncedTip {
+                    height: 3,
+                    hash: h3
+                })
+            );
             assert_eq!(blocks.block_hash_at(3).unwrap(), Some(h3));
             assert_eq!(blocks.block_hash_at(99).unwrap(), None);
 
@@ -634,8 +671,15 @@ mod tests {
             .unwrap();
             blocks.store_block(2, h2, b"x").unwrap();
             blocks.rollback_above(2).unwrap();
-            assert!(blocks.block_hash_at(3).unwrap().is_none(), "block 3 dropped");
-            assert_eq!(blocks.synced_tip().unwrap().map(|t| t.height), Some(2), "cursor reset to max");
+            assert!(
+                blocks.block_hash_at(3).unwrap().is_none(),
+                "block 3 dropped"
+            );
+            assert_eq!(
+                blocks.synced_tip().unwrap().map(|t| t.height),
+                Some(2),
+                "cursor reset to max"
+            );
 
             // cleanup
             Handle::current().block_on(async {
@@ -644,8 +688,14 @@ mod tests {
                     .execute(&pool)
                     .await
                     .unwrap();
-                sqlx::query("DELETE FROM elements_blocks").execute(&pool).await.unwrap();
-                sqlx::query("DELETE FROM elements_sync_cursor").execute(&pool).await.unwrap();
+                sqlx::query("DELETE FROM elements_blocks")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query("DELETE FROM elements_sync_cursor")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
             });
         })
         .await;

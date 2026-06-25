@@ -31,13 +31,11 @@ use asterism_core::federation::Federation;
 use asterism_core::network::{ElementsNetworkId, NetworkType};
 use asterism_core::signer::Signer;
 
-use asterism_elements::descriptor::{to_multipath_string, CtDescriptorBuilder, CtKeyMode};
+use asterism_elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
 use asterism_elements::pset::ElementsSigningCoordinator;
-use asterism_elements::sync::{
-    BlockScanEngine, ElementsChainSource, WalletId, WalletUtxoStore,
-};
+use asterism_elements::sync::{BlockScanEngine, ElementsChainSource, WalletId, WalletUtxoStore};
 use asterism_elements::testkit::SoftwareSigner;
-use asterism_elements::{build_spend_pset, ElementsNetwork, ElementsWollet, ElementsWalletHandle};
+use asterism_elements::{ElementsNetwork, ElementsWalletHandle, ElementsWollet, build_spend_pset};
 
 use test_app_pkcs11::elements_sync::{PgBlockStore, PgWalletUtxoStore, RpcChainSource};
 
@@ -134,8 +132,8 @@ async fn elements_receive_and_send_e2e() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let acct =
-        (u32::from_le_bytes(tag.as_bytes()[..4].try_into().unwrap()) % 1_000_000) as i32 + 2_000_000;
+    let acct = (u32::from_le_bytes(tag.as_bytes()[..4].try_into().unwrap()) % 1_000_000) as i32
+        + 2_000_000;
     let wallet_uuid: Uuid = sqlx::query_scalar(
         "INSERT INTO elements_wallets \
            (user_id, account_idx, descriptor, master_blinding_key, daemon_wallet_name) \
@@ -158,7 +156,10 @@ async fn elements_receive_and_send_e2e() {
         .unwrap();
     let mine_addr: String = node.call("getnewaddress", &[]).unwrap();
     let _txid: String = node
-        .call("sendtoaddress", &[json!(deposit_addr.to_string()), json!(1.0)])
+        .call(
+            "sendtoaddress",
+            &[json!(deposit_addr.to_string()), json!(1.0)],
+        )
         .unwrap();
     let _: Vec<String> = node
         .call("generatetoaddress", &[json!(2), json!(mine_addr.clone())])
@@ -169,7 +170,11 @@ async fn elements_receive_and_send_e2e() {
     let blocks = PgBlockStore::new(pool.clone());
     let utxos = PgWalletUtxoStore::new(pool.clone());
 
-    let env_rpc = (env.rpc_url.clone(), env.rpc_user.clone(), env.rpc_pass.clone());
+    let env_rpc = (
+        env.rpc_url.clone(),
+        env.rpc_user.clone(),
+        env.rpc_pass.clone(),
+    );
     let recipient_str: String = node.call("getnewaddress", &[]).unwrap();
 
     let outcome = tokio::task::spawn_blocking(move || -> Result<(u64, u64), String> {
@@ -189,8 +194,8 @@ async fn elements_receive_and_send_e2e() {
         // 2) spend 0.5 LBTC to a fresh node address
         let recipient = elements::Address::from_str(&recipient_str).map_err(de)?;
         // 2000 sat/kvb (2 sat/vb) clears the node's min relay fee.
-        let blinded = build_spend_pset(&wollet, &captured, &recipient, LBTC_SAT / 2, 2000.0)
-            .map_err(de)?;
+        let blinded =
+            build_spend_pset(&wollet, &captured, &recipient, LBTC_SAT / 2, 2000.0).map_err(de)?;
         let mut coord = ElementsSigningCoordinator::new(&federation, blinded).map_err(de)?;
         coord.sign_with(&signers[0], &signers[0].id()).map_err(de)?;
         coord.sign_with(&signers[1], &signers[1].id()).map_err(de)?;
@@ -214,11 +219,17 @@ async fn elements_receive_and_send_e2e() {
     let wollet2 = ElementsWollet::from_handle_with_lwk(&handle, net, lwk_net).unwrap();
     let blocks2 = PgBlockStore::new(pool.clone());
     let utxos2 = PgWalletUtxoStore::new(pool.clone());
-    let env_rpc2 = (env.rpc_url.clone(), env.rpc_user.clone(), env.rpc_pass.clone());
+    let env_rpc2 = (
+        env.rpc_url.clone(),
+        env.rpc_user.clone(),
+        env.rpc_pass.clone(),
+    );
     let resync = tokio::task::spawn_blocking(move || -> Result<Vec<u64>, String> {
         let chain = RpcChainSource::new(&env_rpc2.0, &env_rpc2.1, &env_rpc2.2).map_err(de)?;
         let mut engine = BlockScanEngine::new();
-        engine.register_wallet(wallet_id, &wollet2, 20).map_err(de)?;
+        engine
+            .register_wallet(wallet_id, &wollet2, 20)
+            .map_err(de)?;
         engine.sync(&chain, &blocks2, &utxos2).map_err(de)?;
         Ok(utxos2
             .list_unspent(wallet_id)
@@ -236,7 +247,11 @@ async fn elements_receive_and_send_e2e() {
         !resync.contains(&LBTC_SAT),
         "deposit must be spent after broadcast+confirm, unspent set = {resync:?}"
     );
-    assert_eq!(resync.len(), 1, "exactly the change output remains: {resync:?}");
+    assert_eq!(
+        resync.len(),
+        1,
+        "exactly the change output remains: {resync:?}"
+    );
     let change = resync[0];
     assert!(
         change > 0 && change < LBTC_SAT / 2 + 1_000_000,
@@ -249,8 +264,14 @@ async fn elements_receive_and_send_e2e() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM elements_blocks").execute(&pool).await.unwrap();
-    sqlx::query("DELETE FROM elements_sync_cursor").execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM elements_blocks")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM elements_sync_cursor")
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 fn de<E: std::fmt::Display>(e: E) -> String {

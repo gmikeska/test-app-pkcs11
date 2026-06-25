@@ -304,10 +304,9 @@ impl ElementsRpc {
             "walletprocesspsbt",
             &[json!(psbt_base64), json!(false), json!("ALL"), json!(true)],
         )?;
-        result["psbt"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| ElementsRpcError::BadResponse("walletprocesspsbt returned no psbt".into()))
+        result["psbt"].as_str().map(str::to_string).ok_or_else(|| {
+            ElementsRpcError::BadResponse("walletprocesspsbt returned no psbt".into())
+        })
     }
 
     pub fn send_raw_transaction(&self, hex: &str) -> Result<String, ElementsRpcError> {

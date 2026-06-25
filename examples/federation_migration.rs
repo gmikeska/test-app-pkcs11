@@ -608,7 +608,10 @@ async fn run_elements_migration(
     let (current_threshold, current_signer_count) = current_versions
         .last()
         .map(|v| (v.threshold as u32, v.signer_count as usize))
-        .unwrap_or((app_config.fed_threshold, app_config.fed_signer_indices.len()));
+        .unwrap_or((
+            app_config.fed_threshold,
+            app_config.fed_signer_indices.len(),
+        ));
 
     let current_signers: Vec<(String, String)> = app_config
         .fed_signer_indices
@@ -691,7 +694,10 @@ async fn run_elements_migration(
         println!();
         println!(
             "  Accounts to migrate:  {}",
-            account_summaries.iter().filter(|a| a.balance_btc > 0.0).count()
+            account_summaries
+                .iter()
+                .filter(|a| a.balance_btc > 0.0)
+                .count()
         );
         println!("  Total balance:        {total_balance_btc:.8} L-BTC");
         println!("  Strategy:             {}", cfg.migration.strategy);
@@ -759,26 +765,25 @@ async fn run_elements_migration(
                 .collect();
 
             // Get existing MBK or derive a new one.
-            let versions =
-                match db::list_federation_versions_for_elements_wallet(pool, wallet.wallet_id())
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!(
+            let versions = match db::list_federation_versions_for_elements_wallet(
+                pool,
+                wallet.wallet_id(),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
                         "error: failed to list federation versions for Elements account {acct_idx}: {e}"
                     );
-                        std::process::exit(1);
-                    }
-                };
+                    std::process::exit(1);
+                }
+            };
 
             let mbk_hex = if rotate_blinding_key {
                 let new_version = i32::try_from(versions.len()).unwrap_or(0);
-                let key = crate::derive_elements_mbk(
-                    wallet.user_id(),
-                    wallet.account_idx(),
-                    new_version,
-                );
+                let key =
+                    crate::derive_elements_mbk(wallet.user_id(), wallet.account_idx(), new_version);
                 hex_encode_bytes(&key)
             } else {
                 versions
@@ -797,9 +802,7 @@ async fn run_elements_migration(
             let mut builder = match CtDescriptorBuilder::new(cfg.federation.threshold, &mbk_bytes) {
                 Ok(b) => b.key_mode(CtKeyMode::Ranged),
                 Err(e) => {
-                    eprintln!(
-                        "error: CT descriptor builder failed for account {acct_idx}: {e}"
-                    );
+                    eprintln!("error: CT descriptor builder failed for account {acct_idx}: {e}");
                     std::process::exit(1);
                 }
             };
@@ -812,9 +815,7 @@ async fn run_elements_migration(
             let ct_desc = match builder.build() {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!(
-                        "error: failed to build CT descriptor for account {acct_idx}: {e}"
-                    );
+                    eprintln!("error: failed to build CT descriptor for account {acct_idx}: {e}");
                     std::process::exit(1);
                 }
             };
@@ -822,8 +823,10 @@ async fn run_elements_migration(
 
             // Set up the new daemon wallet.
             let new_version_index = i32::try_from(versions.len()).unwrap_or(0);
-            let daemon_wallet_name =
-                format!("asterism-elements-user-{}-v{new_version_index}", wallet.account_idx());
+            let daemon_wallet_name = format!(
+                "asterism-elements-user-{}-v{new_version_index}",
+                wallet.account_idx()
+            );
 
             let rpc = elements_manager.rpc().clone();
             let wallet_name = daemon_wallet_name.clone();
@@ -849,9 +852,7 @@ async fn run_elements_migration(
                     .map_err(|e| e.to_string())?;
 
                 for (desc, is_internal) in [(&inner_receive, false), (&inner_change, true)] {
-                    let info = rpc
-                        .get_descriptor_info(desc)
-                        .map_err(|e| e.to_string())?;
+                    let info = rpc.get_descriptor_info(desc).map_err(|e| e.to_string())?;
                     let desc_with_checksum = format!("{desc}#{}", info.checksum);
                     let results = rpc
                         .import_descriptors(
@@ -877,7 +878,8 @@ async fn run_elements_migration(
 
                 let slip77_mbk = MasterBlindingKey::from(mbk_for_import);
                 let secp =
-                    asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new();
+                    asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new(
+                    );
                 let multipath_str = ct_desc_for_import.to_string();
                 let receive_str = multipath_str.replace("/<0;1>/*", "/0/*");
                 let change_str = multipath_str.replace("/<0;1>/*", "/1/*");
@@ -904,11 +906,8 @@ async fn run_elements_migration(
                                 }
                                 s
                             };
-                            let _ = rpc.import_blinding_key(
-                                &wallet_name,
-                                &addr.to_string(),
-                                &bk_hex,
-                            );
+                            let _ =
+                                rpc.import_blinding_key(&wallet_name, &addr.to_string(), &bk_hex);
                         }
                     }
                 }
@@ -1040,16 +1039,18 @@ async fn run_elements_migration(
         };
 
         // Get the new federation's receive address from the new daemon wallet.
-        let versions =
-            match db::list_federation_versions_for_elements_wallet(pool, wallet.wallet_id()).await {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!(
-                        "warning: failed to list versions for Elements account {acct_idx}: {e}"
-                    );
-                    continue;
-                }
-            };
+        let versions = match db::list_federation_versions_for_elements_wallet(
+            pool,
+            wallet.wallet_id(),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("warning: failed to list versions for Elements account {acct_idx}: {e}");
+                continue;
+            }
+        };
         let latest = match versions.last() {
             Some(v) => v,
             None => {
@@ -1169,18 +1170,17 @@ async fn run_elements_migration(
             let wn = wn.clone();
             let wn_display = wn.clone();
             let pset = updated_pset_b64.clone();
-            updated_pset_b64 = match tokio::task::spawn_blocking(move || {
-                rpc.wallet_update_psbt(&wn, &pset)
-            })
-            .await
-            .expect("spawn_blocking join")
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("error: walletprocesspsbt failed for {wn_display}: {e}");
-                    std::process::exit(1);
-                }
-            };
+            updated_pset_b64 =
+                match tokio::task::spawn_blocking(move || rpc.wallet_update_psbt(&wn, &pset))
+                    .await
+                    .expect("spawn_blocking join")
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("error: walletprocesspsbt failed for {wn_display}: {e}");
+                        std::process::exit(1);
+                    }
+                };
         }
 
         // Now we need to subtract the fee from the fee account's output.
@@ -1198,7 +1198,8 @@ async fn run_elements_migration(
                 .map(|d| d.daemon_wallet.clone())
                 .unwrap_or_default();
             #[allow(clippy::cast_precision_loss)]
-            let fee_rate_btc_kb = (cfg.migration.fee_rate_sat_per_vb as f64) * 1000.0 / 100_000_000.0;
+            let fee_rate_btc_kb =
+                (cfg.migration.fee_rate_sat_per_vb as f64) * 1000.0 / 100_000_000.0;
             let foi = fee_out_idx;
             match tokio::task::spawn_blocking(move || {
                 rpc.wallet_create_funded_psbt_with_inputs(
@@ -1236,18 +1237,17 @@ async fn run_elements_migration(
             let wn = wn.clone();
             let wn_display = wn.clone();
             let pset = final_pset_b64.clone();
-            final_pset_b64 = match tokio::task::spawn_blocking(move || {
-                rpc.wallet_update_psbt(&wn, &pset)
-            })
-            .await
-            .expect("spawn_blocking join")
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("error: walletprocesspsbt failed for {wn_display}: {e}");
-                    std::process::exit(1);
-                }
-            };
+            final_pset_b64 =
+                match tokio::task::spawn_blocking(move || rpc.wallet_update_psbt(&wn, &pset))
+                    .await
+                    .expect("spawn_blocking join")
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("error: walletprocesspsbt failed for {wn_display}: {e}");
+                        std::process::exit(1);
+                    }
+                };
         }
 
         // Parse, blind, sign, finalize, broadcast.
@@ -1257,20 +1257,19 @@ async fn run_elements_migration(
             let migration_data_ref = &migration_data;
             let user_wallets_ref = &user_wallets;
 
+            use asterism_elements::elements_miniscript::slip77::MasterBlindingKey;
             use base64::Engine;
             use base64::engine::general_purpose::STANDARD as BASE64;
             use elements::encode::deserialize as consensus_deserialize;
             use elements::encode::serialize as consensus_serialize;
             use elements::pset::PartiallySignedTransaction as Pset;
-            use asterism_elements::elements_miniscript::slip77::MasterBlindingKey;
 
             let pset_bytes = BASE64
                 .decode(pset_b64.as_bytes())
                 .expect("valid base64 from RPC");
-            let pset: Pset =
-                consensus_deserialize(&pset_bytes).expect("valid PSET from RPC");
-            let unsigned = asterism_elements::UnsignedPset::new(pset)
-                .expect("PSET has no signatures yet");
+            let pset: Pset = consensus_deserialize(&pset_bytes).expect("valid PSET from RPC");
+            let unsigned =
+                asterism_elements::UnsignedPset::new(pset).expect("PSET has no signatures yet");
 
             // Derive input secrets for blinding. Each input's blinding
             // key comes from the owning account.
@@ -1318,8 +1317,8 @@ async fn run_elements_migration(
                 input_offset += data.utxos.len();
             }
 
-            let blinded = asterism_elements::blind_pset(unsigned, &inp_secrets)
-                .expect("blinding succeeds");
+            let blinded =
+                asterism_elements::blind_pset(unsigned, &inp_secrets).expect("blinding succeeds");
             let mut pset = blinded.into_pset();
 
             // Sign with each account's signers.
@@ -1359,8 +1358,7 @@ async fn run_elements_migration(
             }
 
             // Finalize.
-            asterism_elements::finalize_p2wsh_pset(&mut pset)
-                .expect("finalization succeeds");
+            asterism_elements::finalize_p2wsh_pset(&mut pset).expect("finalization succeeds");
             let tx = pset.extract_tx().expect("extraction succeeds");
             let raw_hex = {
                 let bytes = consensus_serialize(&tx);
@@ -1374,16 +1372,18 @@ async fn run_elements_migration(
 
             let rpc_clone = rpc.clone();
             let hex_clone = raw_hex.clone();
-            let txid = tokio::task::spawn_blocking(move || {
-                rpc_clone.send_raw_transaction(&hex_clone)
-            })
-            .await
-            .expect("spawn_blocking join")
-            .expect("broadcast succeeds");
+            let txid =
+                tokio::task::spawn_blocking(move || rpc_clone.send_raw_transaction(&hex_clone))
+                    .await
+                    .expect("spawn_blocking join")
+                    .expect("broadcast succeeds");
 
             println!(
                 "  Broadcast: txid {txid} ({} inputs, {} outputs)",
-                migration_data_ref.iter().map(|d| d.utxos.len()).sum::<usize>(),
+                migration_data_ref
+                    .iter()
+                    .map(|d| d.utxos.len())
+                    .sum::<usize>(),
                 migration_data_ref.len()
             );
 
@@ -1444,17 +1444,21 @@ async fn run_elements_migration(
     // Mark old federation versions as migrated for all accounts.
     for data in &migration_data {
         let wallet = &user_wallets[data.wallet_idx];
-        let versions =
-            match db::list_federation_versions_for_elements_wallet(pool, wallet.wallet_id()).await {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!(
-                        "warning: failed to list versions for Elements account {}: {e}",
-                        data.acct_idx
-                    );
-                    continue;
-                }
-            };
+        let versions = match db::list_federation_versions_for_elements_wallet(
+            pool,
+            wallet.wallet_id(),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to list versions for Elements account {}: {e}",
+                    data.acct_idx
+                );
+                continue;
+            }
+        };
         let max_version = versions.iter().map(|v| v.version_index).max().unwrap_or(0);
         for v in &versions {
             if v.version_index < max_version {
@@ -1481,11 +1485,17 @@ async fn run_elements_migration(
         match wallet.balance().await {
             Ok(bal) => {
                 let btc = bal.trusted + bal.untrusted_pending;
-                let status = if btc <= 0.000_000_01 { "✓ drained" } else { "⚠ residual" };
+                let status = if btc <= 0.000_000_01 {
+                    "✓ drained"
+                } else {
+                    "⚠ residual"
+                };
                 println!("  Account {acct_idx}: {btc:.8} L-BTC  {status}");
             }
             Err(e) => {
-                eprintln!("warning: post-migration balance check failed for account {acct_idx}: {e}");
+                eprintln!(
+                    "warning: post-migration balance check failed for account {acct_idx}: {e}"
+                );
             }
         }
     }
@@ -1496,11 +1506,15 @@ async fn run_elements_migration(
     println!("  ───────────────────────");
     for wallet in &user_wallets {
         let acct_idx = wallet.account_idx();
-        let versions =
-            match db::list_federation_versions_for_elements_wallet(pool, wallet.wallet_id()).await {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+        let versions = match db::list_federation_versions_for_elements_wallet(
+            pool,
+            wallet.wallet_id(),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         if let Some(latest) = versions.last() {
             let rpc = elements_manager.rpc().clone();
             let wn = latest.wallet_handle.clone();
@@ -1510,10 +1524,15 @@ async fn run_elements_migration(
             {
                 Ok(bal) => {
                     let btc = bal.trusted + bal.untrusted_pending;
-                    println!("  Account {acct_idx}: {btc:.8} L-BTC  (daemon: {})", latest.wallet_handle);
+                    println!(
+                        "  Account {acct_idx}: {btc:.8} L-BTC  (daemon: {})",
+                        latest.wallet_handle
+                    );
                 }
                 Err(e) => {
-                    eprintln!("warning: new wallet balance check failed for account {acct_idx}: {e}");
+                    eprintln!(
+                        "warning: new wallet balance check failed for account {acct_idx}: {e}"
+                    );
                 }
             }
         }
@@ -1814,7 +1833,9 @@ async fn main() {
         cfg.migration.fee_rate_sat_per_vb,
     );
 
-    let mut migration_plan: Option<asterism_core::MigrationPlan<asterism_core::psbt::UnsignedPsbt>> = None;
+    let mut migration_plan: Option<
+        asterism_core::MigrationPlan<asterism_core::psbt::UnsignedPsbt>,
+    > = None;
     let mut account_utxo_sets: Vec<asterism_core::AccountUtxoSet> = Vec::new();
 
     if total_balance > Amount::ZERO {
@@ -2159,16 +2180,15 @@ async fn main() {
 
     let plan = migration_plan.expect("plan computed when total_balance > 0");
     let fee_acct_idx = fee_account_idx.expect("validated earlier");
-    let fee_wallet_idx = *wallet_by_acct.get(&fee_acct_idx).expect("fee account exists");
+    let fee_wallet_idx = *wallet_by_acct
+        .get(&fee_acct_idx)
+        .expect("fee account exists");
 
     // Chained fee-change data from the previous broadcast: outpoint +
     // pre-built PSBT input (because the UserWallet's version_wallets were
     // loaded before Step 1 and don't include the new federation).
-    let mut fee_change_data: Option<(
-        bitcoin::OutPoint,
-        bitcoin::psbt::Input,
-        bitcoin::Weight,
-    )> = None;
+    let mut fee_change_data: Option<(bitcoin::OutPoint, bitcoin::psbt::Input, bitcoin::Weight)> =
+        None;
 
     for (tx_num, sweep_tx) in plan.sweep_transactions.iter().enumerate() {
         println!(
@@ -2182,9 +2202,10 @@ async fn main() {
         // from the preceding broadcast.
         let has_synthetic_fee_input = {
             use bitcoin::hashes::Hash;
-            sweep_tx.source_utxos.iter().any(|op| {
-                op.txid == bitcoin::Txid::from_byte_array([0u8; 32])
-            })
+            sweep_tx
+                .source_utxos
+                .iter()
+                .any(|op| op.txid == bitcoin::Txid::from_byte_array([0u8; 32]))
         };
 
         let real_utxos: Vec<&bitcoin::OutPoint> = sweep_tx
@@ -2245,18 +2266,15 @@ async fn main() {
         // Build the PSBT on the fee wallet.
         let psbt = {
             let mut inner = fee_wallet.inner_wallet().await;
-            let fee_rate_obj =
-                bitcoin::FeeRate::from_sat_per_vb(cfg.migration.fee_rate_sat_per_vb)
-                    .unwrap_or(bitcoin::FeeRate::BROADCAST_MIN);
+            let fee_rate_obj = bitcoin::FeeRate::from_sat_per_vb(cfg.migration.fee_rate_sat_per_vb)
+                .unwrap_or(bitcoin::FeeRate::BROADCAST_MIN);
 
             let mut builder = inner.build_tx();
 
             // Add all UTXOs as foreign inputs (they belong to the old
             // federation's descriptor, not the builder wallet's).
             for (outpoint, psbt_input, weight, _wi) in &all_utxo_data {
-                if let Err(e) =
-                    builder.add_foreign_utxo(*outpoint, psbt_input.clone(), *weight)
-                {
+                if let Err(e) = builder.add_foreign_utxo(*outpoint, psbt_input.clone(), *weight) {
                     eprintln!("error: failed to add UTXO {outpoint}: {e}");
                     std::process::exit(1);
                 }
@@ -2267,15 +2285,12 @@ async fn main() {
 
             // Add explicit outputs for each destination.
             // The fee account's destination gets drain_to (absorbs the fee).
-            let fee_dest_idx = sweep_tx
-                .destinations
-                .iter()
-                .position(|(addr, _)| {
-                    account_utxo_sets
-                        .iter()
-                        .find(|a| a.account_idx == fee_acct_idx)
-                        .is_some_and(|a| a.destination_address == *addr)
-                });
+            let fee_dest_idx = sweep_tx.destinations.iter().position(|(addr, _)| {
+                account_utxo_sets
+                    .iter()
+                    .find(|a| a.account_idx == fee_acct_idx)
+                    .is_some_and(|a| a.destination_address == *addr)
+            });
 
             for (i, (addr, amount)) in sweep_tx.destinations.iter().enumerate() {
                 if Some(i) == fee_dest_idx {
@@ -2303,21 +2318,17 @@ async fn main() {
         // Determine input indices per wallet by matching each PSBT input's
         // previous_output against known outpoints. BDK applies BIP-69
         // ordering in finish(), so we cannot assume insertion order.
-        let outpoint_to_wallet: std::collections::HashMap<bitcoin::OutPoint, usize> =
-            all_utxo_data
-                .iter()
-                .map(|(op, _, _, wi)| (*op, *wi))
-                .collect();
+        let outpoint_to_wallet: std::collections::HashMap<bitcoin::OutPoint, usize> = all_utxo_data
+            .iter()
+            .map(|(op, _, _, wi)| (*op, *wi))
+            .collect();
 
         let mut input_indices_by_wallet: std::collections::HashMap<usize, Vec<usize>> =
             std::collections::HashMap::new();
 
         for (i, input) in psbt.unsigned_tx.input.iter().enumerate() {
             if let Some(&wi) = outpoint_to_wallet.get(&input.previous_output) {
-                input_indices_by_wallet
-                    .entry(wi)
-                    .or_default()
-                    .push(i);
+                input_indices_by_wallet.entry(wi).or_default().push(i);
             }
         }
 
@@ -2373,8 +2384,11 @@ async fn main() {
                         .iter()
                         .find(|a| a.destination_address == *addr);
                     if let Some(a) = acct {
-                        output_summary
-                            .push(format!("account {}: {} sat", a.account_idx, amount.to_sat()));
+                        output_summary.push(format!(
+                            "account {}: {} sat",
+                            a.account_idx,
+                            amount.to_sat()
+                        ));
                     }
                 }
                 println!(
@@ -2421,24 +2435,18 @@ async fn main() {
                                 .expect("valid temp wallet");
                         // Reveal at least one address so the script index
                         // recognises index 0.
-                        let _ = temp_wallet
-                            .reveal_next_address(bdk_wallet::KeychainKind::External);
+                        let _ = temp_wallet.reveal_next_address(bdk_wallet::KeychainKind::External);
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_secs())
                             .unwrap_or(0);
-                        temp_wallet
-                            .apply_unconfirmed_txs(vec![(tx.clone(), now)]);
+                        temp_wallet.apply_unconfirmed_txs(vec![(tx.clone(), now)]);
                         if let Some(local) = temp_wallet.get_utxo(change_op) {
-                            let satisfaction_weight =
-                                bitcoin::Weight::from_witness_data_size(260);
+                            let satisfaction_weight = bitcoin::Weight::from_witness_data_size(260);
                             match temp_wallet.get_psbt_input(local, None, false) {
                                 Ok(psbt_input) => {
-                                    fee_change_data = Some((
-                                        change_op,
-                                        psbt_input,
-                                        satisfaction_weight,
-                                    ));
+                                    fee_change_data =
+                                        Some((change_op, psbt_input, satisfaction_weight));
                                 }
                                 Err(e) => {
                                     eprintln!(
@@ -2477,10 +2485,7 @@ async fn main() {
                             amount_sat: i64::try_from(amount.to_sat()).unwrap_or(i64::MAX),
                             fee_sat: 0, // fee attributed to fee account only
                             raw_tx_hex: &raw_hex,
-                            label: Some(&format!(
-                                "federation-migration-account-{}",
-                                a.account_idx
-                            )),
+                            label: Some(&format!("federation-migration-account-{}", a.account_idx)),
                         },
                     )
                     .await;

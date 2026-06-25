@@ -291,8 +291,7 @@ impl ElementsWalletManager {
         let lwk_net = self.lwk_network().await?;
 
         // Record the initial federation version if not already stored.
-        let versions =
-            db::list_federation_versions_for_elements_wallet(&self.pool, row.id).await?;
+        let versions = db::list_federation_versions_for_elements_wallet(&self.pool, row.id).await?;
         let version_count = versions.len();
         if version_count == 0 {
             let signer_count = i32::try_from(self.fed_signer_indices.len()).unwrap_or(0);
@@ -399,7 +398,11 @@ impl UserElementsWallet {
     }
 
     fn rpc_cfg(&self) -> (String, String, String) {
-        (self.rpc_url.clone(), self.rpc_user.clone(), self.rpc_pass.clone())
+        (
+            self.rpc_url.clone(),
+            self.rpc_user.clone(),
+            self.rpc_pass.clone(),
+        )
     }
 }
 
@@ -567,35 +570,37 @@ impl UserElementsWallet {
         let wid = self.wallet_key();
         let (url, user, pass) = self.rpc_cfg();
 
-        tokio::task::spawn_blocking(move || -> Result<ElementsAddressActivity, ElementsWalletError> {
-            let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
-            let tip = chain.tip_height().map_err(pipeline_err)?;
-            let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
+        tokio::task::spawn_blocking(
+            move || -> Result<ElementsAddressActivity, ElementsWalletError> {
+                let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
+                let tip = chain.tip_height().map_err(pipeline_err)?;
+                let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
 
-            let mut unspent = 0u64;
-            let mut receipts = Vec::new();
-            for u in utxos.iter().filter(|u| *u.script_pubkey() == target_spk) {
-                unspent += u.value();
-                let confs = tip.saturating_sub(u.height).saturating_add(1);
+                let mut unspent = 0u64;
+                let mut receipts = Vec::new();
+                for u in utxos.iter().filter(|u| *u.script_pubkey() == target_spk) {
+                    unspent += u.value();
+                    let confs = tip.saturating_sub(u.height).saturating_add(1);
+                    #[allow(clippy::cast_precision_loss)]
+                    let amount = u.value() as f64 / 100_000_000.0;
+                    receipts.push(ElementsAddressReceipt {
+                        txid: u.outpoint.txid.to_string(),
+                        vout: u.outpoint.vout,
+                        amount,
+                        confirmations: confs,
+                        is_spent: false,
+                    });
+                }
                 #[allow(clippy::cast_precision_loss)]
-                let amount = u.value() as f64 / 100_000_000.0;
-                receipts.push(ElementsAddressReceipt {
-                    txid: u.outpoint.txid.to_string(),
-                    vout: u.outpoint.vout,
-                    amount,
-                    confirmations: confs,
-                    is_spent: false,
-                });
-            }
-            #[allow(clippy::cast_precision_loss)]
-            let unspent_btc = unspent as f64 / 100_000_000.0;
-            Ok(ElementsAddressActivity {
-                tip_height: u64::from(tip),
-                total_received: unspent_btc,
-                unspent: unspent_btc,
-                receipts,
-            })
-        })
+                let unspent_btc = unspent as f64 / 100_000_000.0;
+                Ok(ElementsAddressActivity {
+                    tip_height: u64::from(tip),
+                    total_received: unspent_btc,
+                    unspent: unspent_btc,
+                    receipts,
+                })
+            },
+        )
         .await
         .expect("spawn_blocking join")
     }
@@ -633,12 +638,13 @@ impl UserElementsWallet {
                 if utxos.is_empty() {
                     return Err(ElementsWalletError::BuildPset("no spendable UTXOs".into()));
                 }
-                let recipient_addr = elements::Address::from_str(&recipient_owned).map_err(|e| {
-                    ElementsWalletError::BadAddress {
-                        addr: recipient_owned.clone(),
-                        reason: e.to_string(),
-                    }
-                })?;
+                let recipient_addr =
+                    elements::Address::from_str(&recipient_owned).map_err(|e| {
+                        ElementsWalletError::BadAddress {
+                            addr: recipient_owned.clone(),
+                            reason: e.to_string(),
+                        }
+                    })?;
 
                 let blinded =
                     build_spend_pset(&wollet, &utxos, &recipient_addr, amount_sat, fee_rate_kvb)
@@ -729,7 +735,10 @@ impl UserElementsWallet {
                 if utxos.is_empty() {
                     return Err(ElementsWalletError::BuildPset("no balance to sweep".into()));
                 }
-                let total: u64 = utxos.iter().map(asterism_elements::CapturedUtxo::value).sum();
+                let total: u64 = utxos
+                    .iter()
+                    .map(asterism_elements::CapturedUtxo::value)
+                    .sum();
                 let recipient_addr =
                     elements::Address::from_str(&recipient_owned).map_err(|e| {
                         ElementsWalletError::BadAddress {
@@ -738,9 +747,13 @@ impl UserElementsWallet {
                         }
                     })?;
 
-                let blinded =
-                    asterism_elements::build_sweep_pset(&wollet, &utxos, &recipient_addr, fee_rate_kvb)
-                        .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
+                let blinded = asterism_elements::build_sweep_pset(
+                    &wollet,
+                    &utxos,
+                    &recipient_addr,
+                    fee_rate_kvb,
+                )
+                .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
                 let mut pset = blinded.into_pset();
                 for signer in &signers {
                     signer

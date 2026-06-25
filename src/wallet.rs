@@ -1296,9 +1296,7 @@ impl UserWallet {
         for vw_mutex in &self.version_wallets {
             let vw = vw_mutex.lock().await;
             if vw.get_utxo(outpoint).is_some() {
-                let local = vw
-                    .get_utxo(outpoint)
-                    .expect("checked above");
+                let local = vw.get_utxo(outpoint).expect("checked above");
                 let psbt_input = vw
                     .get_psbt_input(local, None, false)
                     .map_err(|e| WalletError::BuildTx(e.to_string()))?;
@@ -1325,7 +1323,13 @@ impl UserWallet {
         psbt: &mut bitcoin::Psbt,
         input_indices: &[usize],
     ) -> Result<(), WalletError> {
-        let mut saved: Vec<(usize, std::collections::BTreeMap<bitcoin::secp256k1::PublicKey, (Fingerprint, DerivationPath)>)> = Vec::new();
+        let mut saved: Vec<(
+            usize,
+            std::collections::BTreeMap<
+                bitcoin::secp256k1::PublicKey,
+                (Fingerprint, DerivationPath),
+            >,
+        )> = Vec::new();
         for (i, inp) in psbt.inputs.iter_mut().enumerate() {
             if !input_indices.contains(&i) {
                 saved.push((i, std::mem::take(&mut inp.bip32_derivation)));
