@@ -31,11 +31,11 @@
 //! `apply_unconfirmed_txs` + `get_psbt_input`), so this gate covers the precise
 //! lines reworked in Phase B (`federation_migration.rs:2322-2377`).
 
-use bdk_wallet::bitcoin::{
-    self, absolute::LockTime, bip32::Xpriv, transaction::Version, Address, Amount, FeeRate,
-    Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Weight, Witness,
-};
 use bdk_wallet::bitcoin::hashes::Hash;
+use bdk_wallet::bitcoin::{
+    self, Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+    TxOut, Txid, Weight, Witness, absolute::LockTime, bip32::Xpriv, transaction::Version,
+};
 use bdk_wallet::miniscript::psbt::PsbtExt;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet};
 
@@ -229,7 +229,10 @@ fn outpoint_at(tx: &Transaction, addr: &Address) -> OutPoint {
         .iter()
         .position(|o| o.script_pubkey == spk)
         .expect("expected output present");
-    OutPoint::new(tx.compute_txid(), u32::try_from(vout).expect("vout fits u32"))
+    OutPoint::new(
+        tx.compute_txid(),
+        u32::try_from(vout).expect("vout fits u32"),
+    )
 }
 
 /// The number of outputs paying `addr`.
@@ -241,8 +244,16 @@ fn count_at(tx: &Transaction, addr: &Address) -> usize {
 /// The value of the output paying `addr`, asserting exactly one such output.
 fn value_at(tx: &Transaction, addr: &Address) -> u64 {
     let spk = addr.script_pubkey();
-    let matches: Vec<&TxOut> = tx.output.iter().filter(|o| o.script_pubkey == spk).collect();
-    assert_eq!(matches.len(), 1, "exactly one output at the expected address");
+    let matches: Vec<&TxOut> = tx
+        .output
+        .iter()
+        .filter(|o| o.script_pubkey == spk)
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "exactly one output at the expected address"
+    );
     matches[0].value.to_sat()
 }
 
@@ -327,7 +338,11 @@ fn bitcoin_batched_migration_chains_fee_change_old_fed_offline() {
     // crosses to the new federation. ----------------------------------------
     let tx2 = run_tx(&fee_old, &[chained1], &[], &fee_new_addr, &[&fee_old]);
     // Fee-only drain: exactly one recipient output (no customer outputs).
-    assert_eq!(tx2.output.len(), 1, "final fee-only tx: single drain output");
+    assert_eq!(
+        tx2.output.len(),
+        1,
+        "final fee-only tx: single drain output"
+    );
     let fee2 = fee_of(&tx2, change1_value);
     let final_value = value_at(&tx2, &fee_new_addr);
     assert_eq!(

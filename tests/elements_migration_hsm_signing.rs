@@ -44,12 +44,12 @@ use asterism_elements::descriptor::{CtDescriptorBuilder, CtKeyMode};
 use asterism_elements::signer::ElementsSigner;
 use asterism_elements::sync::{CapturedUtxo, KeychainKind, WalletId};
 use asterism_elements::{
-    build_migration_pset, captured_from_output, finalize_p2wsh_pset, ElementsNetwork,
-    ElementsWalletHandle, ElementsWollet,
+    ElementsNetwork, ElementsWalletHandle, ElementsWollet, build_migration_pset,
+    captured_from_output, finalize_p2wsh_pset,
 };
-use asterism_pkcs11::{key_ops, Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier};
-use bitcoin::bip32::DerivationPath;
+use asterism_pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
 use bitcoin::Network;
+use bitcoin::bip32::DerivationPath;
 use elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
 use elements::{AssetId, OutPoint, Script, TxOut, TxOutSecrets, TxOutWitness};
 
@@ -284,7 +284,9 @@ fn elements_a2a_hsm_signing_offline() {
         eprintln!("skipping elements_a2a_hsm_signing_offline: dev HSM unavailable");
         return;
     };
-    let _serial = hsm_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = hsm_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let key_tag = format!("{:x}", std::process::id());
 
     let fee = hsm_account(&env, &key_tag, 700_001, 0xa0);
@@ -324,8 +326,16 @@ fn elements_a2a_hsm_signing_offline() {
     let tx = pset.extract_tx().unwrap();
 
     assert_finalized_witnesses(&tx, 3);
-    assert_eq!(val_at(&tx, &c1.wollet, &c1_dest), LBTC_SAT, "customer 1 exact");
-    assert_eq!(val_at(&tx, &c2.wollet, &c2_dest), LBTC_SAT, "customer 2 exact");
+    assert_eq!(
+        val_at(&tx, &c1.wollet, &c1_dest),
+        LBTC_SAT,
+        "customer 1 exact"
+    );
+    assert_eq!(
+        val_at(&tx, &c2.wollet, &c2_dest),
+        LBTC_SAT,
+        "customer 2 exact"
+    );
     let fee_change = val_at(&tx, &fee.wollet, &fee_dest);
     let fee_paid = fee_of(&tx);
     assert!(fee_paid > 0, "fee account paid a non-zero fee");
@@ -354,7 +364,9 @@ fn elements_batched_hsm_signing_offline() {
         eprintln!("skipping elements_batched_hsm_signing_offline: dev HSM unavailable");
         return;
     };
-    let _serial = hsm_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = hsm_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let key_tag = format!("{:x}b", std::process::id());
 
     let fee = hsm_account(&env, &key_tag, 800_001, 0xc0);
@@ -397,10 +409,18 @@ fn elements_batched_hsm_signing_offline() {
     };
 
     // --- tx0: large customer + fee seed → change back to fee OLD. ---
-    let inputs = vec![(cl_utxo.clone(), &cl.wollet), (fee_utxo.clone(), &fee.wollet)];
-    let blinded =
-        build_migration_pset(&fee.wollet, &inputs, &[(cl_dest.clone(), LARGE)], &fee_old, 2000.0)
-            .unwrap();
+    let inputs = vec![
+        (cl_utxo.clone(), &cl.wollet),
+        (fee_utxo.clone(), &fee.wollet),
+    ];
+    let blinded = build_migration_pset(
+        &fee.wollet,
+        &inputs,
+        &[(cl_dest.clone(), LARGE)],
+        &fee_old,
+        2000.0,
+    )
+    .unwrap();
     let mut pset = blinded.into_pset();
     sign_account(&mut pset, std::slice::from_ref(&cl_utxo), &cl.signers);
     sign_account(&mut pset, std::slice::from_ref(&fee_utxo), &fee.signers);
@@ -456,8 +476,7 @@ fn elements_batched_hsm_signing_offline() {
 
     // --- tx2: fee account migrates last → drain to fee NEW dest. ---
     let inputs = vec![(chained1.clone(), &fee.wollet)];
-    let blinded =
-        build_migration_pset(&fee.wollet, &inputs, &[], &fee_new, 2000.0).unwrap();
+    let blinded = build_migration_pset(&fee.wollet, &inputs, &[], &fee_new, 2000.0).unwrap();
     let mut pset = blinded.into_pset();
     sign_account(&mut pset, std::slice::from_ref(&chained1), &fee.signers);
     finalize_p2wsh_pset(&mut pset).unwrap();

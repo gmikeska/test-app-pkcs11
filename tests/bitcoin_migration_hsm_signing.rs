@@ -36,21 +36,21 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use asterism_core::descriptor::{to_multipath_string, KeyMode};
+use asterism_core::descriptor::{KeyMode, to_multipath_string};
 use asterism_core::federation::Federation;
 use asterism_core::network::NetworkType;
 use bdk_wallet::bitcoin::bip32::DerivationPath as BtcDerivationPath;
 use bdk_wallet::bitcoin::hashes::Hash;
 use bdk_wallet::bitcoin::{
-    self, absolute::LockTime, transaction::Version, Address, Amount, FeeRate, Network, OutPoint,
-    ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Weight, Witness,
+    self, Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+    TxOut, Txid, Weight, Witness, absolute::LockTime, transaction::Version,
 };
 use bdk_wallet::miniscript::psbt::PsbtExt;
 use bdk_wallet::signer::SignerOrdering;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet};
 
 use asterism_dev_signer::DevBackend;
-use asterism_pkcs11::{key_ops, Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier};
+use asterism_pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
 use test_app_pkcs11::wallet::NetworkPatchedSigner;
 
 const NETWORK: Network = Network::Regtest;
@@ -146,7 +146,10 @@ impl HsmFed {
         let desc_str = to_multipath_string(fed.try_descriptor().expect("descriptor"));
         let descriptor = desc_str.parse().expect("valid multipath descriptor");
 
-        Self { descriptor, signers }
+        Self {
+            descriptor,
+            signers,
+        }
     }
 
     /// A throwaway public wallet (derive / enrich). Stateless and cheap.
@@ -162,14 +165,20 @@ impl HsmFed {
         let mut w = self.wallet();
         for s in &self.signers {
             let arc: Arc<Pkcs11Signer> = Arc::new(s.clone());
-            w.add_signer(KeychainKind::External, SignerOrdering::default(), arc.clone());
+            w.add_signer(
+                KeychainKind::External,
+                SignerOrdering::default(),
+                arc.clone(),
+            );
             w.add_signer(KeychainKind::Internal, SignerOrdering::default(), arc);
         }
         w
     }
 
     fn address(&self, index: u32) -> Address {
-        self.wallet().peek_address(KeychainKind::External, index).address
+        self.wallet()
+            .peek_address(KeychainKind::External, index)
+            .address
     }
 
     /// Index-scoped signing: clear `bip32_derivation` on inputs this federation
@@ -232,8 +241,12 @@ fn enrich(fed: &HsmFed, tx: &Transaction, op: OutPoint) -> Funded {
     let mut tw = fed.wallet();
     let _ = tw.reveal_next_address(KeychainKind::External);
     tw.apply_unconfirmed_txs(vec![(tx.clone(), 0)]);
-    let local = tw.get_utxo(op).expect("utxo present in temp wallet after insert");
-    let input = tw.get_psbt_input(local, None, false).expect("build psbt input");
+    let local = tw
+        .get_utxo(op)
+        .expect("utxo present in temp wallet after insert");
+    let input = tw
+        .get_psbt_input(local, None, false)
+        .expect("build psbt input");
     Funded {
         op,
         input,
@@ -296,7 +309,10 @@ fn outpoint_at(tx: &Transaction, addr: &Address) -> OutPoint {
         .iter()
         .position(|o| o.script_pubkey == spk)
         .expect("expected output present");
-    OutPoint::new(tx.compute_txid(), u32::try_from(vout).expect("vout fits u32"))
+    OutPoint::new(
+        tx.compute_txid(),
+        u32::try_from(vout).expect("vout fits u32"),
+    )
 }
 
 fn count_at(tx: &Transaction, addr: &Address) -> usize {
@@ -306,8 +322,16 @@ fn count_at(tx: &Transaction, addr: &Address) -> usize {
 
 fn value_at(tx: &Transaction, addr: &Address) -> u64 {
     let spk = addr.script_pubkey();
-    let matches: Vec<&TxOut> = tx.output.iter().filter(|o| o.script_pubkey == spk).collect();
-    assert_eq!(matches.len(), 1, "exactly one output at the expected address");
+    let matches: Vec<&TxOut> = tx
+        .output
+        .iter()
+        .filter(|o| o.script_pubkey == spk)
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "exactly one output at the expected address"
+    );
     matches[0].value.to_sat()
 }
 
@@ -318,7 +342,9 @@ fn bitcoin_batched_migration_chains_fee_change_old_fed_hsm() {
     const C2_BAL: u64 = 300_000;
 
     let Some(env) = dev_env() else {
-        eprintln!("skipping bitcoin_batched_migration_chains_fee_change_old_fed_hsm: dev HSM unavailable");
+        eprintln!(
+            "skipping bitcoin_batched_migration_chains_fee_change_old_fed_hsm: dev HSM unavailable"
+        );
         return;
     };
     let key_tag = format!("{:x}", std::process::id());
@@ -401,7 +427,11 @@ fn bitcoin_batched_migration_chains_fee_change_old_fed_hsm() {
         &fee_new_addr,
         &[(&fee_old, vec![chained1_op])],
     );
-    assert_eq!(tx2.output.len(), 1, "final fee-only tx: single drain output");
+    assert_eq!(
+        tx2.output.len(),
+        1,
+        "final fee-only tx: single drain output"
+    );
     let fee2 = fee_of(&tx2, change1_value);
     let final_value = value_at(&tx2, &fee_new_addr);
     assert_eq!(

@@ -48,12 +48,12 @@
 
 use bdk_wallet::bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
 use bdk_wallet::bitcoin::{
-    bip32::Xpriv, Address, Amount, FeeRate, Network, OutPoint, Transaction, TxOut, Weight,
+    Address, Amount, FeeRate, Network, OutPoint, Transaction, TxOut, Weight, bip32::Xpriv,
 };
 use bdk_wallet::miniscript::psbt::PsbtExt;
-use bdk_wallet::{bitcoin, KeychainKind, SignOptions, Wallet};
+use bdk_wallet::{KeychainKind, SignOptions, Wallet, bitcoin};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const NETWORK: Network = Network::Regtest;
 
@@ -202,7 +202,10 @@ fn outpoint_at(tx: &Transaction, addr: &Address) -> OutPoint {
         .iter()
         .position(|o| o.script_pubkey == spk)
         .expect("expected output present");
-    OutPoint::new(tx.compute_txid(), u32::try_from(vout).expect("vout fits u32"))
+    OutPoint::new(
+        tx.compute_txid(),
+        u32::try_from(vout).expect("vout fits u32"),
+    )
 }
 
 fn count_at(tx: &Transaction, addr: &Address) -> usize {
@@ -212,8 +215,16 @@ fn count_at(tx: &Transaction, addr: &Address) -> usize {
 
 fn value_at(tx: &Transaction, addr: &Address) -> u64 {
     let spk = addr.script_pubkey();
-    let matches: Vec<&TxOut> = tx.output.iter().filter(|o| o.script_pubkey == spk).collect();
-    assert_eq!(matches.len(), 1, "exactly one output at the expected address");
+    let matches: Vec<&TxOut> = tx
+        .output
+        .iter()
+        .filter(|o| o.script_pubkey == spk)
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "exactly one output at the expected address"
+    );
     matches[0].value.to_sat()
 }
 
@@ -293,7 +304,10 @@ fn fund_onchain(wallet_rpc: &Client, fed: &SoftFed, index: u32, btc: f64) -> Fun
         .iter()
         .position(|o| o.script_pubkey == spk)
         .expect("funding output paying our address");
-    let op = OutPoint::new(funding.compute_txid(), u32::try_from(vout).expect("vout fits u32"));
+    let op = OutPoint::new(
+        funding.compute_txid(),
+        u32::try_from(vout).expect("vout fits u32"),
+    );
     enrich(fed, &funding, op)
 }
 
@@ -346,13 +360,17 @@ fn bitcoin_batched_migration_e2e() {
     let wallet_rpc = client(&env, "/wallet/default");
 
     // Sanity: the node is reachable and on regtest.
-    let info: Value = node.call("getblockchaininfo", &[]).expect("getblockchaininfo");
+    let info: Value = node
+        .call("getblockchaininfo", &[])
+        .expect("getblockchaininfo");
     assert_eq!(
         info["chain"].as_str(),
         Some("regtest"),
         "this e2e only runs against a regtest node"
     );
-    let mine_addr: String = wallet_rpc.call("getnewaddress", &[]).expect("getnewaddress");
+    let mine_addr: String = wallet_rpc
+        .call("getnewaddress", &[])
+        .expect("getnewaddress");
 
     // Fee account: an OLD federation (holds funds, signs every hop) and a NEW
     // federation (only the final destination). Each customer has an OLD fed
@@ -414,7 +432,11 @@ fn bitcoin_batched_migration_e2e() {
         &fee_old_addr,
         &[&c2_old, &fee_old],
     );
-    broadcast(&node, &tx1, "tx1 (spends unconfirmed chained change from tx0)");
+    broadcast(
+        &node,
+        &tx1,
+        "tx1 (spends unconfirmed chained change from tx0)",
+    );
     assert_eq!(value_at(&tx1, &c2_dest), C2_BAL, "C2 exact");
     let fee1 = fee_of(&tx1, C2_BAL + change0_value);
     let change1_value = value_at(&tx1, &fee_old_addr);
@@ -435,8 +457,16 @@ fn bitcoin_batched_migration_e2e() {
     // OLD-fed-locked, so the OLD federation signs it; only the OUTPUT crosses to
     // the new federation. ----------------------------------------------------
     let tx2 = build_tx(&fee_old, &[chained1], &[], &fee_new_addr, &[&fee_old]);
-    broadcast(&node, &tx2, "tx2 (final, spends unconfirmed chained change from tx1)");
-    assert_eq!(tx2.output.len(), 1, "final fee-only tx: single drain output");
+    broadcast(
+        &node,
+        &tx2,
+        "tx2 (final, spends unconfirmed chained change from tx1)",
+    );
+    assert_eq!(
+        tx2.output.len(),
+        1,
+        "final fee-only tx: single drain output"
+    );
     let fee2 = fee_of(&tx2, change1_value);
     let final_value = value_at(&tx2, &fee_new_addr);
     assert_eq!(

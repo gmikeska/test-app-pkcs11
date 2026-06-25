@@ -548,7 +548,14 @@ impl UserElementsWallet {
                 let utxos = store.list_for_wallet(wid).map_err(pipeline_err)?;
                 let (received, unspent) = balances_by_spk(&utxos);
                 derive_with_balances(
-                    &descriptor, mbk, net, lwk, count, chain_kind, &received, &unspent,
+                    &descriptor,
+                    mbk,
+                    net,
+                    lwk,
+                    count,
+                    chain_kind,
+                    &received,
+                    &unspent,
                 )
             },
         )
@@ -974,7 +981,10 @@ fn parse_mbk_hex(s: &str) -> Option<[u8; 32]> {
 /// `total_received` includes spent UTXOs (historical), `unspent` excludes them.
 fn balances_by_spk(
     utxos: &[asterism_elements::CapturedUtxo],
-) -> (HashMap<elements::Script, u64>, HashMap<elements::Script, u64>) {
+) -> (
+    HashMap<elements::Script, u64>,
+    HashMap<elements::Script, u64>,
+) {
     let mut received: HashMap<elements::Script, u64> = HashMap::new();
     let mut unspent: HashMap<elements::Script, u64> = HashMap::new();
     for u in utxos {

@@ -26,15 +26,15 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use asterism_core::signer::Signer;
-use asterism_elements::descriptor::{to_multipath_string, CtDescriptorBuilder, CtKeyMode};
+use asterism_elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
 use asterism_elements::signer::ElementsSigner;
 use asterism_elements::sync::{
     BlockScanEngine, CapturedUtxo, ElementsChainSource, KeychainKind, WalletId, WalletUtxoStore,
 };
 use asterism_elements::testkit::SoftwareSigner;
 use asterism_elements::{
-    build_migration_pset, captured_from_output, finalize_p2wsh_pset, ElementsNetwork,
-    ElementsWollet, ElementsWalletHandle, LwkNetwork,
+    ElementsNetwork, ElementsWalletHandle, ElementsWollet, LwkNetwork, build_migration_pset,
+    captured_from_output, finalize_p2wsh_pset,
 };
 
 use test_app_pkcs11::elements_sync::{PgBlockStore, PgWalletUtxoStore, RpcChainSource};
@@ -85,7 +85,13 @@ struct TestWallet {
     mbk: [u8; 32],
 }
 
-fn make_wallet(tag: Uuid, signer_salt: u8, blinding_salt: u8, net: ElementsNetwork, lwk: LwkNetwork) -> TestWallet {
+fn make_wallet(
+    tag: Uuid,
+    signer_salt: u8,
+    blinding_salt: u8,
+    net: ElementsNetwork,
+    lwk: LwkNetwork,
+) -> TestWallet {
     let signers: Vec<SoftwareSigner> = (0u8..3)
         .map(|i| {
             let mut sb = [0u8; 32];
@@ -98,7 +104,9 @@ fn make_wallet(tag: Uuid, signer_salt: u8, blinding_salt: u8, net: ElementsNetwo
     let mut blinding = [0u8; 32];
     blinding[..16].copy_from_slice(tag.as_bytes());
     blinding[16] = blinding_salt;
-    let mut builder = CtDescriptorBuilder::new(2, &blinding).unwrap().key_mode(CtKeyMode::Ranged);
+    let mut builder = CtDescriptorBuilder::new(2, &blinding)
+        .unwrap()
+        .key_mode(CtKeyMode::Ranged);
     for s in &signers {
         builder.add_signer(s as &dyn Signer).unwrap();
     }
@@ -106,7 +114,12 @@ fn make_wallet(tag: Uuid, signer_salt: u8, blinding_salt: u8, net: ElementsNetwo
     let descriptor = to_multipath_string(&ct);
     let handle = ElementsWalletHandle::new(ct, blinding);
     let wollet = ElementsWollet::from_handle_with_lwk(&handle, net, lwk).unwrap();
-    TestWallet { wollet, signers, descriptor, mbk: blinding }
+    TestWallet {
+        wollet,
+        signers,
+        descriptor,
+        mbk: blinding,
+    }
 }
 
 /// Seed a user + `elements_wallets` row (FK target for captured UTXOs).
@@ -151,7 +164,8 @@ async fn elements_migration_fee_account_pays_e2e() {
     let sidechain: serde_json::Value = base.call("getsidechaininfo", &[]).unwrap();
     let policy = elements::AssetId::from_str(sidechain["pegged_asset"].as_str().unwrap()).unwrap();
     let net = ElementsNetwork::ElementsRegtest;
-    let lwk = ElementsNetwork::custom_regtest(policy, elements::BlockHash::from_str(&genesis).unwrap());
+    let lwk =
+        ElementsNetwork::custom_regtest(policy, elements::BlockHash::from_str(&genesis).unwrap());
 
     let pool = PgPool::connect(&env.database_url).await.unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
@@ -168,8 +182,9 @@ async fn elements_migration_fee_account_pays_e2e() {
     let c2_new = make_wallet(tag, 0x22, 0xb2, net, lwk);
 
     // Unique-per-run account indices derived from the tag.
-    let base_acct =
-        (u32::from_le_bytes(tag.as_bytes()[..4].try_into().unwrap()) % 1_000_000) as i32 + 3_000_000;
+    let base_acct = (u32::from_le_bytes(tag.as_bytes()[..4].try_into().unwrap()) % 1_000_000)
+        as i32
+        + 3_000_000;
     let fee_uuid = seed_row(&pool, &fee.descriptor, &fee.mbk, tag, base_acct).await;
     let c1_uuid = seed_row(&pool, &c1.descriptor, &c1.mbk, tag, base_acct + 1).await;
     let c2_uuid = seed_row(&pool, &c2.descriptor, &c2.mbk, tag, base_acct + 2).await;
@@ -182,14 +197,22 @@ async fn elements_migration_fee_account_pays_e2e() {
     let mine: String = node.call("getnewaddress", &[]).unwrap();
     for w in [&fee, &c1, &c2] {
         let addr = w.wollet.address(KeychainKind::External, 0).unwrap();
-        let _t: String = node.call("sendtoaddress", &[json!(addr.to_string()), json!(1.0)]).unwrap();
+        let _t: String = node
+            .call("sendtoaddress", &[json!(addr.to_string()), json!(1.0)])
+            .unwrap();
     }
-    let _: Vec<String> = node.call("generatetoaddress", &[json!(2), json!(mine.clone())]).unwrap();
+    let _: Vec<String> = node
+        .call("generatetoaddress", &[json!(2), json!(mine.clone())])
+        .unwrap();
 
     // --- capture all three via one scan pass ---
     let blocks = PgBlockStore::new(pool.clone());
     let utxos_store = PgWalletUtxoStore::new(pool.clone());
-    let rpc = (env.rpc_url.clone(), env.rpc_user.clone(), env.rpc_pass.clone());
+    let rpc = (
+        env.rpc_url.clone(),
+        env.rpc_user.clone(),
+        env.rpc_pass.clone(),
+    );
 
     // Move data into the blocking section: old + new descriptors/mbk + signers.
     let fee_desc = fee.descriptor.clone();
@@ -274,7 +297,10 @@ async fn elements_migration_fee_account_pays_e2e() {
                 .iter()
                 .enumerate()
                 .filter(|(_, i)| {
-                    owned.contains(&elements::OutPoint::new(i.previous_txid, i.previous_output_index))
+                    owned.contains(&elements::OutPoint::new(
+                        i.previous_txid,
+                        i.previous_output_index,
+                    ))
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -336,69 +362,116 @@ async fn elements_migration_fee_account_pays_e2e() {
     // --- confirm + re-capture: the new federation's funds must now be captured
     //     under each customer's *same* wallet id (what the UI v1 tab reads),
     //     and the old deposit must be spent. This is the multi-version path. ---
-    let _: Vec<String> = node.call("generatetoaddress", &[json!(2), json!(mine)]).unwrap();
+    let _: Vec<String> = node
+        .call("generatetoaddress", &[json!(2), json!(mine)])
+        .unwrap();
     let blocks2 = PgBlockStore::new(pool.clone());
     let utxos2 = PgWalletUtxoStore::new(pool.clone());
-    let rpc2 = (env.rpc_url.clone(), env.rpc_user.clone(), env.rpc_pass.clone());
+    let rpc2 = (
+        env.rpc_url.clone(),
+        env.rpc_user.clone(),
+        env.rpc_pass.clone(),
+    );
     let recap = vec![
-        (c1_id, c1.descriptor.clone(), c1.mbk, c1_new.descriptor.clone(), c1_new.mbk),
-        (c2_id, c2.descriptor.clone(), c2.mbk, c2_new.descriptor.clone(), c2_new.mbk),
+        (
+            c1_id,
+            c1.descriptor.clone(),
+            c1.mbk,
+            c1_new.descriptor.clone(),
+            c1_new.mbk,
+        ),
+        (
+            c2_id,
+            c2.descriptor.clone(),
+            c2.mbk,
+            c2_new.descriptor.clone(),
+            c2_new.mbk,
+        ),
     ];
     // Returns per customer: (new_unspent, old_received, old_unspent).
-    let recaptured = tokio::task::spawn_blocking(move || -> Result<Vec<(u64, u64, u64)>, String> {
-        let chain = RpcChainSource::new(&rpc2.0, &rpc2.1, &rpc2.2).map_err(de)?;
-        // Build old + new wollets per customer and register both under the
-        // customer's single wallet id (exactly as the ingestion service does).
-        let mut built = Vec::new();
-        for (id, old_d, old_m, new_d, new_m) in &recap {
-            let w_old = ElementsWollet::from_descriptor_str(old_d, *old_m, net, lwk).map_err(de)?;
-            let w_new = ElementsWollet::from_descriptor_str(new_d, *new_m, net, lwk).map_err(de)?;
-            built.push((*id, w_old, w_new));
-        }
-        let mut engine = BlockScanEngine::new();
-        for (id, w_old, w_new) in &built {
-            engine.register_wallet(*id, w_old, 20).map_err(de)?;
-            engine.register_wallet(*id, w_new, 20).map_err(de)?;
-        }
-        engine.sync(&chain, &blocks2, &utxos2).map_err(de)?;
+    let recaptured =
+        tokio::task::spawn_blocking(move || -> Result<Vec<(u64, u64, u64)>, String> {
+            let chain = RpcChainSource::new(&rpc2.0, &rpc2.1, &rpc2.2).map_err(de)?;
+            // Build old + new wollets per customer and register both under the
+            // customer's single wallet id (exactly as the ingestion service does).
+            let mut built = Vec::new();
+            for (id, old_d, old_m, new_d, new_m) in &recap {
+                let w_old =
+                    ElementsWollet::from_descriptor_str(old_d, *old_m, net, lwk).map_err(de)?;
+                let w_new =
+                    ElementsWollet::from_descriptor_str(new_d, *new_m, net, lwk).map_err(de)?;
+                built.push((*id, w_old, w_new));
+            }
+            let mut engine = BlockScanEngine::new();
+            for (id, w_old, w_new) in &built {
+                engine.register_wallet(*id, w_old, 20).map_err(de)?;
+                engine.register_wallet(*id, w_new, 20).map_err(de)?;
+            }
+            engine.sync(&chain, &blocks2, &utxos2).map_err(de)?;
 
-        let mut out = Vec::new();
-        for (id, w_old, w_new) in &built {
-            // All captured (incl. spent) — what the UI "total received" reads.
-            let all = utxos2.list_for_wallet(*id).map_err(de)?;
-            let old_spk = w_old.address(KeychainKind::External, 0).map_err(de)?.script_pubkey();
-            let new_spk = w_new.address(KeychainKind::External, 0).map_err(de)?.script_pubkey();
-            let sum = |spk: &elements::Script, spent: bool| -> u64 {
-                all.iter()
-                    .filter(|x| *x.script_pubkey() == *spk && x.is_spent == spent)
-                    .map(CapturedUtxo::value)
-                    .sum()
-            };
-            let new_unspent = sum(&new_spk, false);
-            let old_received = sum(&old_spk, true) + sum(&old_spk, false);
-            let old_unspent = sum(&old_spk, false);
-            out.push((new_unspent, old_received, old_unspent));
-        }
-        Ok(out)
-    })
-    .await
-    .unwrap()
-    .expect("recapture");
+            let mut out = Vec::new();
+            for (id, w_old, w_new) in &built {
+                // All captured (incl. spent) — what the UI "total received" reads.
+                let all = utxos2.list_for_wallet(*id).map_err(de)?;
+                let old_spk = w_old
+                    .address(KeychainKind::External, 0)
+                    .map_err(de)?
+                    .script_pubkey();
+                let new_spk = w_new
+                    .address(KeychainKind::External, 0)
+                    .map_err(de)?
+                    .script_pubkey();
+                let sum = |spk: &elements::Script, spent: bool| -> u64 {
+                    all.iter()
+                        .filter(|x| *x.script_pubkey() == *spk && x.is_spent == spent)
+                        .map(CapturedUtxo::value)
+                        .sum()
+                };
+                let new_unspent = sum(&new_spk, false);
+                let old_received = sum(&old_spk, true) + sum(&old_spk, false);
+                let old_unspent = sum(&old_spk, false);
+                out.push((new_unspent, old_received, old_unspent));
+            }
+            Ok(out)
+        })
+        .await
+        .unwrap()
+        .expect("recapture");
 
     for (i, (new_unspent, old_received, old_unspent)) in recaptured.iter().enumerate() {
-        assert_eq!(*new_unspent, LBTC_SAT, "customer {i}: full balance captured at the NEW federation");
+        assert_eq!(
+            *new_unspent, LBTC_SAT,
+            "customer {i}: full balance captured at the NEW federation"
+        );
         // The old address keeps its historical "received" even though it's spent.
-        assert_eq!(*old_received, LBTC_SAT, "customer {i}: old address still shows 1.0 received (history)");
-        assert_eq!(*old_unspent, 0, "customer {i}: old address now has 0 unspent (migrated away)");
+        assert_eq!(
+            *old_received, LBTC_SAT,
+            "customer {i}: old address still shows 1.0 received (history)"
+        );
+        assert_eq!(
+            *old_unspent, 0,
+            "customer {i}: old address now has 0 unspent (migrated away)"
+        );
     }
 
     // cleanup
     for id in [fee_uuid, c1_uuid, c2_uuid] {
-        sqlx::query("DELETE FROM users WHERE id = (SELECT user_id FROM elements_wallets WHERE id=$1)")
-            .bind(id).execute(&pool).await.ok();
+        sqlx::query(
+            "DELETE FROM users WHERE id = (SELECT user_id FROM elements_wallets WHERE id=$1)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .ok();
     }
-    sqlx::query("DELETE FROM elements_blocks").execute(&pool).await.unwrap();
-    sqlx::query("DELETE FROM elements_sync_cursor").execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM elements_blocks")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM elements_sync_cursor")
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 /// P4 — batched migration with **chained confidential fee-change** (decision
@@ -449,8 +522,9 @@ async fn elements_batched_migration_e2e() {
     let cs1_new = make_wallet(tag, 0x42, 0xd2, net, lwk);
     let cs2_new = make_wallet(tag, 0x43, 0xd3, net, lwk);
 
-    let base_acct =
-        (u32::from_le_bytes(tag.as_bytes()[..4].try_into().unwrap()) % 1_000_000) as i32 + 4_000_000;
+    let base_acct = (u32::from_le_bytes(tag.as_bytes()[..4].try_into().unwrap()) % 1_000_000)
+        as i32
+        + 4_000_000;
     let fee_uuid = seed_row(&pool, &fee.descriptor, &fee.mbk, tag, base_acct).await;
     let cl_uuid = seed_row(&pool, &cl.descriptor, &cl.mbk, tag, base_acct + 1).await;
     let cs1_uuid = seed_row(&pool, &cs1.descriptor, &cs1.mbk, tag, base_acct + 2).await;
@@ -475,7 +549,11 @@ async fn elements_batched_migration_e2e() {
 
     let blocks = PgBlockStore::new(pool.clone());
     let utxos_store = PgWalletUtxoStore::new(pool.clone());
-    let rpc = (env.rpc_url.clone(), env.rpc_user.clone(), env.rpc_pass.clone());
+    let rpc = (
+        env.rpc_url.clone(),
+        env.rpc_user.clone(),
+        env.rpc_pass.clone(),
+    );
 
     let (fee_desc, cl_desc, cs1_desc, cs2_desc) = (
         fee.descriptor.clone(),
@@ -499,8 +577,8 @@ async fn elements_batched_migration_e2e() {
 
     // Returns (large_at_new, small1_at_new, small2_at_new, fee_at_new, fee_bal,
     // broadcasts).
-    let outcome =
-        tokio::task::spawn_blocking(move || -> Result<(u64, u64, u64, u64, u64, usize), String> {
+    let outcome = tokio::task::spawn_blocking(
+        move || -> Result<(u64, u64, u64, u64, u64, usize), String> {
             let chain = RpcChainSource::new(&rpc.0, &rpc.1, &rpc.2).map_err(de)?;
             let load = |d: &str, m: [u8; 32]| ElementsWollet::from_descriptor_str(d, m, net, lwk);
 
@@ -572,15 +650,16 @@ async fn elements_batched_migration_e2e() {
                 }
             };
 
-            let val_at = |tx: &elements::Transaction, w: &ElementsWollet, addr: &elements::Address| -> u64 {
-                let spk = addr.script_pubkey();
-                let o = tx
-                    .output
-                    .iter()
-                    .find(|o| o.script_pubkey == spk)
-                    .expect("destination output present");
-                w.unblind(o).unwrap().value
-            };
+            let val_at =
+                |tx: &elements::Transaction, w: &ElementsWollet, addr: &elements::Address| -> u64 {
+                    let spk = addr.script_pubkey();
+                    let o = tx
+                        .output
+                        .iter()
+                        .find(|o| o.script_pubkey == spk)
+                        .expect("destination output present");
+                    w.unblind(o).unwrap().value
+                };
             // Capture the fee account's change (at its old-fed addr) as the
             // chained input for the next tx.
             let cap_chain = |tx: &elements::Transaction| -> Result<CapturedUtxo, String> {
@@ -603,9 +682,14 @@ async fn elements_batched_migration_e2e() {
                 inputs.push((u.clone(), &w_cl));
             }
             inputs.push((fee_utxos[0].clone(), &w_fee));
-            let blinded =
-                build_migration_pset(&w_fee, &inputs, &[(cl_dest.clone(), LARGE)], &fee_old_addr, 2000.0)
-                    .map_err(de)?;
+            let blinded = build_migration_pset(
+                &w_fee,
+                &inputs,
+                &[(cl_dest.clone(), LARGE)],
+                &fee_old_addr,
+                2000.0,
+            )
+            .map_err(de)?;
             let mut pset = blinded.into_pset();
             sign_account(&mut pset, &cl_utxos, &cl_sgn);
             sign_account(&mut pset, std::slice::from_ref(&fee_utxos[0]), &fee_sgn);
@@ -665,17 +749,27 @@ async fn elements_batched_migration_e2e() {
                 fee_bal,
                 broadcasts,
             ))
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
 
     let (large_at_new, small1_at_new, small2_at_new, fee_at_new, fee_bal, broadcasts) =
         outcome.expect("batched migration");
 
     assert_eq!(broadcasts, 3, "one large tx + one small bundle + fee-final");
-    assert_eq!(large_at_new, LARGE, "large customer migrated its full balance");
-    assert_eq!(small1_at_new, SMALL1, "small customer 1 migrated its full balance");
-    assert_eq!(small2_at_new, SMALL2, "small customer 2 migrated its full balance");
+    assert_eq!(
+        large_at_new, LARGE,
+        "large customer migrated its full balance"
+    );
+    assert_eq!(
+        small1_at_new, SMALL1,
+        "small customer 1 migrated its full balance"
+    );
+    assert_eq!(
+        small2_at_new, SMALL2,
+        "small customer 2 migrated its full balance"
+    );
     let fee_paid = fee_bal - fee_at_new;
     assert!(fee_paid > 0, "fee account paid a non-zero cumulative fee");
     assert_eq!(
@@ -687,14 +781,22 @@ async fn elements_batched_migration_e2e() {
     // cleanup
     let _ = node.call::<Vec<String>>("generatetoaddress", &[json!(1), json!(mine)]);
     for id in [fee_uuid, cl_uuid, cs1_uuid, cs2_uuid] {
-        sqlx::query("DELETE FROM users WHERE id = (SELECT user_id FROM elements_wallets WHERE id=$1)")
-            .bind(id)
-            .execute(&pool)
-            .await
-            .ok();
+        sqlx::query(
+            "DELETE FROM users WHERE id = (SELECT user_id FROM elements_wallets WHERE id=$1)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .ok();
     }
-    sqlx::query("DELETE FROM elements_blocks").execute(&pool).await.unwrap();
-    sqlx::query("DELETE FROM elements_sync_cursor").execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM elements_blocks")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM elements_sync_cursor")
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 fn de<E: std::fmt::Display>(e: E) -> String {

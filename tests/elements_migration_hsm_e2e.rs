@@ -53,19 +53,19 @@ use uuid::Uuid;
 
 use asterism_core::signer::Signer;
 use asterism_dev_signer::DevBackend;
-use asterism_elements::descriptor::{to_multipath_string, CtDescriptorBuilder, CtKeyMode};
+use asterism_elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
 use asterism_elements::signer::ElementsSigner;
 use asterism_elements::sync::{
     BlockScanEngine, CapturedUtxo, ElementsChainSource, KeychainKind, WalletId, WalletUtxoStore,
 };
 use asterism_elements::testkit::SoftwareSigner;
 use asterism_elements::{
-    build_migration_pset, captured_from_output, finalize_p2wsh_pset, ElementsNetwork,
-    ElementsWalletHandle, ElementsWollet, LwkNetwork,
+    ElementsNetwork, ElementsWalletHandle, ElementsWollet, LwkNetwork, build_migration_pset,
+    captured_from_output, finalize_p2wsh_pset,
 };
-use asterism_pkcs11::{key_ops, Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier};
-use bitcoin::bip32::DerivationPath;
+use asterism_pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
 use bitcoin::Network;
+use bitcoin::bip32::DerivationPath;
 
 use test_app_pkcs11::elements_sync::{PgBlockStore, PgWalletUtxoStore, RpcChainSource};
 
@@ -314,7 +314,10 @@ fn sign_account(
         .iter()
         .enumerate()
         .filter(|(_, i)| {
-            owned_set.contains(&elements::OutPoint::new(i.previous_txid, i.previous_output_index))
+            owned_set.contains(&elements::OutPoint::new(
+                i.previous_txid,
+                i.previous_output_index,
+            ))
         })
         .map(|(i, _)| i)
         .collect();
@@ -344,10 +347,8 @@ fn live_network(env: &Env) -> (ElementsNetwork, LwkNetwork) {
     let sidechain: serde_json::Value = base.call("getsidechaininfo", &[]).unwrap();
     let policy = elements::AssetId::from_str(sidechain["pegged_asset"].as_str().unwrap()).unwrap();
     let net = ElementsNetwork::ElementsRegtest;
-    let lwk = ElementsNetwork::custom_regtest(
-        policy,
-        elements::BlockHash::from_str(&genesis).unwrap(),
-    );
+    let lwk =
+        ElementsNetwork::custom_regtest(policy, elements::BlockHash::from_str(&genesis).unwrap());
     (net, lwk)
 }
 
@@ -379,8 +380,9 @@ async fn elements_a2a_migration_hsm_e2e() {
     let tag = Uuid::new_v4();
 
     // Unique-per-run account indices (BIP-48 path + DB account_idx).
-    let base_acct =
-        (u32::from_le_bytes(tag.as_bytes()[..4].try_into().unwrap()) % 1_000_000) as i32 + 5_000_000;
+    let base_acct = (u32::from_le_bytes(tag.as_bytes()[..4].try_into().unwrap()) % 1_000_000)
+        as i32
+        + 5_000_000;
 
     // Old (current) HSM-signed wallets: fee account + two customers.
     let fee = make_hsm_wallet(&dev, &key_tag, base_acct, 0xa0, net, lwk);
@@ -414,7 +416,11 @@ async fn elements_a2a_migration_hsm_e2e() {
 
     let blocks = PgBlockStore::new(pool.clone());
     let utxos_store = PgWalletUtxoStore::new(pool.clone());
-    let rpc = (env.rpc_url.clone(), env.rpc_user.clone(), env.rpc_pass.clone());
+    let rpc = (
+        env.rpc_url.clone(),
+        env.rpc_user.clone(),
+        env.rpc_pass.clone(),
+    );
 
     // Move into blocking: descriptors/mbk (rebuild wollets) + the HSM signers.
     let fee_desc = fee.descriptor.clone();
@@ -533,14 +539,22 @@ async fn elements_a2a_migration_hsm_e2e() {
     // cleanup
     let _ = node.call::<Vec<String>>("generatetoaddress", &[json!(1), json!(mine)]);
     for id in [fee_uuid, c1_uuid, c2_uuid] {
-        sqlx::query("DELETE FROM users WHERE id = (SELECT user_id FROM elements_wallets WHERE id=$1)")
-            .bind(id)
-            .execute(&pool)
-            .await
-            .ok();
+        sqlx::query(
+            "DELETE FROM users WHERE id = (SELECT user_id FROM elements_wallets WHERE id=$1)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .ok();
     }
-    sqlx::query("DELETE FROM elements_blocks").execute(&pool).await.unwrap();
-    sqlx::query("DELETE FROM elements_sync_cursor").execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM elements_blocks")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM elements_sync_cursor")
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 /// Batched migration with **chained confidential fee-change** (decision (b)),
@@ -557,7 +571,9 @@ async fn elements_batched_migration_hsm_e2e() {
     const SMALL2: u64 = 100_000; // 0.001
 
     let Some(env) = env() else {
-        eprintln!("skipping elements_batched_migration_hsm_e2e: ELEMENTS_RPC_URL/DATABASE_URL unset");
+        eprintln!(
+            "skipping elements_batched_migration_hsm_e2e: ELEMENTS_RPC_URL/DATABASE_URL unset"
+        );
         return;
     };
     let Some(dev) = dev_env() else {
@@ -572,8 +588,9 @@ async fn elements_batched_migration_hsm_e2e() {
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
     let tag = Uuid::new_v4();
 
-    let base_acct =
-        (u32::from_le_bytes(tag.as_bytes()[..4].try_into().unwrap()) % 1_000_000) as i32 + 6_000_000;
+    let base_acct = (u32::from_le_bytes(tag.as_bytes()[..4].try_into().unwrap()) % 1_000_000)
+        as i32
+        + 6_000_000;
 
     // Old HSM-signed wallets: fee + large customer + two small customers.
     let fee = make_hsm_wallet(&dev, &key_tag, base_acct, 0xc0, net, lwk);
@@ -610,7 +627,11 @@ async fn elements_batched_migration_hsm_e2e() {
 
     let blocks = PgBlockStore::new(pool.clone());
     let utxos_store = PgWalletUtxoStore::new(pool.clone());
-    let rpc = (env.rpc_url.clone(), env.rpc_user.clone(), env.rpc_pass.clone());
+    let rpc = (
+        env.rpc_url.clone(),
+        env.rpc_user.clone(),
+        env.rpc_pass.clone(),
+    );
 
     let (fee_desc, cl_desc, cs1_desc, cs2_desc) = (
         fee.descriptor.clone(),
@@ -634,8 +655,8 @@ async fn elements_batched_migration_hsm_e2e() {
 
     // Returns (large_at_new, small1_at_new, small2_at_new, fee_at_new, fee_bal,
     // broadcasts).
-    let outcome =
-        tokio::task::spawn_blocking(move || -> Result<(u64, u64, u64, u64, u64, usize), String> {
+    let outcome = tokio::task::spawn_blocking(
+        move || -> Result<(u64, u64, u64, u64, u64, usize), String> {
             let chain = RpcChainSource::new(&rpc.0, &rpc.1, &rpc.2).map_err(de)?;
             let load = |d: &str, m: [u8; 32]| ElementsWollet::from_descriptor_str(d, m, net, lwk);
 
@@ -813,17 +834,27 @@ async fn elements_batched_migration_hsm_e2e() {
                 fee_bal,
                 broadcasts,
             ))
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
 
     let (large_at_new, small1_at_new, small2_at_new, fee_at_new, fee_bal, broadcasts) =
         outcome.expect("batched migration");
 
     assert_eq!(broadcasts, 3, "one large tx + one small bundle + fee-final");
-    assert_eq!(large_at_new, LARGE, "large customer migrated its full balance");
-    assert_eq!(small1_at_new, SMALL1, "small customer 1 migrated its full balance");
-    assert_eq!(small2_at_new, SMALL2, "small customer 2 migrated its full balance");
+    assert_eq!(
+        large_at_new, LARGE,
+        "large customer migrated its full balance"
+    );
+    assert_eq!(
+        small1_at_new, SMALL1,
+        "small customer 1 migrated its full balance"
+    );
+    assert_eq!(
+        small2_at_new, SMALL2,
+        "small customer 2 migrated its full balance"
+    );
     let fee_paid = fee_bal - fee_at_new;
     assert!(fee_paid > 0, "fee account paid a non-zero cumulative fee");
     assert_eq!(
@@ -835,12 +866,20 @@ async fn elements_batched_migration_hsm_e2e() {
     // cleanup
     let _ = node.call::<Vec<String>>("generatetoaddress", &[json!(1), json!(mine)]);
     for id in [fee_uuid, cl_uuid, cs1_uuid, cs2_uuid] {
-        sqlx::query("DELETE FROM users WHERE id = (SELECT user_id FROM elements_wallets WHERE id=$1)")
-            .bind(id)
-            .execute(&pool)
-            .await
-            .ok();
+        sqlx::query(
+            "DELETE FROM users WHERE id = (SELECT user_id FROM elements_wallets WHERE id=$1)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .ok();
     }
-    sqlx::query("DELETE FROM elements_blocks").execute(&pool).await.unwrap();
-    sqlx::query("DELETE FROM elements_sync_cursor").execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM elements_blocks")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM elements_sync_cursor")
+        .execute(&pool)
+        .await
+        .unwrap();
 }

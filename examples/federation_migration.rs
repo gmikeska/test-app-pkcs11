@@ -506,7 +506,10 @@ fn display_elements_migration_plan(strategy: &str, total_balance_btc: f64, fee_r
     }
 }
 
-fn display_elements_account_table(accounts: &[ElementsAccountSummary], fee_account_idx: Option<u32>) {
+fn display_elements_account_table(
+    accounts: &[ElementsAccountSummary],
+    fee_account_idx: Option<u32>,
+) {
     let total_balance: f64 = accounts.iter().map(|a| a.balance_btc).sum();
     println!();
     println!(
@@ -521,7 +524,11 @@ fn display_elements_account_table(accounts: &[ElementsAccountSummary], fee_accou
             .as_deref()
             .map(|d| format!("  → {}", truncate_address(d)))
             .unwrap_or_default();
-        let tag = if a.is_fee_account { "  ◀ fee account" } else { "" };
+        let tag = if a.is_fee_account {
+            "  ◀ fee account"
+        } else {
+            ""
+        };
         println!(
             "  Account {:>3}  │  {:.8} L-BTC  │  {:>3} {} │{dest}{tag}",
             a.account_idx, a.balance_btc, a.utxo_count, utxo_label,
@@ -768,7 +775,10 @@ fn plan_elements_batched(
     if !small.is_empty() {
         let small_inputs: usize = small.iter().map(|a| a.utxo_count).sum::<usize>() + 1;
         txs.push(BatchTxPlan {
-            customers: small.iter().map(|a| (a.account_idx, a.balance_sat)).collect(),
+            customers: small
+                .iter()
+                .map(|a| (a.account_idx, a.balance_sat))
+                .collect(),
             fee_sat: estimate_elements_fee_sat(small_inputs, small.len() + 1, fee_rate_sat_per_vb),
             is_fee_final: false,
         });
@@ -914,7 +924,10 @@ async fn run_elements_migration(
                 std::process::exit(1);
             }
         };
-        let balance_sat: u64 = utxos.iter().map(asterism_elements::CapturedUtxo::value).sum();
+        let balance_sat: u64 = utxos
+            .iter()
+            .map(asterism_elements::CapturedUtxo::value)
+            .sum();
         #[allow(clippy::cast_precision_loss)]
         let balance_btc = balance_sat as f64 / 100_000_000.0;
         summaries.push(ElementsAccountSummary {
@@ -993,7 +1006,8 @@ async fn run_elements_migration(
                 }
             }
         } else {
-            match build_new_elements_federation(wallet, cfg, app_config, hsm, &manager, pool).await {
+            match build_new_elements_federation(wallet, cfg, app_config, hsm, &manager, pool).await
+            {
                 Ok(v) => Some(v),
                 Err(e) => {
                     eprintln!("error: failed to build new federation for account {acct_idx}: {e}");
@@ -1010,7 +1024,9 @@ async fn run_elements_migration(
         {
             Ok(a) => a,
             Err(e) => {
-                eprintln!("error: failed to derive destination address for account {acct_idx}: {e}");
+                eprintln!(
+                    "error: failed to derive destination address for account {acct_idx}: {e}"
+                );
                 std::process::exit(1);
             }
         };
@@ -1096,7 +1112,9 @@ async fn run_elements_migration(
             {
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("error: failed to persist federation version for account {acct_idx}: {e}");
+                    eprintln!(
+                        "error: failed to persist federation version for account {acct_idx}: {e}"
+                    );
                     std::process::exit(1);
                 }
             }
@@ -1154,7 +1172,10 @@ async fn run_elements_migration(
         if utxos.is_empty() {
             continue;
         }
-        let balance_sat: u64 = utxos.iter().map(asterism_elements::CapturedUtxo::value).sum();
+        let balance_sat: u64 = utxos
+            .iter()
+            .map(asterism_elements::CapturedUtxo::value)
+            .sum();
         let (desc, mbk, _) = new_feds.get(&acct_idx).cloned().expect("resolved above");
         let dest = match ElementsWollet::from_descriptor_str(&desc, mbk, net, lwk_net)
             .and_then(|w| w.address(KeychainKind::External, 0))
@@ -1226,7 +1247,11 @@ async fn run_elements_migration(
             wollets.push((a.account_idx, w));
         }
         let wollet_of = |idx: i32| -> &ElementsWollet {
-            &wollets.iter().find(|(i, _)| *i == idx).expect("wollet present").1
+            &wollets
+                .iter()
+                .find(|(i, _)| *i == idx)
+                .expect("wollet present")
+                .1
         };
 
         let chain = RpcChainSource::new(&rpc.0, &rpc.1, &rpc.2).map_err(|e| e.to_string())?;
@@ -1236,44 +1261,45 @@ async fn run_elements_migration(
         // differ only by BIP-48 account path), so we index-scope by clearing
         // the `bip32_derivation` on inputs an account does not own before
         // running its signers, then restore.
-        let sign_scoped = |pset: &mut elements::pset::PartiallySignedTransaction,
-                           owner: &std::collections::HashMap<elements::OutPoint, i32>| {
-            let involved: std::collections::HashSet<i32> = owner.values().copied().collect();
-            for acct in involved {
-                let Some(exec) = exec_accounts.iter().find(|a| a.account_idx == acct) else {
-                    continue;
-                };
-                let owned: std::collections::HashSet<elements::OutPoint> = owner
-                    .iter()
-                    .filter(|(_, v)| **v == acct)
-                    .map(|(k, _)| *k)
-                    .collect();
-                let indices: Vec<usize> = pset
-                    .inputs()
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, inp)| {
-                        owned.contains(&elements::OutPoint::new(
-                            inp.previous_txid,
-                            inp.previous_output_index,
-                        ))
-                    })
-                    .map(|(i, _)| i)
-                    .collect();
-                let mut saved = Vec::new();
-                for (i, inp) in pset.inputs_mut().iter_mut().enumerate() {
-                    if !indices.contains(&i) {
-                        saved.push((i, std::mem::take(&mut inp.bip32_derivation)));
+        let sign_scoped =
+            |pset: &mut elements::pset::PartiallySignedTransaction,
+             owner: &std::collections::HashMap<elements::OutPoint, i32>| {
+                let involved: std::collections::HashSet<i32> = owner.values().copied().collect();
+                for acct in involved {
+                    let Some(exec) = exec_accounts.iter().find(|a| a.account_idx == acct) else {
+                        continue;
+                    };
+                    let owned: std::collections::HashSet<elements::OutPoint> = owner
+                        .iter()
+                        .filter(|(_, v)| **v == acct)
+                        .map(|(k, _)| *k)
+                        .collect();
+                    let indices: Vec<usize> = pset
+                        .inputs()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, inp)| {
+                            owned.contains(&elements::OutPoint::new(
+                                inp.previous_txid,
+                                inp.previous_output_index,
+                            ))
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    let mut saved = Vec::new();
+                    for (i, inp) in pset.inputs_mut().iter_mut().enumerate() {
+                        if !indices.contains(&i) {
+                            saved.push((i, std::mem::take(&mut inp.bip32_derivation)));
+                        }
+                    }
+                    for signer in exec.signers.iter() {
+                        let _ = signer.sign_pset(pset);
+                    }
+                    for (i, d) in saved {
+                        pset.inputs_mut()[i].bip32_derivation = d;
                     }
                 }
-                for signer in exec.signers.iter() {
-                    let _ = signer.sign_pset(pset);
-                }
-                for (i, d) in saved {
-                    pset.inputs_mut()[i].bip32_derivation = d;
-                }
-            }
-        };
+            };
 
         let mut results: Vec<TxResult> = Vec::new();
 
@@ -1301,7 +1327,8 @@ async fn run_elements_migration(
             let mut fee_seed_used = false;
 
             for txp in &plan.txs {
-                let mut inputs: Vec<(asterism_elements::CapturedUtxo, &ElementsWollet)> = Vec::new();
+                let mut inputs: Vec<(asterism_elements::CapturedUtxo, &ElementsWollet)> =
+                    Vec::new();
                 let mut recipients: Vec<(elements::Address, u64)> = Vec::new();
                 let mut report: Vec<(i32, u64)> = Vec::new();
                 let mut owner: std::collections::HashMap<elements::OutPoint, i32> =
@@ -1477,7 +1504,6 @@ fn hex_decode_bytes(s: &str) -> [u8; 32] {
     }
     out
 }
-
 
 /// Derive a deterministic MBK. For version 0, matches the original derivation.
 /// For version > 0, includes version salt for rotation.
@@ -2076,10 +2102,12 @@ async fn main() {
     // always seeds a v0 row, and Step 1 appends the new version, so the
     // second-to-last version is the fund-holding old federation.
     let fee_old_descriptor: String = {
-        let versions =
-            db::list_federation_versions_for_wallet(&pool, user_wallets[fee_wallet_idx].wallet_id())
-                .await
-                .unwrap_or_default();
+        let versions = db::list_federation_versions_for_wallet(
+            &pool,
+            user_wallets[fee_wallet_idx].wallet_id(),
+        )
+        .await
+        .unwrap_or_default();
         if versions.len() < 2 {
             eprintln!(
                 "error: fee account {fee_acct_idx} has no prior (old) federation version to \
@@ -2091,12 +2119,15 @@ async fn main() {
     };
     let fee_old_addr: bitcoin::Address = {
         let desc: bdk_wallet::miniscript::Descriptor<bdk_wallet::miniscript::DescriptorPublicKey> =
-            fee_old_descriptor.parse().expect("valid old fee descriptor");
+            fee_old_descriptor
+                .parse()
+                .expect("valid old fee descriptor");
         let mut tw = bdk_wallet::Wallet::create_from_two_path_descriptor(desc)
             .network(app_config.network)
             .create_wallet_no_persist()
             .expect("valid temp wallet from old fee descriptor");
-        tw.reveal_next_address(bdk_wallet::KeychainKind::External).address
+        tw.reveal_next_address(bdk_wallet::KeychainKind::External)
+            .address
     };
     let fee_new_dest: bitcoin::Address = account_utxo_sets
         .iter()
@@ -2209,7 +2240,9 @@ async fn main() {
             // and its NEW-fed address only on the final fee-account tx.
             for output in &sweep_tx.outputs {
                 match output {
-                    asterism_core::SweepOutput::Customer { address, amount, .. } => {
+                    asterism_core::SweepOutput::Customer {
+                        address, amount, ..
+                    } => {
                         builder.add_recipient(address.script_pubkey(), *amount);
                     }
                     asterism_core::SweepOutput::FeeChange { .. } => {
@@ -2338,7 +2371,9 @@ async fn main() {
                     // the just-broadcast tx to a throwaway wallet to spend it.
                     let desc: bdk_wallet::miniscript::Descriptor<
                         bdk_wallet::miniscript::DescriptorPublicKey,
-                    > = fee_old_descriptor.parse().expect("valid old fee descriptor");
+                    > = fee_old_descriptor
+                        .parse()
+                        .expect("valid old fee descriptor");
                     let mut temp_wallet = bdk_wallet::Wallet::create_from_two_path_descriptor(desc)
                         .network(app_config.network)
                         .create_wallet_no_persist()
