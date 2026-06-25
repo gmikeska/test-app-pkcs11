@@ -210,7 +210,8 @@ impl ElementsRpc {
         fee_rate_btc_per_kb: f64,
     ) -> Result<FundedPsbt, ElementsRpcError> {
         let client = self.client_for_wallet(wallet)?;
-        let output_indices: Vec<u32> = (0..outputs.len() as u32).collect();
+        let output_count = u32::try_from(outputs.len()).unwrap_or(u32::MAX);
+        let output_indices: Vec<u32> = (0..output_count).collect();
         let result: FundedPsbt = client.call(
             "walletcreatefundedpsbt",
             &[

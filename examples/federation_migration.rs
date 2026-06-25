@@ -11,10 +11,21 @@
 //! See `examples/federation_change.example.toml` for the configuration
 //! schema and documentation.
 
+// This is a daemon-wallet-based migration demo, slated for rework in the
+// (out-of-scope) federation-migration phase; we scope away pedantic style noise
+// here rather than churn soon-to-be-replaced code.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::items_after_statements,
+    clippy::map_unwrap_or,
+    clippy::single_match_else,
+    clippy::manual_let_else,
+    clippy::let_unit_value,
+    clippy::needless_continue,
+    clippy::collapsible_if,
+    clippy::ignored_unit_patterns
 )]
 
 use std::io::{self, BufRead, Write};

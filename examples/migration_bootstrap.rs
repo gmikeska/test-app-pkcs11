@@ -184,7 +184,7 @@ async fn run_bootstrap(pool: &sqlx::PgPool, wm: &WalletManager) {
         );
         for (j, &amount_sat) in acct.fund_amounts.iter().enumerate() {
             let btc = Amount::from_sat(amount_sat).to_btc();
-            println!("  paytoaddress.sh {} {btc}", addrs[j].address,);
+            println!("  paytoaddress.sh {} {btc}", addrs[j].address);
         }
         println!();
     }

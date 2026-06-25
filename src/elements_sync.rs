@@ -505,7 +505,7 @@ mod tests {
         Some(pool)
     }
 
-    /// Seed a throwaway user + elements_wallet, returning its id.
+    /// Seed a throwaway user + `elements_wallet`, returning its id.
     async fn seed_wallet(pool: &PgPool) -> Uuid {
         let tag = Uuid::new_v4();
         let user_id: Uuid = sqlx::query_scalar(

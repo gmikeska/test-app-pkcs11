@@ -253,8 +253,7 @@ pub async fn receive(
             let desc = versions_for_change
                 .iter()
                 .find(|v| v.wallet_handle == daemon_wallet)
-                .map(|v| v.descriptor.as_str())
-                .unwrap_or(uw.descriptor());
+                .map_or(uw.descriptor(), |v| v.descriptor.as_str());
             uw.change_addresses_for_version(REVEAL_COUNT, desc, &daemon_wallet)
                 .await
                 .unwrap_or_default()

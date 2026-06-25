@@ -42,6 +42,13 @@ use crate::db;
 use crate::hsm::{HsmError, HsmFleet};
 use crate::models::WalletRow;
 
+/// One PSBT input's saved `bip32_derivation` map (index + key origins), stashed
+/// while migration-signing temporarily clears non-target inputs.
+type SavedBip32Derivation = (
+    usize,
+    std::collections::BTreeMap<bitcoin::secp256k1::PublicKey, (Fingerprint, DerivationPath)>,
+);
+
 /// Default reveal target: addresses 0..REVEAL_COUNT-1 are eagerly
 /// surfaced on every receive-tab render.
 pub const REVEAL_COUNT: u32 = 20;
@@ -616,7 +623,6 @@ impl WalletManager {
 
         // Create mutable BDK wallets for each federation version so we
         // can sync them all against the blockchain.
-        use asterism_core::federated_wallet::FederatedWallet as FwTrait;
         let mut version_wallets = Vec::with_capacity(federated_wallet.federation_count());
         for fw in federated_wallet.federation_wallets() {
             let vw = Self::create_metadata_wallet(&fw.federation, self.network)?;
@@ -1057,7 +1063,6 @@ impl UserWallet {
         }
         drop(wallet);
 
-        use asterism_core::federated_wallet::FederatedWallet as _;
         for fw in self.federated_wallet.federation_wallets() {
             if let Some(result) = fw.wallet.derivation_of_spk(spk.clone()) {
                 return Some(result);
@@ -1317,19 +1322,13 @@ impl UserWallet {
     ///
     /// Only inputs at `input_indices` are signed. Other inputs have their
     /// `bip32_derivation` temporarily cleared so that the PKCS#11 signers
-    /// skip them (they match by fingerprint in bip32_derivation).
+    /// skip them (they match by fingerprint in `bip32_derivation`).
     pub async fn sign_migration_inputs(
         &self,
         psbt: &mut bitcoin::Psbt,
         input_indices: &[usize],
     ) -> Result<(), WalletError> {
-        let mut saved: Vec<(
-            usize,
-            std::collections::BTreeMap<
-                bitcoin::secp256k1::PublicKey,
-                (Fingerprint, DerivationPath),
-            >,
-        )> = Vec::new();
+        let mut saved: Vec<SavedBip32Derivation> = Vec::new();
         for (i, inp) in psbt.inputs.iter_mut().enumerate() {
             if !input_indices.contains(&i) {
                 saved.push((i, std::mem::take(&mut inp.bip32_derivation)));
@@ -1359,8 +1358,7 @@ impl UserWallet {
     pub async fn insert_unconfirmed_tx(&self, tx: &bitcoin::Transaction) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         for vw_mutex in &self.version_wallets {
             let mut vw = vw_mutex.lock().await;
             vw.apply_unconfirmed_txs(vec![(tx.clone(), now)]);
@@ -1534,10 +1532,11 @@ impl UserWallet {
 fn extract_fingerprints_from_descriptor(descriptor: &str) -> Vec<String> {
     let mut fps = Vec::new();
     for chunk in descriptor.split('[').skip(1) {
-        if let Some(fp) = chunk.split('/').next() {
-            if fp.len() == 8 && fp.chars().all(|c| c.is_ascii_hexdigit()) {
-                fps.push(fp.to_string());
-            }
+        if let Some(fp) = chunk.split('/').next()
+            && fp.len() == 8
+            && fp.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            fps.push(fp.to_string());
         }
     }
     fps
