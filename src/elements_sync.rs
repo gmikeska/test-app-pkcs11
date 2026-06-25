@@ -30,7 +30,8 @@ use asterism_elements::sync::{
     BlockStore, CapturedUtxo, ElementsChainSource, KeychainKind, SyncedTip, WalletId,
     WalletUtxoStore,
 };
-use asterism_elements::SyncError;
+use asterism_elements::{ElementsNetwork, SyncError};
+use elements::AssetId;
 
 use bitcoincore_rpc::{Auth, Client, RpcApi};
 use elements::encode::{deserialize, serialize, serialize_hex};
@@ -407,6 +408,43 @@ impl RpcChainSource {
     fn rpc_err<E: std::fmt::Display>(e: E) -> SyncError {
         SyncError::ChainSource(e.to_string())
     }
+
+    /// The node's policy (L-BTC) asset, from `getsidechaininfo.pegged_asset`.
+    ///
+    /// # Errors
+    ///
+    /// [`SyncError::ChainSource`] on RPC failure or a malformed response.
+    pub fn policy_asset(&self) -> Result<AssetId, SyncError> {
+        let v: serde_json::Value = self
+            .client
+            .call("getsidechaininfo", &[])
+            .map_err(Self::rpc_err)?;
+        let s = v["pegged_asset"]
+            .as_str()
+            .ok_or_else(|| SyncError::ChainSource("getsidechaininfo missing pegged_asset".into()))?;
+        AssetId::from_str(s).map_err(enc_err)
+    }
+}
+
+/// Resolve the concrete [`lwk_wollet::Network`] for a node. For
+/// `ElementsRegtest` this sources the policy asset + genesis from the node
+/// (which vary per deployment); Liquid/testnet use their fixed parameters.
+///
+/// # Errors
+///
+/// [`SyncError::ChainSource`] if node params can't be fetched.
+pub fn node_lwk_network(
+    chain: &RpcChainSource,
+    network: ElementsNetwork,
+) -> Result<asterism_elements::LwkNetwork, SyncError> {
+    Ok(match network {
+        ElementsNetwork::ElementsRegtest => {
+            let policy = chain.policy_asset()?;
+            let genesis = chain.block_hash(0)?;
+            ElementsNetwork::custom_regtest(policy, genesis)
+        }
+        other => other.to_lwk(),
+    })
 }
 
 impl ElementsChainSource for RpcChainSource {

@@ -123,6 +123,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     seed_test_wallets(&pool, &wallet_manager).await;
     seed_test_elements_wallets(&pool, &elements_wallet_manager).await;
 
+    // Background block-scan ingestion for all Elements wallets (one task,
+    // node-friendly: each block is fetched once and matched against every
+    // wallet's scripts).
+    let _elements_ingest = test_app_pkcs11::elements_ingest::spawn(pool.clone(), &config);
+    tracing::info!("Elements block ingestion service started");
+
     let state = Arc::new(AppState {
         config: config.clone(),
         db: pool,

@@ -1,38 +1,45 @@
 //! Per-user Elements/Liquid wallet manager.
 //!
-//! Mirrors the Bitcoin [`WalletManager`](crate::wallet::WalletManager) but
-//! delegates chain operations to the Elements daemon (watch-only descriptor
-//! wallet) instead of BDK + Bitcoin Core. The HSMs sign PSET inputs
-//! identically to the Bitcoin PSBT path.
+//! Client-side model: each user wallet is an [`ElementsWollet`] (descriptor +
+//! SLIP-77 key) whose UTXOs are captured by the shared block-scan pipeline
+//! ([`crate::elements_sync`] + [`crate::elements_ingest`]) into Postgres, *not*
+//! by per-user daemon wallets (which do not scale). Balance/addresses read from
+//! [`PgWalletUtxoStore`]; sends build a PSET via
+//! [`asterism_elements::build_spend_pset`], sign with the HSM federation, and
+//! broadcast through [`RpcChainSource`].
+//!
+//! The `daemon_wallet_name` column is retained as a vestigial label (federation
+//! history + the migration example still reference it); no daemon wallet is
+//! created or queried.
 
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use asterism_elements::ElementsNetwork;
 use asterism_elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
 use asterism_elements::signer::ElementsSigner;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use elements::encode::{deserialize as consensus_deserialize, serialize as consensus_serialize};
-use elements::pset::PartiallySignedTransaction as Pset;
+use asterism_elements::sync::{ElementsChainSource, KeychainKind, WalletId, WalletUtxoStore};
+use asterism_elements::{
+    ElementsNetwork, ElementsWollet, LwkNetwork, build_spend_pset, finalize_p2wsh_pset,
+};
 use sqlx::PgPool;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-use asterism_elements::elements_miniscript::slip77::MasterBlindingKey;
-
 use crate::config::AppConfig;
 use crate::db;
-use crate::elements_rpc::{
-    ElementsBalances, ElementsRpc, ElementsRpcError, ElementsUtxo, ImportDescriptorRequest,
-};
-use crate::hsm::{HsmError, HsmFleet};
+use crate::elements_rpc::{ElementsBalances, ElementsRpc, ElementsRpcError};
+use crate::elements_sync::{PgWalletUtxoStore, RpcChainSource, node_lwk_network};
+use crate::hsm::{HsmError, HsmFleet, SignerSet};
 use crate::models::ElementsWalletRow;
 use crate::wallet::NetworkPatchedSigner;
 
 #[allow(dead_code)]
 pub const REVEAL_COUNT: u32 = 20;
+
+/// Gap limit for the capture pipeline — derive this many external + internal
+/// scripts per wallet to watch.
+pub const SCAN_GAP: u32 = 100;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -61,14 +68,18 @@ pub enum ElementsWalletError {
     Rpc(#[from] ElementsRpcError),
     #[error("descriptor builder error: {0}")]
     Descriptor(String),
+    #[error("block-scan pipeline error: {0}")]
+    Pipeline(String),
     #[error("HSM error: {0}")]
     Hsm(#[from] HsmError),
-    #[error("PSET decode error: {0}")]
-    PsetDecode(String),
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
     #[error("config error: {0}")]
     Config(#[from] crate::config::ConfigError),
+}
+
+fn pipeline_err<E: std::fmt::Display>(e: E) -> ElementsWalletError {
+    ElementsWalletError::Pipeline(e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +89,12 @@ pub enum ElementsWalletError {
 pub struct ElementsWalletManager {
     pool: PgPool,
     rpc: Arc<ElementsRpc>,
+    rpc_url: String,
+    rpc_user: String,
+    rpc_pass: String,
     network: ElementsNetwork,
+    /// Cached concrete LWK network (node policy asset + genesis for regtest).
+    lwk_net: AsyncMutex<Option<LwkNetwork>>,
     bip48_coin_index: u32,
     fed_threshold: u32,
     fed_signer_indices: Vec<usize>,
@@ -97,7 +113,11 @@ impl ElementsWalletManager {
         Self {
             pool,
             rpc,
+            rpc_url: config.elements_rpc_url.clone(),
+            rpc_user: config.elements_rpc_user.clone(),
+            rpc_pass: config.elements_rpc_password.clone(),
             network: config.elements_network,
+            lwk_net: AsyncMutex::new(None),
             bip48_coin_index: config.bip48_coin_index,
             fed_threshold: config.fed_threshold,
             fed_signer_indices: config.fed_signer_indices.clone(),
@@ -108,6 +128,31 @@ impl ElementsWalletManager {
 
     pub fn network(&self) -> ElementsNetwork {
         self.network
+    }
+
+    pub fn rpc(&self) -> &Arc<ElementsRpc> {
+        &self.rpc
+    }
+
+    /// Resolve (and cache) the concrete LWK network from the node.
+    pub async fn lwk_network(&self) -> Result<LwkNetwork, ElementsWalletError> {
+        if let Some(n) = *self.lwk_net.lock().await {
+            return Ok(n);
+        }
+        let (url, user, pass, net) = (
+            self.rpc_url.clone(),
+            self.rpc_user.clone(),
+            self.rpc_pass.clone(),
+            self.network,
+        );
+        let n = tokio::task::spawn_blocking(move || -> Result<LwkNetwork, ElementsWalletError> {
+            let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
+            node_lwk_network(&chain, net).map_err(pipeline_err)
+        })
+        .await
+        .expect("spawn_blocking join")?;
+        *self.lwk_net.lock().await = Some(n);
+        Ok(n)
     }
 
     pub fn derivation_path_for(
@@ -172,6 +217,8 @@ impl ElementsWalletManager {
         self.create_wallet_for_user_at(user_id, account_idx).await
     }
 
+    /// Build the descriptor + blinding key and persist the wallet row. No
+    /// daemon wallet is created — capture is handled by the shared pipeline.
     async fn create_wallet_for_user_at(
         &self,
         user_id: Uuid,
@@ -187,7 +234,6 @@ impl ElementsWalletManager {
             .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), self.hsm.network()))
             .collect();
 
-        // Generate a deterministic MBK from user_id + account_idx.
         let mbk = derive_master_blinding_key(user_id, account_idx);
         let mbk_hex = hex_encode(&mbk);
 
@@ -204,93 +250,8 @@ impl ElementsWalletManager {
             .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
         let multipath = to_multipath_string(&ct_desc);
 
-        // Elements Core RPC doesn't support ct()/elwsh() descriptors or
-        // BIP-389 multipath syntax (/<0;1>/*). Extract the inner
-        // wsh(sortedmulti(...)) and import receive (/0/*) and change (/1/*)
-        // as separate descriptors with checksums.
-        let inner_multipath = extract_inner_wsh(&multipath).ok_or_else(|| {
-            ElementsWalletError::Descriptor(
-                "could not extract inner wsh() from CT descriptor".into(),
-            )
-        })?;
-        let inner_receive = inner_multipath.replace("/<0;1>/*", "/0/*");
-        let inner_change = inner_multipath.replace("/<0;1>/*", "/1/*");
-
-        let daemon_wallet_name = format!("asterism-elements-user-{account_idx}");
-
-        let rpc = self.rpc.clone();
-        let wallet_name = daemon_wallet_name.clone();
-        let mbk_for_blinding = mbk;
-        let network = self.network;
-        let ct_desc_clone = ct_desc.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), ElementsWalletError> {
-            type CtDesc = asterism_elements::elements_miniscript::confidential::Descriptor<
-                asterism_elements::elements_miniscript::descriptor::DescriptorPublicKey,
-            >;
-
-            rpc.ensure_wallet_loaded(&wallet_name)?;
-
-            // Import receive and change descriptors separately.
-            for (desc, is_internal) in [(&inner_receive, false), (&inner_change, true)] {
-                let info = rpc.get_descriptor_info(desc)?;
-                let desc_with_checksum = format!("{desc}#{}", info.checksum);
-
-                let results = rpc.import_descriptors(
-                    &wallet_name,
-                    &[ImportDescriptorRequest {
-                        descriptor: desc_with_checksum,
-                        active: true,
-                        internal: is_internal,
-                    }],
-                )?;
-                for r in &results {
-                    if let (false, Some(err)) = (r.success, &r.error) {
-                        tracing::warn!(
-                            code = err.code,
-                            msg = %err.message,
-                            internal = is_internal,
-                            "import_descriptors warning (may be already imported)"
-                        );
-                    }
-                }
-            }
-
-            // Import blinding keys for both receive (/0/*) and change (/1/*).
-            let slip77_mbk = MasterBlindingKey::from(mbk_for_blinding);
-            let secp =
-                asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new();
-
-            let multipath_str = ct_desc_clone.to_string();
-            let receive_str = multipath_str.replace("/<0;1>/*", "/0/*");
-            let change_str = multipath_str.replace("/<0;1>/*", "/1/*");
-
-            let descs: Vec<CtDesc> = [&receive_str, &change_str]
-                .iter()
-                .filter_map(|s| CtDesc::from_str(s).ok())
-                .collect();
-
-            for desc in &descs {
-                for idx in 0..REVEAL_COUNT {
-                    if let Ok(definite) = desc.at_derivation_index(idx) {
-                        let Ok(addr) = definite.address(&secp, network.address_params()) else {
-                            continue;
-                        };
-                        let spk = definite.descriptor.script_pubkey();
-                        let bk = slip77_mbk.blinding_private_key(&spk);
-                        let bk_hex = hex_encode(&bk.secret_bytes());
-                        if let Err(e) =
-                            rpc.import_blinding_key(&wallet_name, &addr.to_string(), &bk_hex)
-                        {
-                            tracing::warn!(idx, error = %e, "importblindingkey failed");
-                        }
-                    }
-                }
-            }
-
-            Ok(())
-        })
-        .await
-        .expect("spawn_blocking join")?;
+        // Vestigial label; no daemon wallet is created.
+        let daemon_wallet_name = format!("elements-user-{account_idx}");
 
         let row = db::insert_elements_wallet(
             &self.pool,
@@ -307,8 +268,7 @@ impl ElementsWalletManager {
         tracing::info!(
             %user_id,
             account_idx = row.account_idx,
-            daemon_wallet = %daemon_wallet_name,
-            "created Elements user wallet"
+            "created client-side Elements wallet"
         );
         Ok(row)
     }
@@ -320,10 +280,6 @@ impl ElementsWalletManager {
         self.build_user_wallet(row.user_id, row).await
     }
 
-    pub fn rpc(&self) -> &Arc<ElementsRpc> {
-        &self.rpc
-    }
-
     async fn build_user_wallet(
         &self,
         user_id: Uuid,
@@ -332,25 +288,16 @@ impl ElementsWalletManager {
         let account_idx_u32 = u32::try_from(row.account_idx).unwrap_or(0);
         let path = self.derivation_path_for(account_idx_u32)?;
         let signers_arc = self.hsm.signers_for(user_id, &path).await?;
-
-        // Ensure daemon wallet is loaded.
-        let rpc = self.rpc.clone();
-        let wallet_name = row.daemon_wallet_name.clone();
-        tokio::task::spawn_blocking(move || rpc.ensure_wallet_loaded(&wallet_name))
-            .await
-            .expect("spawn_blocking join")?;
+        let lwk_net = self.lwk_network().await?;
 
         // Record the initial federation version if not already stored.
         let versions =
             db::list_federation_versions_for_elements_wallet(&self.pool, row.id).await?;
-        let version_count = versions.len() as i64;
-        let signer_count = i32::try_from(self.fed_signer_indices.len()).unwrap_or(0);
-        let threshold = i32::try_from(self.fed_threshold).unwrap_or(0);
+        let version_count = versions.len();
         if version_count == 0 {
-            let snapshot = serde_json::json!({
-                "descriptor": row.descriptor,
-                "daemon_wallet_name": row.daemon_wallet_name,
-            });
+            let signer_count = i32::try_from(self.fed_signer_indices.len()).unwrap_or(0);
+            let threshold = i32::try_from(self.fed_threshold).unwrap_or(0);
+            let snapshot = serde_json::json!({ "descriptor": row.descriptor });
             let _ = db::insert_federation_version(
                 &self.pool,
                 &db::NewFederationVersion {
@@ -369,36 +316,29 @@ impl ElementsWalletManager {
             .ok();
         }
 
-        // Use the latest federation version's descriptor and daemon wallet
-        // so balance/send operations target the current federation.
-        let (active_descriptor, active_daemon_wallet) = if let Some(latest) = versions.last() {
-            let rpc = self.rpc.clone();
-            let wn = latest.wallet_handle.clone();
-            tokio::task::spawn_blocking(move || rpc.ensure_wallet_loaded(&wn))
-                .await
-                .expect("spawn_blocking join")?;
-            (latest.descriptor.clone(), latest.wallet_handle.clone())
-        } else {
-            (row.descriptor, row.daemon_wallet_name)
-        };
+        let mbk = derive_master_blinding_key(user_id, row.account_idx);
 
         Ok(UserElementsWallet {
             user_id,
             wallet_id: row.id,
             account_idx: row.account_idx,
             network: self.network,
-            descriptor: active_descriptor,
-            daemon_wallet_name: active_daemon_wallet,
+            lwk_net,
+            descriptor: row.descriptor,
+            mbk,
+            daemon_wallet_name: row.daemon_wallet_name,
             signers: signers_arc,
-            federation_version_count: usize::try_from(version_count.max(1)).unwrap_or(1),
-            rpc: self.rpc.clone(),
+            federation_version_count: version_count.max(1),
             pool: self.pool.clone(),
+            rpc_url: self.rpc_url.clone(),
+            rpc_user: self.rpc_user.clone(),
+            rpc_pass: self.rpc_pass.clone(),
         })
     }
 }
 
 // ---------------------------------------------------------------------------
-// UserElementsWallet
+// View structs (unchanged API for the handlers)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -441,13 +381,26 @@ pub struct UserElementsWallet {
     wallet_id: Uuid,
     account_idx: i32,
     network: ElementsNetwork,
+    lwk_net: LwkNetwork,
     descriptor: String,
+    mbk: [u8; 32],
     daemon_wallet_name: String,
-    signers: crate::hsm::SignerSet,
-    /// Number of historical federation versions for this wallet.
+    signers: SignerSet,
     federation_version_count: usize,
-    rpc: Arc<ElementsRpc>,
     pool: PgPool,
+    rpc_url: String,
+    rpc_user: String,
+    rpc_pass: String,
+}
+
+impl UserElementsWallet {
+    fn wallet_key(&self) -> WalletId {
+        WalletId::from_bytes(*self.wallet_id.as_bytes())
+    }
+
+    fn rpc_cfg(&self) -> (String, String, String) {
+        (self.rpc_url.clone(), self.rpc_user.clone(), self.rpc_pass.clone())
+    }
 }
 
 #[allow(dead_code)]
@@ -456,318 +409,199 @@ impl UserElementsWallet {
     pub fn user_id(&self) -> Uuid {
         self.user_id
     }
-
     #[must_use]
     pub fn wallet_id(&self) -> Uuid {
         self.wallet_id
     }
-
     #[must_use]
     pub fn network(&self) -> ElementsNetwork {
         self.network
     }
-
     #[must_use]
     pub fn account_idx(&self) -> i32 {
         self.account_idx
     }
-
     #[must_use]
     pub fn descriptor(&self) -> &str {
         &self.descriptor
     }
-
     #[must_use]
     pub fn federation_version_count(&self) -> usize {
         self.federation_version_count
     }
-
-    pub async fn tip_height(&self) -> Result<u64, ElementsWalletError> {
-        let rpc = self.rpc.clone();
-        let height = tokio::task::spawn_blocking(move || rpc.get_block_count())
-            .await
-            .expect("spawn_blocking join")?;
-        Ok(height)
+    #[must_use]
+    pub fn daemon_wallet_name(&self) -> &str {
+        &self.daemon_wallet_name
     }
 
+    pub async fn tip_height(&self) -> Result<u64, ElementsWalletError> {
+        let (url, user, pass) = self.rpc_cfg();
+        let h = tokio::task::spawn_blocking(move || -> Result<u32, ElementsWalletError> {
+            let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
+            chain.tip_height().map_err(pipeline_err)
+        })
+        .await
+        .expect("spawn_blocking join")?;
+        Ok(u64::from(h))
+    }
+
+    /// Balance from captured UTXOs (all confirmed → "trusted"). Mempool is not
+    /// tracked, so `untrusted_pending`/`immature` are zero.
     pub async fn balance(&self) -> Result<ElementsBalances, ElementsWalletError> {
-        let rpc = self.rpc.clone();
-        let wallet = self.daemon_wallet_name.clone();
-        let balances = tokio::task::spawn_blocking(move || rpc.get_balances(&wallet))
-            .await
-            .expect("spawn_blocking join")?;
-        Ok(balances)
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        let sats = tokio::task::spawn_blocking(move || -> Result<u64, ElementsWalletError> {
+            Ok(store
+                .list_unspent(wid)
+                .map_err(pipeline_err)?
+                .iter()
+                .map(asterism_elements::CapturedUtxo::value)
+                .sum())
+        })
+        .await
+        .expect("spawn_blocking join")?;
+        #[allow(clippy::cast_precision_loss)]
+        let btc = sats as f64 / 100_000_000.0;
+        Ok(ElementsBalances {
+            trusted: btc,
+            untrusted_pending: 0.0,
+            immature: 0.0,
+        })
     }
 
     pub async fn reveal_addresses(
         &self,
         count: u32,
     ) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
-        self.derive_addresses(count, "/0/*").await
+        self.derive_addresses(count, KeychainKind::External).await
     }
 
     pub async fn change_addresses(
         &self,
         count: u32,
     ) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
-        self.derive_addresses(count, "/1/*").await
+        self.derive_addresses(count, KeychainKind::Internal).await
     }
 
     async fn derive_addresses(
         &self,
         count: u32,
-        keychain_suffix: &str,
+        chain_kind: KeychainKind,
     ) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
-        type CtDesc = asterism_elements::elements_miniscript::confidential::Descriptor<
-            asterism_elements::elements_miniscript::descriptor::DescriptorPublicKey,
-        >;
-
         if count == 0 {
             return Ok(Vec::new());
         }
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        // `ElementsWollet` isn't `Send`; build it inside the blocking task.
+        let desc = self.descriptor.clone();
+        let mbk = self.mbk;
+        let net = self.network;
+        let lwk = self.lwk_net;
 
-        let desc_str = self.descriptor.replace("/<0;1>/*", keychain_suffix);
-        let ct_desc = CtDesc::from_str(&desc_str)
-            .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+        tokio::task::spawn_blocking(
+            move || -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
+                let wollet = ElementsWollet::from_descriptor_str(&desc, mbk, net, lwk)
+                    .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+                let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
 
-        let secp =
-            asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new();
-        let network = self.network;
-
-        // Derive addresses and their script pubkeys for matching.
-        let mut addr_info: Vec<(String, elements::Script)> = Vec::with_capacity(count as usize);
-        for idx in 0..count {
-            let definite = ct_desc
-                .at_derivation_index(idx)
-                .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
-            let conf_addr = definite
-                .address(&secp, network.address_params())
-                .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
-            let spk = definite.descriptor.script_pubkey();
-            addr_info.push((conf_addr.to_string(), spk));
-        }
-
-        let rpc = self.rpc.clone();
-        let wallet = self.daemon_wallet_name.clone();
-        let (utxos, txs) =
-            tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
-                let utxos = rpc.list_unspent(&wallet)?;
-                let txs = rpc.list_transactions(&wallet)?;
-                Ok((utxos, txs))
-            })
-            .await
-            .expect("spawn_blocking join")?;
-
-        // Build script-pubkey maps for unspent and total received.
-        let spk_unspent = build_spk_utxo_map(&utxos);
-        let spk_received = build_spk_received_map(&txs);
-
-        let results = addr_info
-            .into_iter()
-            .enumerate()
-            .map(|(i, (conf_addr, spk))| {
-                let unspent = spk_unspent.get(&spk).copied().unwrap_or(0.0);
-                let received = spk_received.get(&spk).copied().unwrap_or(0.0);
-                ElementsRevealedAddress {
-                    index: u32::try_from(i).unwrap_or(0),
-                    address: conf_addr,
-                    received,
-                    unspent,
+                let mut unspent_by_spk: HashMap<elements::Script, u64> = HashMap::new();
+                for u in &utxos {
+                    *unspent_by_spk.entry(u.script_pubkey().clone()).or_default() += u.value();
                 }
-            })
-            .collect();
-        Ok(results)
+
+                let mut out = Vec::with_capacity(count as usize);
+                for i in 0..count {
+                    let addr = wollet
+                        .address(chain_kind, i)
+                        .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+                    let spk = addr.script_pubkey();
+                    #[allow(clippy::cast_precision_loss)]
+                    let unspent =
+                        unspent_by_spk.get(&spk).copied().unwrap_or(0) as f64 / 100_000_000.0;
+                    out.push(ElementsRevealedAddress {
+                        index: i,
+                        address: addr.to_string(),
+                        received: unspent,
+                        unspent,
+                    });
+                }
+                Ok(out)
+            },
+        )
+        .await
+        .expect("spawn_blocking join")
     }
 
+    /// Single-version view (federation migration is a separate phase).
     pub async fn reveal_addresses_all_versions(
         &self,
         count: u32,
     ) -> Result<Vec<(usize, String, Vec<ElementsRevealedAddress>)>, ElementsWalletError> {
-        let versions =
-            db::list_federation_versions_for_elements_wallet(&self.pool, self.wallet_id).await?;
-        if versions.is_empty() {
-            let addrs = self.reveal_addresses(count).await?;
-            return Ok(vec![(0, self.daemon_wallet_name.clone(), addrs)]);
-        }
-        let mut groups = Vec::with_capacity(versions.len());
-        for v in &versions {
-            let addrs = self
-                .derive_addresses_for_version(
-                    count,
-                    "/0/*",
-                    &v.descriptor,
-                    &v.wallet_handle,
-                )
-                .await?;
-            groups.push((
-                usize::try_from(v.version_index).unwrap_or(0),
-                v.wallet_handle.clone(),
-                addrs,
-            ));
-        }
-        Ok(groups)
+        let addrs = self.reveal_addresses(count).await?;
+        Ok(vec![(0, self.daemon_wallet_name.clone(), addrs)])
     }
 
     pub async fn change_addresses_for_version(
         &self,
         count: u32,
-        descriptor: &str,
-        daemon_wallet: &str,
+        _descriptor: &str,
+        _daemon_wallet: &str,
     ) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
-        self.derive_addresses_for_version(count, "/1/*", descriptor, daemon_wallet)
-            .await
+        self.change_addresses(count).await
     }
 
-    async fn derive_addresses_for_version(
-        &self,
-        count: u32,
-        keychain_suffix: &str,
-        descriptor: &str,
-        daemon_wallet: &str,
-    ) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
-        type CtDesc = asterism_elements::elements_miniscript::confidential::Descriptor<
-            asterism_elements::elements_miniscript::descriptor::DescriptorPublicKey,
-        >;
-
-        if count == 0 {
-            return Ok(Vec::new());
-        }
-
-        let desc_str = descriptor.replace("/<0;1>/*", keychain_suffix);
-        let ct_desc = CtDesc::from_str(&desc_str)
-            .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
-
-        let secp =
-            asterism_elements::elements_miniscript::elements::secp256k1_zkp::Secp256k1::new();
-        let network = self.network;
-
-        let mut addr_info: Vec<(String, elements::Script)> = Vec::with_capacity(count as usize);
-        for idx in 0..count {
-            let definite = ct_desc
-                .at_derivation_index(idx)
-                .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
-            let conf_addr = definite
-                .address(&secp, network.address_params())
-                .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
-            let spk = definite.descriptor.script_pubkey();
-            addr_info.push((conf_addr.to_string(), spk));
-        }
-
-        let rpc = self.rpc.clone();
-        let wallet = daemon_wallet.to_string();
-        let (utxos, txs) =
-            tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
-                let utxos = rpc.list_unspent(&wallet)?;
-                let txs = rpc.list_transactions(&wallet)?;
-                Ok((utxos, txs))
-            })
-            .await
-            .expect("spawn_blocking join")?;
-
-        let spk_unspent = build_spk_utxo_map(&utxos);
-        let spk_received = build_spk_received_map(&txs);
-
-        let results = addr_info
-            .into_iter()
-            .enumerate()
-            .map(|(i, (conf_addr, spk))| {
-                let unspent = spk_unspent.get(&spk).copied().unwrap_or(0.0);
-                let received = spk_received.get(&spk).copied().unwrap_or(0.0);
-                ElementsRevealedAddress {
-                    index: u32::try_from(i).unwrap_or(0),
-                    address: conf_addr,
-                    received,
-                    unspent,
-                }
-            })
-            .collect();
-        Ok(results)
-    }
-
+    /// Per-address activity from captured (unspent) UTXOs. Spent history is not
+    /// retained in this coarse model, so receipts reflect current holdings.
     pub async fn address_history(
         &self,
         address: &str,
     ) -> Result<ElementsAddressActivity, ElementsWalletError> {
         let target_spk = elements::Address::from_str(address)
             .map(|a| a.script_pubkey())
-            .map_err(|e| ElementsWalletError::Descriptor(format!("invalid address: {e}")))?;
+            .map_err(|e| ElementsWalletError::BadAddress {
+                addr: address.to_string(),
+                reason: e.to_string(),
+            })?;
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        let (url, user, pass) = self.rpc_cfg();
 
-        let rpc = self.rpc.clone();
-        let wallet = self.daemon_wallet_name.clone();
-        let spk = target_spk.clone();
+        tokio::task::spawn_blocking(move || -> Result<ElementsAddressActivity, ElementsWalletError> {
+            let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
+            let tip = chain.tip_height().map_err(pipeline_err)?;
+            let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
 
-        let (txs, unspent_utxos, tip) =
-            tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
-                let txs = rpc.list_transactions(&wallet)?;
-                let utxos = rpc.list_unspent(&wallet)?;
-                let tip = rpc.get_block_count()?;
-
-                let addr_matches = |addr_str: &str| -> bool {
-                    elements::Address::from_str(addr_str)
-                        .ok()
-                        .is_some_and(|a| a.script_pubkey() == spk)
-                };
-
-                let matched_txs: Vec<_> = txs
-                    .into_iter()
-                    .filter(|t| t.address.as_deref().is_some_and(addr_matches))
-                    .collect();
-
-                let matched_utxos: Vec<_> = utxos
-                    .into_iter()
-                    .filter(|u| u.address.as_deref().is_some_and(addr_matches))
-                    .collect();
-
-                Ok((matched_txs, matched_utxos, tip))
+            let mut unspent = 0u64;
+            let mut receipts = Vec::new();
+            for u in utxos.iter().filter(|u| *u.script_pubkey() == target_spk) {
+                unspent += u.value();
+                let confs = tip.saturating_sub(u.height).saturating_add(1);
+                #[allow(clippy::cast_precision_loss)]
+                let amount = u.value() as f64 / 100_000_000.0;
+                receipts.push(ElementsAddressReceipt {
+                    txid: u.outpoint.txid.to_string(),
+                    vout: u.outpoint.vout,
+                    amount,
+                    confirmations: confs,
+                    is_spent: false,
+                });
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let unspent_btc = unspent as f64 / 100_000_000.0;
+            Ok(ElementsAddressActivity {
+                tip_height: u64::from(tip),
+                total_received: unspent_btc,
+                unspent: unspent_btc,
+                receipts,
             })
-            .await
-            .expect("spawn_blocking join")?;
-
-        // Total received = sum of positive-amount "receive" transactions.
-        let total_received: f64 = txs
-            .iter()
-            .filter(|t| t.category == "receive")
-            .filter_map(|t| t.amount)
-            .filter(|a| *a > 0.0)
-            .sum();
-
-        // Unspent = sum of current UTXOs at this address (clamped to zero).
-        let unspent: f64 = unspent_utxos
-            .iter()
-            .filter_map(|u| u.amount)
-            .filter(|a| *a > 0.0)
-            .sum();
-
-        // Build receipts from transaction history (shows both spent and unspent).
-        let unspent_set: std::collections::HashSet<(String, u32)> = unspent_utxos
-            .iter()
-            .map(|u| (u.txid.clone(), u.vout))
-            .collect();
-
-        let receipts: Vec<_> = txs
-            .iter()
-            .filter(|t| t.category == "receive")
-            .map(|t| {
-                let vout = t.vout.unwrap_or(0);
-                let is_spent = !unspent_set.contains(&(t.txid.clone(), vout));
-                ElementsAddressReceipt {
-                    txid: t.txid.clone(),
-                    vout,
-                    amount: t.amount.unwrap_or(0.0),
-                    confirmations: u32::try_from(t.confirmations.unwrap_or(0).max(0)).unwrap_or(0),
-                    is_spent,
-                }
-            })
-            .collect();
-
-        Ok(ElementsAddressActivity {
-            tip_height: tip,
-            total_received,
-            unspent,
-            receipts,
         })
+        .await
+        .expect("spawn_blocking join")
     }
 
+    /// Build a spend from captured UTXOs, sign with the HSM federation, and
+    /// broadcast.
     pub async fn build_sign_and_broadcast(
         &self,
         recipient: &str,
@@ -775,91 +609,86 @@ impl UserElementsWallet {
         fee_rate_sat_vb: u64,
         label: Option<String>,
     ) -> Result<ElementsBroadcastTransaction, ElementsWalletError> {
-        // sat/vB → BTC/kB for Elements RPC.
-        #[allow(clippy::cast_precision_loss)]
-        let fee_rate_btc_kb = (fee_rate_sat_vb as f64) * 1000.0 / 100_000_000.0;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let amount_sat = (amount_btc * 100_000_000.0).round() as u64;
+        // sat/vB → sat/kvB for LWK's TxBuilder.
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        let fee_rate_kvb = (fee_rate_sat_vb as f64 * 1000.0) as f32;
 
-        let rpc = self.rpc.clone();
-        let wallet = self.daemon_wallet_name.clone();
-        let recipient_owned = recipient.to_string();
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        let (url, user, pass) = self.rpc_cfg();
+        let desc = self.descriptor.clone();
+        let mbk = self.mbk;
+        let net = self.network;
+        let lwk = self.lwk_net;
         let signers: Vec<_> = self.signers.iter().cloned().collect();
-        let mbk_bytes = derive_master_blinding_key(self.user_id, self.account_idx);
+        let recipient_owned = recipient.to_string();
 
-        let result = tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
-            // Step 1: Build unsigned PSET via Elements daemon (UTXO selection).
-            let outputs = vec![serde_json::json!({ recipient_owned.clone(): amount_btc })];
-            let funded = rpc.wallet_create_funded_psbt(&wallet, &outputs, fee_rate_btc_kb)?;
-
-            // Step 2: Decode and wrap as UnsignedPset.
-            let pset_bytes = BASE64
-                .decode(funded.psbt.as_bytes())
-                .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
-            let pset: Pset = consensus_deserialize(&pset_bytes)
-                .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
-            let unsigned = asterism_elements::UnsignedPset::new(pset)
-                .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
-
-            // Step 3: Blind using the library (replaces walletprocesspsbt RPC).
-            // The PSET's witness_utxo may lack range proofs for confidential
-            // inputs (Elements Core strips them in walletcreatefundedpsbt).
-            // For those inputs, fetch the full previous transaction to get
-            // the complete output with range proof for unblinding.
-            let mbk = MasterBlindingKey::from(mbk_bytes);
-            let inp_secrets =
-                derive_input_secrets_with_rpc(unsigned.as_pset(), &mbk, &rpc, &wallet)?;
-            let blinded = asterism_elements::blind_pset(unsigned, &inp_secrets)
-                .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
-
-            // Step 4: Sign with all HSMs.
-            let mut pset = blinded.into_pset();
-            let mut total_signed = 0usize;
-            for signer in &signers {
-                let n = signer
-                    .sign_pset(&mut pset)
-                    .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
-                total_signed += n;
-            }
-            tracing::debug!(total_signed, "PSET signed by HSM federation");
-
-            // Step 5: Finalize using the library (replaces finalizepsbt RPC).
-            asterism_elements::finalize_p2wsh_pset(&mut pset)
-                .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
-            let tx = pset
-                .extract_tx()
-                .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
-            let raw_hex = {
-                let bytes = consensus_serialize(&tx);
-                let mut hex = String::with_capacity(bytes.len() * 2);
-                for b in &bytes {
-                    use std::fmt::Write;
-                    let _ = write!(hex, "{b:02x}");
+        let (txid, fee_sat) =
+            tokio::task::spawn_blocking(move || -> Result<(String, i64), ElementsWalletError> {
+                let wollet = ElementsWollet::from_descriptor_str(&desc, mbk, net, lwk)
+                    .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+                let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
+                if utxos.is_empty() {
+                    return Err(ElementsWalletError::BuildPset("no spendable UTXOs".into()));
                 }
-                hex
-            };
+                let recipient_addr = elements::Address::from_str(&recipient_owned).map_err(|e| {
+                    ElementsWalletError::BadAddress {
+                        addr: recipient_owned.clone(),
+                        reason: e.to_string(),
+                    }
+                })?;
 
-            // Step 6: Broadcast.
-            let txid = rpc.send_raw_transaction(&raw_hex)?;
-            #[allow(clippy::cast_possible_truncation)]
-            let fee_sat = (funded.fee * 100_000_000.0).round() as i64;
-            #[allow(clippy::cast_possible_truncation)]
-            let amount_sat = (amount_btc * 100_000_000.0).round() as i64;
+                let blinded =
+                    build_spend_pset(&wollet, &utxos, &recipient_addr, amount_sat, fee_rate_kvb)
+                        .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
+                let mut pset = blinded.into_pset();
 
-            Ok((txid, recipient_owned, amount_sat, fee_sat, raw_hex))
-        })
-        .await
-        .expect("spawn_blocking join")?;
+                let mut total_signed = 0usize;
+                for signer in &signers {
+                    total_signed += signer
+                        .sign_pset(&mut pset)
+                        .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
+                }
+                tracing::debug!(total_signed, "PSET signed by HSM federation");
 
-        let (txid, recipient_str, amount_sat, fee_sat, raw_hex) = result;
+                finalize_p2wsh_pset(&mut pset)
+                    .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
+                let tx = pset
+                    .extract_tx()
+                    .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
+
+                // Fee = the explicit fee output (empty scriptPubKey) value.
+                let fee_sat = tx
+                    .output
+                    .iter()
+                    .find(|o| o.script_pubkey.is_empty())
+                    .and_then(|o| o.value.explicit())
+                    .and_then(|v| i64::try_from(v).ok())
+                    .unwrap_or(0);
+
+                let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
+                let txid = chain
+                    .broadcast(&tx)
+                    .map_err(|e| ElementsWalletError::BroadcastRejected(e.to_string()))?;
+                Ok((txid.to_string(), fee_sat))
+            })
+            .await
+            .expect("spawn_blocking join")?;
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let amount_sat_i = (amount_btc * 100_000_000.0).round() as i64;
 
         db::insert_elements_transaction(
             &self.pool,
             &db::NewElementsTransaction {
                 wallet_id: self.wallet_id,
                 txid: &txid,
-                recipient: &recipient_str,
-                amount_sat,
+                recipient,
+                amount_sat: amount_sat_i,
                 fee_sat,
-                raw_tx_hex: &raw_hex,
+                raw_tx_hex: "",
                 label: label.as_deref(),
             },
         )
@@ -867,98 +696,90 @@ impl UserElementsWallet {
 
         Ok(ElementsBroadcastTransaction {
             txid,
-            recipient: recipient_str,
-            amount_sat,
+            recipient: recipient.to_string(),
+            amount_sat: amount_sat_i,
             fee_sat,
         })
     }
 
+    /// Sweep all captured UTXOs to `recipient` (drains the wallet).
     pub async fn sweep_to(
         &self,
         recipient: &str,
         fee_rate_sat_vb: u64,
         label: Option<String>,
     ) -> Result<ElementsBroadcastTransaction, ElementsWalletError> {
-        #[allow(clippy::cast_precision_loss)]
-        let fee_rate_btc_kb = (fee_rate_sat_vb as f64) * 1000.0 / 100_000_000.0;
-
-        let rpc = self.rpc.clone();
-        let wallet = self.daemon_wallet_name.clone();
-        let recipient_owned = recipient.to_string();
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        let fee_rate_kvb = (fee_rate_sat_vb as f64 * 1000.0) as f32;
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        let (url, user, pass) = self.rpc_cfg();
+        let desc = self.descriptor.clone();
+        let mbk = self.mbk;
+        let net = self.network;
+        let lwk = self.lwk_net;
         let signers: Vec<_> = self.signers.iter().cloned().collect();
-        let mbk_bytes = derive_master_blinding_key(self.user_id, self.account_idx);
+        let recipient_owned = recipient.to_string();
 
-        let result = tokio::task::spawn_blocking(move || -> Result<_, ElementsWalletError> {
-            let balances = rpc.get_balances(&wallet)?;
-            let total_btc = balances.trusted + balances.untrusted_pending;
-            if total_btc <= 0.0 {
-                return Err(ElementsWalletError::BuildPset(
-                    "no balance to sweep".into(),
-                ));
-            }
-
-            let outputs = vec![serde_json::json!({ recipient_owned.clone(): total_btc })];
-            let funded =
-                rpc.wallet_create_funded_psbt_drain(&wallet, &outputs, fee_rate_btc_kb)?;
-
-            let pset_bytes = BASE64
-                .decode(funded.psbt.as_bytes())
-                .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
-            let pset: Pset = consensus_deserialize(&pset_bytes)
-                .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
-            let unsigned = asterism_elements::UnsignedPset::new(pset)
-                .map_err(|e| ElementsWalletError::PsetDecode(e.to_string()))?;
-
-            let mbk = MasterBlindingKey::from(mbk_bytes);
-            let inp_secrets =
-                derive_input_secrets_with_rpc(unsigned.as_pset(), &mbk, &rpc, &wallet)?;
-            let blinded = asterism_elements::blind_pset(unsigned, &inp_secrets)
-                .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
-
-            let mut pset = blinded.into_pset();
-            for signer in &signers {
-                signer
-                    .sign_pset(&mut pset)
-                    .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
-            }
-
-            asterism_elements::finalize_p2wsh_pset(&mut pset)
-                .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
-            let tx = pset
-                .extract_tx()
-                .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
-            let raw_hex = {
-                let bytes = consensus_serialize(&tx);
-                let mut hex = String::with_capacity(bytes.len() * 2);
-                for b in &bytes {
-                    use std::fmt::Write;
-                    let _ = write!(hex, "{b:02x}");
+        let (txid, amount_sat, fee_sat) = tokio::task::spawn_blocking(
+            move || -> Result<(String, i64, i64), ElementsWalletError> {
+                let wollet = ElementsWollet::from_descriptor_str(&desc, mbk, net, lwk)
+                    .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+                let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
+                if utxos.is_empty() {
+                    return Err(ElementsWalletError::BuildPset("no balance to sweep".into()));
                 }
-                hex
-            };
+                let total: u64 = utxos.iter().map(asterism_elements::CapturedUtxo::value).sum();
+                let recipient_addr =
+                    elements::Address::from_str(&recipient_owned).map_err(|e| {
+                        ElementsWalletError::BadAddress {
+                            addr: recipient_owned.clone(),
+                            reason: e.to_string(),
+                        }
+                    })?;
 
-            let txid = rpc.send_raw_transaction(&raw_hex)?;
-            #[allow(clippy::cast_possible_truncation)]
-            let fee_sat = (funded.fee * 100_000_000.0).round() as i64;
-            #[allow(clippy::cast_possible_truncation)]
-            let amount_sat = ((total_btc - funded.fee) * 100_000_000.0).round() as i64;
+                let blinded =
+                    asterism_elements::build_sweep_pset(&wollet, &utxos, &recipient_addr, fee_rate_kvb)
+                        .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
+                let mut pset = blinded.into_pset();
+                for signer in &signers {
+                    signer
+                        .sign_pset(&mut pset)
+                        .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
+                }
+                finalize_p2wsh_pset(&mut pset)
+                    .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
+                let tx = pset
+                    .extract_tx()
+                    .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
+                let fee_sat = tx
+                    .output
+                    .iter()
+                    .find(|o| o.script_pubkey.is_empty())
+                    .and_then(|o| o.value.explicit())
+                    .and_then(|v| i64::try_from(v).ok())
+                    .unwrap_or(0);
+                let amount_sat = i64::try_from(total).unwrap_or(0) - fee_sat;
 
-            Ok((txid, recipient_owned, amount_sat, fee_sat, raw_hex))
-        })
+                let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
+                let txid = chain
+                    .broadcast(&tx)
+                    .map_err(|e| ElementsWalletError::BroadcastRejected(e.to_string()))?;
+                Ok((txid.to_string(), amount_sat, fee_sat))
+            },
+        )
         .await
         .expect("spawn_blocking join")?;
-
-        let (txid, recipient_str, amount_sat, fee_sat, raw_hex) = result;
 
         db::insert_elements_transaction(
             &self.pool,
             &db::NewElementsTransaction {
                 wallet_id: self.wallet_id,
                 txid: &txid,
-                recipient: &recipient_str,
+                recipient,
                 amount_sat,
                 fee_sat,
-                raw_tx_hex: &raw_hex,
+                raw_tx_hex: "",
                 label: label.as_deref(),
             },
         )
@@ -966,136 +787,24 @@ impl UserElementsWallet {
 
         Ok(ElementsBroadcastTransaction {
             txid,
-            recipient: recipient_str,
+            recipient: recipient.to_string(),
             amount_sat,
             fee_sat,
         })
     }
 
-    #[must_use]
-    pub fn daemon_wallet_name(&self) -> &str {
-        &self.daemon_wallet_name
-    }
-
-    /// Sign a PSET using this wallet's PKCS#11 signers.
-    /// Only inputs whose `bip32_derivation` contains a matching fingerprint
-    /// will be signed. Callers should clear `bip32_derivation` on
-    /// non-owned inputs before calling this to prevent cross-signing.
-    pub fn sign_pset_with_signers(&self, pset: &mut Pset) {
+    /// Sign a PSET with this wallet's HSM signers (matching-fingerprint inputs
+    /// only). Used by the federation-migration tooling.
+    pub fn sign_pset_with_signers(&self, pset: &mut elements::pset::PartiallySignedTransaction) {
         for signer in self.signers.iter() {
             let _ = signer.sign_pset(pset);
         }
     }
 }
 
-fn derive_input_secrets_with_rpc(
-    pset: &Pset,
-    master_blinding_key: &MasterBlindingKey,
-    rpc: &ElementsRpc,
-    wallet: &str,
-) -> Result<HashMap<usize, elements::TxOutSecrets>, ElementsWalletError> {
-    use elements::confidential;
-
-    let mut secrets = HashMap::new();
-    for (i, input) in pset.inputs().iter().enumerate() {
-        let utxo = input
-            .witness_utxo
-            .as_ref()
-            .ok_or_else(|| ElementsWalletError::Sign(format!("input {i} missing witness_utxo")))?;
-
-        if let (confidential::Value::Explicit(value), confidential::Asset::Explicit(asset)) =
-            (utxo.value, utxo.asset)
-        {
-            secrets.insert(i, asterism_elements::explicit_txout_secrets(asset, value));
-        } else {
-            let prev_txid = &input.previous_txid;
-            let prev_vout = input.previous_output_index;
-            let raw_hex = rpc
-                .get_wallet_transaction_hex(wallet, &prev_txid.to_string())
-                .map_err(|e| {
-                    ElementsWalletError::Sign(format!("failed to fetch prev tx {prev_txid}: {e}"))
-                })?;
-            let tx_bytes = hex_decode(&raw_hex).map_err(|e| {
-                ElementsWalletError::Sign(format!("bad hex from getrawtransaction: {e}"))
-            })?;
-            let prev_tx: elements::Transaction = consensus_deserialize(&tx_bytes)
-                .map_err(|e| ElementsWalletError::Sign(format!("failed to decode prev tx: {e}")))?;
-            let full_output = &prev_tx.output[prev_vout as usize];
-            let slip77_key = asterism_elements::slip77_blinding_key(
-                master_blinding_key,
-                &full_output.script_pubkey,
-            );
-            // Try SLIP-77 key first; fall back to the daemon's blinding
-            // key for legacy change outputs blinded before we imported
-            // our own keys.
-            let txout_secrets = if let Ok(s) =
-                asterism_elements::unblind_input(full_output, slip77_key)
-            {
-                s
-            } else {
-                let addr = elements::Address::from_script(
-                    &full_output.script_pubkey,
-                    None,
-                    &elements::AddressParams::ELEMENTS,
-                )
-                .ok_or_else(|| {
-                    ElementsWalletError::Sign(format!(
-                        "input {i}: cannot derive address from script_pubkey"
-                    ))
-                })?;
-                let key_hex = rpc
-                    .dump_blinding_key(wallet, &addr.to_string())
-                    .map_err(|e| {
-                        ElementsWalletError::Sign(format!("input {i}: dumpblindingkey failed: {e}"))
-                    })?;
-                let key_bytes = hex_decode(&key_hex).map_err(|e| {
-                    ElementsWalletError::Sign(format!("input {i}: bad blinding key hex: {e}"))
-                })?;
-                let daemon_key = elements::secp256k1_zkp::SecretKey::from_slice(&key_bytes)
-                    .map_err(|e| {
-                        ElementsWalletError::Sign(format!("input {i}: invalid blinding key: {e}"))
-                    })?;
-                asterism_elements::unblind_input(full_output, daemon_key)
-                    .map_err(|e| ElementsWalletError::Sign(e.to_string()))?
-            };
-            secrets.insert(i, txout_secrets);
-        }
-    }
-    Ok(secrets)
-}
-
-fn build_spk_utxo_map(utxos: &[ElementsUtxo]) -> HashMap<elements::Script, f64> {
-    let mut map: HashMap<elements::Script, f64> = HashMap::new();
-    for utxo in utxos {
-        if let Some(addr_str) = utxo.address.as_deref() {
-            let amount = utxo.amount.unwrap_or(0.0);
-            if let Ok(addr) = elements::Address::from_str(addr_str) {
-                let spk = addr.script_pubkey();
-                *map.entry(spk).or_insert(0.0) += amount;
-            }
-        }
-    }
-    map
-}
-
-fn build_spk_received_map(
-    txs: &[crate::elements_rpc::WalletTransaction],
-) -> HashMap<elements::Script, f64> {
-    let mut map: HashMap<elements::Script, f64> = HashMap::new();
-    for tx in txs {
-        if tx.category != "receive" {
-            continue;
-        }
-        if let Some(addr_str) = tx.address.as_deref() {
-            let amount = tx.amount.unwrap_or(0.0);
-            if let Ok(addr) = elements::Address::from_str(addr_str) {
-                let spk = addr.script_pubkey();
-                *map.entry(spk).or_insert(0.0) += amount;
-            }
-        }
-    }
-    map
-}
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
 
 fn derive_master_blinding_key(user_id: Uuid, account_idx: i32) -> [u8; 32] {
     use std::collections::hash_map::DefaultHasher;
@@ -1117,26 +826,6 @@ fn derive_master_blinding_key(user_id: Uuid, account_idx: i32) -> [u8; 32] {
     key
 }
 
-/// Extract the inner `wsh(sortedmulti(...))` descriptor from a
-/// `ct(slip77(...), elwsh(sortedmulti(...)))` string.
-///
-/// Elements Core RPC only understands standard Bitcoin descriptor types
-/// (`wsh`, `wpkh`, etc.), not the `ct()`/`elwsh()` extensions from
-/// `elements-miniscript`. We strip the CT wrapper and replace `elwsh`
-/// with `wsh` so the descriptor can be imported via `importdescriptors`.
-fn extract_inner_wsh(ct_desc: &str) -> Option<String> {
-    // Strip any trailing #checksum
-    let body = ct_desc.split_once('#').map_or(ct_desc, |(b, _)| b);
-
-    // Find the inner "elwsh(" or "wsh(" after "ct(slip77(...),"
-    let inner_start = body.find("elwsh(").or_else(|| body.find("wsh("))?;
-    // The inner descriptor runs to the matching close of the ct() wrapper,
-    // which is the last ')' minus one (the ct close paren).
-    let inner = &body[inner_start..body.len() - 1]; // strip trailing ')'
-    // Replace elwsh → wsh for Elements Core compatibility.
-    Some(inner.replace("elwsh(", "wsh("))
-}
-
 fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -1144,14 +833,4 @@ fn hex_encode(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
-}
-
-fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
-    if !s.len().is_multiple_of(2) {
-        return Err("odd-length hex string".into());
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
-        .collect()
 }
