@@ -630,8 +630,8 @@ impl UserElementsWallet {
         let signers: Vec<_> = self.signers.iter().cloned().collect();
         let recipient_owned = recipient.to_string();
 
-        let (txid, fee_sat) =
-            tokio::task::spawn_blocking(move || -> Result<(String, i64), ElementsWalletError> {
+        let (txid, fee_sat, raw_hex) =
+            tokio::task::spawn_blocking(move || -> Result<(String, i64, String), ElementsWalletError> {
                 let wollet = ElementsWollet::from_descriptor_str(&desc, mbk, net, lwk)
                     .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
                 let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
@@ -674,11 +674,12 @@ impl UserElementsWallet {
                     .and_then(|v| i64::try_from(v).ok())
                     .unwrap_or(0);
 
+                let raw_hex = elements::encode::serialize_hex(&tx);
                 let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
                 let txid = chain
                     .broadcast(&tx)
                     .map_err(|e| ElementsWalletError::BroadcastRejected(e.to_string()))?;
-                Ok((txid.to_string(), fee_sat))
+                Ok((txid.to_string(), fee_sat, raw_hex))
             })
             .await
             .expect("spawn_blocking join")?;
@@ -694,7 +695,7 @@ impl UserElementsWallet {
                 recipient,
                 amount_sat: amount_sat_i,
                 fee_sat,
-                raw_tx_hex: "",
+                raw_tx_hex: &raw_hex,
                 label: label.as_deref(),
             },
         )
@@ -727,8 +728,8 @@ impl UserElementsWallet {
         let signers: Vec<_> = self.signers.iter().cloned().collect();
         let recipient_owned = recipient.to_string();
 
-        let (txid, amount_sat, fee_sat) = tokio::task::spawn_blocking(
-            move || -> Result<(String, i64, i64), ElementsWalletError> {
+        let (txid, amount_sat, fee_sat, raw_hex) = tokio::task::spawn_blocking(
+            move || -> Result<(String, i64, i64, String), ElementsWalletError> {
                 let wollet = ElementsWollet::from_descriptor_str(&desc, mbk, net, lwk)
                     .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
                 let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
@@ -774,11 +775,12 @@ impl UserElementsWallet {
                     .unwrap_or(0);
                 let amount_sat = i64::try_from(total).unwrap_or(0) - fee_sat;
 
+                let raw_hex = elements::encode::serialize_hex(&tx);
                 let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
                 let txid = chain
                     .broadcast(&tx)
                     .map_err(|e| ElementsWalletError::BroadcastRejected(e.to_string()))?;
-                Ok((txid.to_string(), amount_sat, fee_sat))
+                Ok((txid.to_string(), amount_sat, fee_sat, raw_hex))
             },
         )
         .await
@@ -792,7 +794,7 @@ impl UserElementsWallet {
                 recipient,
                 amount_sat,
                 fee_sat,
-                raw_tx_hex: "",
+                raw_tx_hex: &raw_hex,
                 label: label.as_deref(),
             },
         )
