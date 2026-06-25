@@ -14,6 +14,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod elements_rpc;
+pub mod elements_sync;
 pub mod elements_wallet;
 pub mod error;
 pub mod handlers;
