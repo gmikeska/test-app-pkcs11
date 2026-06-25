@@ -420,23 +420,18 @@ fn display_sweep_plan(
 
     let total = plan.sweep_transactions.len();
     for (i, tx) in plan.sweep_transactions.iter().enumerate() {
-        let est_fee = cli_estimate_fee(tx.source_utxos.len(), tx.destinations.len(), fee_rate);
-        let is_last = i + 1 == total;
+        let est_fee = cli_estimate_fee(tx.source_utxos.len(), tx.outputs.len(), fee_rate);
 
-        // Identify which accounts are in this transaction by matching destinations.
+        // Identify which accounts are in this transaction from the output markers.
         let mut matched_indices: Vec<i32> = Vec::new();
-        for (dest_addr, _) in &tx.destinations {
-            let addr_str = dest_addr.to_string();
-            for acct in accounts {
-                if acct.destination_address.as_deref() == Some(&addr_str)
-                    && !matched_indices.contains(&acct.account_idx)
-                {
-                    matched_indices.push(acct.account_idx);
-                }
+        for o in &tx.outputs {
+            let idx = o.account_idx() as i32;
+            if !matched_indices.contains(&idx) {
+                matched_indices.push(idx);
             }
         }
 
-        let is_fee_tx = is_last
+        let is_fee_tx = tx.is_fee_final
             && fee_account_idx.is_some()
             && matched_indices.len() == 1
             && matched_indices[0] == fee_account_idx.unwrap() as i32;
@@ -465,7 +460,7 @@ fn display_sweep_plan(
             i + 1,
             label,
             tx.source_utxos.len(),
-            tx.destinations.len(),
+            tx.outputs.len(),
             est_fee.to_sat(),
         );
     }
@@ -1905,21 +1900,8 @@ async fn main() {
 
     // New federation descriptor strings per account — needed to build temp
     // wallets that can produce PSBT inputs for chained outputs.
-    let mut new_fed_descriptors: std::collections::HashMap<u32, String> =
-        std::collections::HashMap::new();
-
     if sweep_only {
         println!("\n  --sweep-only: skipping Step 1 (federation change already recorded).");
-        for wallet in &user_wallets {
-            let acct_idx = wallet.account_idx() as u32;
-            if let Ok(versions) =
-                db::list_federation_versions_for_wallet(&pool, wallet.wallet_id()).await
-            {
-                if let Some(latest) = versions.last() {
-                    new_fed_descriptors.insert(acct_idx, latest.descriptor.clone());
-                }
-            }
-        }
     } else {
         if !confirm("Step 1/3: Apply this federation change to all accounts?") {
             println!("Aborted.");
@@ -2031,8 +2013,6 @@ async fn main() {
                 eprintln!("warning: failed to update migration status for account {acct_idx}: {e}");
             }
 
-            new_fed_descriptors.insert(acct_idx, descriptor_str.clone());
-
             println!(
                 "  Account {acct_idx}: federation v{new_version_index} created ({}-of-{})",
                 cfg.federation.threshold,
@@ -2086,9 +2066,47 @@ async fn main() {
         .get(&fee_acct_idx)
         .expect("fee account exists");
 
+    // Fee-change routing (decision (b), matching Elements): intermediate fee
+    // change stays at the fee account's OLD-federation address — old-fed-signed,
+    // identical to the original fee UTXO — and only the final fee-account tx
+    // crosses to the new federation. Resolve both addresses up front, plus the
+    // old descriptor used to rebuild the chained PSBT input.
+    //
+    // The OLD federation is the version *before* the newest: `load_wallet_from_row`
+    // always seeds a v0 row, and Step 1 appends the new version, so the
+    // second-to-last version is the fund-holding old federation.
+    let fee_old_descriptor: String = {
+        let versions =
+            db::list_federation_versions_for_wallet(&pool, user_wallets[fee_wallet_idx].wallet_id())
+                .await
+                .unwrap_or_default();
+        if versions.len() < 2 {
+            eprintln!(
+                "error: fee account {fee_acct_idx} has no prior (old) federation version to \
+                 source intermediate fee-change from"
+            );
+            std::process::exit(1);
+        }
+        versions[versions.len() - 2].descriptor.clone()
+    };
+    let fee_old_addr: bitcoin::Address = {
+        let desc: bdk_wallet::miniscript::Descriptor<bdk_wallet::miniscript::DescriptorPublicKey> =
+            fee_old_descriptor.parse().expect("valid old fee descriptor");
+        let mut tw = bdk_wallet::Wallet::create_from_two_path_descriptor(desc)
+            .network(app_config.network)
+            .create_wallet_no_persist()
+            .expect("valid temp wallet from old fee descriptor");
+        tw.reveal_next_address(bdk_wallet::KeychainKind::External).address
+    };
+    let fee_new_dest: bitcoin::Address = account_utxo_sets
+        .iter()
+        .find(|a| a.account_idx == fee_acct_idx)
+        .map(|a| a.destination_address.clone())
+        .expect("fee account present in account set");
+
     // Chained fee-change data from the previous broadcast: outpoint +
     // pre-built PSBT input (because the UserWallet's version_wallets were
-    // loaded before Step 1 and don't include the new federation).
+    // loaded before Step 1 and don't include the chained, unconfirmed change).
     let mut fee_change_data: Option<(bitcoin::OutPoint, bitcoin::psbt::Input, bitcoin::Weight)> =
         None;
 
@@ -2185,22 +2203,23 @@ async fn main() {
             // Only use manually selected UTXOs — don't let BDK pick extras.
             builder.manually_selected_only();
 
-            // Add explicit outputs for each destination.
-            // The fee account's destination gets drain_to (absorbs the fee).
-            let fee_dest_idx = sweep_tx.destinations.iter().position(|(addr, _)| {
-                account_utxo_sets
-                    .iter()
-                    .find(|a| a.account_idx == fee_acct_idx)
-                    .is_some_and(|a| a.destination_address == *addr)
-            });
-
-            for (i, (addr, amount)) in sweep_tx.destinations.iter().enumerate() {
-                if Some(i) == fee_dest_idx {
-                    // Fee account output: use drain_to so it absorbs the mining fee.
-                    builder.drain_to(addr.script_pubkey());
-                } else {
-                    // Customer output: exact amount, no fee deduction.
-                    builder.add_recipient(addr.script_pubkey(), *amount);
+            // Add outputs from the plan markers. Customers get an exact
+            // recipient; the fee-change output uses drain_to (absorbs the fee)
+            // routed to the fee account's OLD-fed address on intermediate hops
+            // and its NEW-fed address only on the final fee-account tx.
+            for output in &sweep_tx.outputs {
+                match output {
+                    asterism_core::SweepOutput::Customer { address, amount, .. } => {
+                        builder.add_recipient(address.script_pubkey(), *amount);
+                    }
+                    asterism_core::SweepOutput::FeeChange { .. } => {
+                        let dest = if sweep_tx.is_fee_final {
+                            &fee_new_dest
+                        } else {
+                            &fee_old_addr
+                        };
+                        builder.drain_to(dest.script_pubkey());
+                    }
                 }
             }
 
@@ -2279,20 +2298,12 @@ async fn main() {
         .await
         {
             Ok(Ok(broadcast_txid)) => {
-                // Report per-output amounts.
-                let mut output_summary = Vec::new();
-                for (addr, amount) in &sweep_tx.destinations {
-                    let acct = account_utxo_sets
-                        .iter()
-                        .find(|a| a.destination_address == *addr);
-                    if let Some(a) = acct {
-                        output_summary.push(format!(
-                            "account {}: {} sat",
-                            a.account_idx,
-                            amount.to_sat()
-                        ));
-                    }
-                }
+                // Report per-output amounts from the plan markers.
+                let output_summary: Vec<String> = sweep_tx
+                    .outputs
+                    .iter()
+                    .map(|o| format!("account {}: {} sat", o.account_idx(), o.amount().to_sat()))
+                    .collect();
                 println!(
                     "    Broadcast: txid {broadcast_txid}\n    Outputs: {}",
                     output_summary.join(", ")
@@ -2308,90 +2319,94 @@ async fn main() {
             }
         }
 
-        // Build PSBT input data for the fee account's change output so
-        // the next transaction can spend it without a full wallet sync.
-        // The UserWallet's version_wallets were loaded before Step 1 and
-        // don't include the new federation, so we use a temp wallet built
-        // from the stored descriptor instead.
-        let fee_dest_script = account_utxo_sets
-            .iter()
-            .find(|a| a.account_idx == fee_acct_idx)
-            .map(|a| a.destination_address.script_pubkey());
-        if let Some(ref fee_script) = fee_dest_script {
+        // Build PSBT input data for the fee account's change output so the next
+        // transaction can spend it without a full wallet sync. Intermediate fee
+        // change lands at the fee account's OLD-fed address and must be rebuilt
+        // from the OLD descriptor (decision (b)) — so it stays old-fed-signed.
+        // The final fee-account tx has no successor, so skip capture there.
+        if !sweep_tx.is_fee_final {
+            let fee_script = fee_old_addr.script_pubkey();
             for (vout, output) in tx.output.iter().enumerate() {
-                if output.script_pubkey == *fee_script {
+                if output.script_pubkey == fee_script {
                     let change_op = bitcoin::OutPoint {
                         txid,
                         vout: vout as u32,
                     };
-                    // Build the PSBT input via a temp wallet with the new
-                    // federation's descriptor.
-                    if let Some(desc_str) = new_fed_descriptors.get(&fee_acct_idx) {
-                        let desc: bdk_wallet::miniscript::Descriptor<
-                            bdk_wallet::miniscript::DescriptorPublicKey,
-                        > = desc_str.parse().expect("valid descriptor");
-                        let mut temp_wallet =
-                            bdk_wallet::Wallet::create_from_two_path_descriptor(desc)
-                                .network(app_config.network)
-                                .create_wallet_no_persist()
-                                .expect("valid temp wallet");
-                        // Reveal at least one address so the script index
-                        // recognises index 0.
-                        let _ = temp_wallet.reveal_next_address(bdk_wallet::KeychainKind::External);
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-                        temp_wallet.apply_unconfirmed_txs(vec![(tx.clone(), now)]);
-                        if let Some(local) = temp_wallet.get_utxo(change_op) {
-                            let satisfaction_weight = bitcoin::Weight::from_witness_data_size(260);
-                            match temp_wallet.get_psbt_input(local, None, false) {
-                                Ok(psbt_input) => {
-                                    fee_change_data =
-                                        Some((change_op, psbt_input, satisfaction_weight));
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "warning: could not build PSBT input for \
-                                         fee change {change_op}: {e}"
-                                    );
-                                }
+                    // Build the PSBT input via a temp wallet on the fee
+                    // account's OLD descriptor; the chained change is an
+                    // unconfirmed output the fee wallet never synced, so apply
+                    // the just-broadcast tx to a throwaway wallet to spend it.
+                    let desc: bdk_wallet::miniscript::Descriptor<
+                        bdk_wallet::miniscript::DescriptorPublicKey,
+                    > = fee_old_descriptor.parse().expect("valid old fee descriptor");
+                    let mut temp_wallet = bdk_wallet::Wallet::create_from_two_path_descriptor(desc)
+                        .network(app_config.network)
+                        .create_wallet_no_persist()
+                        .expect("valid temp wallet");
+                    // Reveal at least one address so the script index
+                    // recognises index 0.
+                    let _ = temp_wallet.reveal_next_address(bdk_wallet::KeychainKind::External);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    temp_wallet.apply_unconfirmed_txs(vec![(tx.clone(), now)]);
+                    if let Some(local) = temp_wallet.get_utxo(change_op) {
+                        let satisfaction_weight = bitcoin::Weight::from_witness_data_size(260);
+                        match temp_wallet.get_psbt_input(local, None, false) {
+                            Ok(psbt_input) => {
+                                fee_change_data =
+                                    Some((change_op, psbt_input, satisfaction_weight));
                             }
-                        } else {
-                            eprintln!(
-                                "warning: fee change {change_op} not found in \
-                                 temp wallet after insert"
-                            );
+                            Err(e) => {
+                                eprintln!(
+                                    "warning: could not build PSBT input for \
+                                     fee change {change_op}: {e}"
+                                );
+                            }
                         }
+                    } else {
+                        eprintln!(
+                            "warning: fee change {change_op} not found in \
+                             temp wallet after insert"
+                        );
                     }
                     break;
                 }
             }
         }
 
-        // Record the transaction for each involved account.
+        // Record the transaction for each involved account, attributing by the
+        // output's account index (the fee account's address now varies per tx:
+        // old-fed for intermediate hops, new-fed for the final tx).
         let raw_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(raw.as_slice());
-        for (addr, amount) in &sweep_tx.destinations {
-            let acct = account_utxo_sets
-                .iter()
-                .find(|a| a.destination_address == *addr);
-            if let Some(a) = acct {
-                if let Some(&wi) = wallet_by_acct.get(&a.account_idx) {
-                    let wallet = &user_wallets[wi];
-                    let _ = db::insert_transaction(
-                        wallet.pool(),
-                        &db::NewTransaction {
-                            wallet_id: wallet.wallet_id(),
-                            txid: &txid.to_string(),
-                            recipient: &addr.to_string(),
-                            amount_sat: i64::try_from(amount.to_sat()).unwrap_or(i64::MAX),
-                            fee_sat: 0, // fee attributed to fee account only
-                            raw_tx_hex: &raw_hex,
-                            label: Some(&format!("federation-migration-account-{}", a.account_idx)),
-                        },
-                    )
-                    .await;
+        for output in &sweep_tx.outputs {
+            let out_acct = output.account_idx();
+            let recipient = match output {
+                asterism_core::SweepOutput::Customer { address, .. } => address.to_string(),
+                asterism_core::SweepOutput::FeeChange { .. } => {
+                    if sweep_tx.is_fee_final {
+                        fee_new_dest.to_string()
+                    } else {
+                        fee_old_addr.to_string()
+                    }
                 }
+            };
+            if let Some(&wi) = wallet_by_acct.get(&out_acct) {
+                let wallet = &user_wallets[wi];
+                let _ = db::insert_transaction(
+                    wallet.pool(),
+                    &db::NewTransaction {
+                        wallet_id: wallet.wallet_id(),
+                        txid: &txid.to_string(),
+                        recipient: &recipient,
+                        amount_sat: i64::try_from(output.amount().to_sat()).unwrap_or(i64::MAX),
+                        fee_sat: 0, // fee attributed to fee account only
+                        raw_tx_hex: &raw_hex,
+                        label: Some(&format!("federation-migration-account-{out_acct}")),
+                    },
+                )
+                .await;
             }
         }
     }
