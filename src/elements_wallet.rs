@@ -520,71 +520,116 @@ impl UserElementsWallet {
         count: u32,
         chain_kind: KeychainKind,
     ) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
+        self.derive_addresses_for_descriptor(count, chain_kind, self.descriptor.clone(), self.mbk)
+            .await
+    }
+
+    /// Derive `count` addresses on `chain_kind` for an arbitrary descriptor
+    /// (any federation version), annotated with each address's unspent balance
+    /// from the captured-UTXO store. Address derivation uses the descriptor's
+    /// embedded SLIP-77 key, so `mbk` need only be valid 32 bytes.
+    async fn derive_addresses_for_descriptor(
+        &self,
+        count: u32,
+        chain_kind: KeychainKind,
+        descriptor: String,
+        mbk: [u8; 32],
+    ) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
         if count == 0 {
             return Ok(Vec::new());
         }
         let store = PgWalletUtxoStore::new(self.pool.clone());
         let wid = self.wallet_key();
-        // `ElementsWollet` isn't `Send`; build it inside the blocking task.
-        let desc = self.descriptor.clone();
-        let mbk = self.mbk;
         let net = self.network;
         let lwk = self.lwk_net;
 
         tokio::task::spawn_blocking(
             move || -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
-                let wollet = ElementsWollet::from_descriptor_str(&desc, mbk, net, lwk)
-                    .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
-                let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
-
-                let mut unspent_by_spk: HashMap<elements::Script, u64> = HashMap::new();
-                for u in &utxos {
-                    *unspent_by_spk.entry(u.script_pubkey().clone()).or_default() += u.value();
-                }
-
-                let mut out = Vec::with_capacity(count as usize);
-                for i in 0..count {
-                    let addr = wollet
-                        .address(chain_kind, i)
-                        .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
-                    let spk = addr.script_pubkey();
-                    #[allow(clippy::cast_precision_loss)]
-                    let unspent =
-                        unspent_by_spk.get(&spk).copied().unwrap_or(0) as f64 / 100_000_000.0;
-                    out.push(ElementsRevealedAddress {
-                        index: i,
-                        address: addr.to_string(),
-                        received: unspent,
-                        unspent,
-                    });
-                }
-                Ok(out)
+                let utxos = store.list_for_wallet(wid).map_err(pipeline_err)?;
+                let (received, unspent) = balances_by_spk(&utxos);
+                derive_with_balances(
+                    &descriptor, mbk, net, lwk, count, chain_kind, &received, &unspent,
+                )
             },
         )
         .await
         .expect("spawn_blocking join")
     }
 
-    /// Single-version view (federation migration is a separate phase).
+    /// Receive addresses grouped by federation version (newest last), each with
+    /// per-address unspent balances — this is what drives the multi-federation
+    /// tabs on the receive page. Returns `(version_index, wallet_handle, addrs)`.
     pub async fn reveal_addresses_all_versions(
         &self,
         count: u32,
     ) -> Result<Vec<(usize, String, Vec<ElementsRevealedAddress>)>, ElementsWalletError> {
-        let addrs = self.reveal_addresses(count).await?;
-        Ok(vec![(0, self.daemon_wallet_name.clone(), addrs)])
+        let versions =
+            db::list_federation_versions_for_elements_wallet(&self.pool, self.wallet_id).await?;
+        if versions.is_empty() {
+            let addrs = self.reveal_addresses(count).await?;
+            return Ok(vec![(0, self.daemon_wallet_name.clone(), addrs)]);
+        }
+
+        // (version_index, wallet_handle, descriptor, mbk)
+        let specs: Vec<(usize, String, String, [u8; 32])> = versions
+            .iter()
+            .map(|v| {
+                let mbk = v
+                    .blinding_key
+                    .as_deref()
+                    .and_then(parse_mbk_hex)
+                    .unwrap_or(self.mbk);
+                (
+                    usize::try_from(v.version_index).unwrap_or(0),
+                    v.wallet_handle.clone(),
+                    v.descriptor.clone(),
+                    mbk,
+                )
+            })
+            .collect();
+
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        let net = self.network;
+        let lwk = self.lwk_net;
+        tokio::task::spawn_blocking(
+            move || -> Result<Vec<(usize, String, Vec<ElementsRevealedAddress>)>, ElementsWalletError> {
+                let utxos = store.list_for_wallet(wid).map_err(pipeline_err)?;
+                let (received, unspent) = balances_by_spk(&utxos);
+                let mut groups = Vec::with_capacity(specs.len());
+                for (vidx, handle, desc, mbk) in specs {
+                    let addrs = derive_with_balances(
+                        &desc, mbk, net, lwk, count, KeychainKind::External, &received, &unspent,
+                    )?;
+                    groups.push((vidx, handle, addrs));
+                }
+                Ok(groups)
+            },
+        )
+        .await
+        .expect("spawn_blocking join")
     }
 
+    /// Change addresses for a specific federation version's descriptor.
     pub async fn change_addresses_for_version(
         &self,
         count: u32,
-        _descriptor: &str,
+        descriptor: &str,
         _daemon_wallet: &str,
     ) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
-        self.change_addresses(count).await
+        // Address derivation only needs the descriptor's embedded SLIP-77 key.
+        self.derive_addresses_for_descriptor(
+            count,
+            KeychainKind::Internal,
+            descriptor.to_string(),
+            [0u8; 32],
+        )
+        .await
     }
 
-    /// Per-address activity from captured (unspent) UTXOs. Spent history is not
-    /// retained in this coarse model, so receipts reflect current holdings.
+    /// Per-address activity from captured UTXOs (spent and unspent), so
+    /// "total received" reflects history even after the funds were spent (e.g.
+    /// migrated to a new federation).
     pub async fn address_history(
         &self,
         address: &str,
@@ -603,12 +648,16 @@ impl UserElementsWallet {
             move || -> Result<ElementsAddressActivity, ElementsWalletError> {
                 let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
                 let tip = chain.tip_height().map_err(pipeline_err)?;
-                let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
+                let utxos = store.list_for_wallet(wid).map_err(pipeline_err)?;
 
+                let mut received = 0u64;
                 let mut unspent = 0u64;
                 let mut receipts = Vec::new();
                 for u in utxos.iter().filter(|u| *u.script_pubkey() == target_spk) {
-                    unspent += u.value();
+                    received += u.value();
+                    if !u.is_spent {
+                        unspent += u.value();
+                    }
                     let confs = tip.saturating_sub(u.height).saturating_add(1);
                     #[allow(clippy::cast_precision_loss)]
                     let amount = u.value() as f64 / 100_000_000.0;
@@ -617,14 +666,16 @@ impl UserElementsWallet {
                         vout: u.outpoint.vout,
                         amount,
                         confirmations: confs,
-                        is_spent: false,
+                        is_spent: u.is_spent,
                     });
                 }
+                #[allow(clippy::cast_precision_loss)]
+                let received_btc = received as f64 / 100_000_000.0;
                 #[allow(clippy::cast_precision_loss)]
                 let unspent_btc = unspent as f64 / 100_000_000.0;
                 Ok(ElementsAddressActivity {
                     tip_height: u64::from(tip),
-                    total_received: unspent_btc,
+                    total_received: received_btc,
                     unspent: unspent_btc,
                     receipts,
                 })
@@ -905,4 +956,67 @@ fn hex_encode(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+/// Parse a 64-char hex string into a 32-byte SLIP-77 master blinding key.
+fn parse_mbk_hex(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Per-script-pubkey totals across captured UTXOs: `(total_received, unspent)`.
+/// `total_received` includes spent UTXOs (historical), `unspent` excludes them.
+fn balances_by_spk(
+    utxos: &[asterism_elements::CapturedUtxo],
+) -> (HashMap<elements::Script, u64>, HashMap<elements::Script, u64>) {
+    let mut received: HashMap<elements::Script, u64> = HashMap::new();
+    let mut unspent: HashMap<elements::Script, u64> = HashMap::new();
+    for u in utxos {
+        let spk = u.script_pubkey().clone();
+        *received.entry(spk.clone()).or_default() += u.value();
+        if !u.is_spent {
+            *unspent.entry(spk).or_default() += u.value();
+        }
+    }
+    (received, unspent)
+}
+
+/// Derive `count` addresses for a descriptor and annotate each with its
+/// historical received total and current unspent balance (in L-BTC).
+fn derive_with_balances(
+    descriptor: &str,
+    mbk: [u8; 32],
+    net: ElementsNetwork,
+    lwk: LwkNetwork,
+    count: u32,
+    chain_kind: KeychainKind,
+    received: &HashMap<elements::Script, u64>,
+    unspent: &HashMap<elements::Script, u64>,
+) -> Result<Vec<ElementsRevealedAddress>, ElementsWalletError> {
+    let wollet = ElementsWollet::from_descriptor_str(descriptor, mbk, net, lwk)
+        .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+    let mut out = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let addr = wollet
+            .address(chain_kind, i)
+            .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+        let spk = addr.script_pubkey();
+        #[allow(clippy::cast_precision_loss)]
+        let received_btc = received.get(&spk).copied().unwrap_or(0) as f64 / 100_000_000.0;
+        #[allow(clippy::cast_precision_loss)]
+        let unspent_btc = unspent.get(&spk).copied().unwrap_or(0) as f64 / 100_000_000.0;
+        out.push(ElementsRevealedAddress {
+            index: i,
+            address: addr.to_string(),
+            received: received_btc,
+            unspent: unspent_btc,
+        });
+    }
+    Ok(out)
 }

@@ -55,14 +55,42 @@ async fn run_once(
         return Ok(());
     }
 
-    // (wallet_id, descriptor, master_blinding_key_bytes)
+    // (wallet_id, descriptor, master_blinding_key_bytes) — one entry per
+    // federation *version* of each wallet, so funds at any version's addresses
+    // (e.g. the new federation after a migration) are captured under the same
+    // wallet id.
     let mut wallets: Vec<(WalletId, String, [u8; 32])> = Vec::with_capacity(rows.len());
     for row in &rows {
-        let Some(mbk) = parse_mbk(&row.master_blinding_key) else {
-            tracing::warn!(wallet = %row.id, "skipping wallet with malformed blinding key");
+        let wid = wallet_key(row.id);
+        let versions = db::list_federation_versions_for_elements_wallet(pool, row.id)
+            .await
+            .map_err(|e| e.to_string())?;
+        if versions.is_empty() {
+            // No recorded versions — watch the wallet's stored descriptor.
+            if let Some(mbk) = parse_mbk(&row.master_blinding_key) {
+                wallets.push((wid, row.descriptor.clone(), mbk));
+            } else {
+                tracing::warn!(wallet = %row.id, "skipping wallet with malformed blinding key");
+            }
             continue;
-        };
-        wallets.push((wallet_key(row.id), row.descriptor.clone(), mbk));
+        }
+        for v in &versions {
+            // Each version's blinding key (rotation-aware); fall back to the
+            // wallet's stored key if a version row lacks one.
+            let mbk = v
+                .blinding_key
+                .as_deref()
+                .and_then(parse_mbk)
+                .or_else(|| parse_mbk(&row.master_blinding_key));
+            if let Some(mbk) = mbk {
+                wallets.push((wid, v.descriptor.clone(), mbk));
+            } else {
+                tracing::warn!(
+                    wallet = %row.id, version = v.version_index,
+                    "skipping federation version with malformed blinding key"
+                );
+            }
+        }
     }
 
     // Stores capture the runtime Handle here (async context); the engine runs

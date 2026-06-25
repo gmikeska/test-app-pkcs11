@@ -232,6 +232,51 @@ impl PgWalletUtxoStore {
             rt: Handle::current(),
         }
     }
+
+    /// All captured UTXOs for a wallet **including spent ones**, with their real
+    /// `is_spent` flag. Used by the UI to show historical "total received" at an
+    /// address even after the funds have been spent (e.g. post-migration).
+    ///
+    /// # Errors
+    ///
+    /// [`SyncError::Store`] on query failure or [`SyncError::Encoding`] if a row
+    /// cannot be reconstructed.
+    pub fn list_for_wallet(&self, wallet: WalletId) -> Result<Vec<CapturedUtxo>, SyncError> {
+        let rows: Vec<(String, i64, Vec<u8>, String, i16, i64, i64, bool)> = self
+            .rt
+            .block_on(
+                sqlx::query_as(
+                    "SELECT txid, vout, raw_txout, secrets_json, chain, wildcard_index, \
+                            height, is_spent \
+                     FROM elements_utxos WHERE wallet_id = $1",
+                )
+                .bind(wid_to_uuid(wallet))
+                .fetch_all(&self.pool),
+            )
+            .map_err(store_err)?;
+
+        rows.into_iter()
+            .map(
+                |(txid, vout, raw_txout, secrets_json, chain, widx, height, is_spent)| {
+                    let outpoint =
+                        OutPoint::new(Txid::from_str(&txid).map_err(enc_err)?, vout as u32);
+                    let txout: TxOut = deserialize(&raw_txout).map_err(enc_err)?;
+                    let secrets: TxOutSecrets =
+                        serde_json::from_str(&secrets_json).map_err(enc_err)?;
+                    Ok(CapturedUtxo {
+                        wallet_id: wallet,
+                        outpoint,
+                        txout,
+                        secrets,
+                        chain: i16_to_chain(chain),
+                        wildcard_index: widx as u32,
+                        height: height as u32,
+                        is_spent,
+                    })
+                },
+            )
+            .collect()
+    }
 }
 
 impl WalletUtxoStore for PgWalletUtxoStore {
