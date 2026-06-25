@@ -630,8 +630,8 @@ impl UserElementsWallet {
         let signers: Vec<_> = self.signers.iter().cloned().collect();
         let recipient_owned = recipient.to_string();
 
-        let (txid, fee_sat, raw_hex) =
-            tokio::task::spawn_blocking(move || -> Result<(String, i64, String), ElementsWalletError> {
+        let (txid, fee_sat, raw_hex) = tokio::task::spawn_blocking(
+            move || -> Result<(String, i64, String), ElementsWalletError> {
                 let wollet = ElementsWollet::from_descriptor_str(&desc, mbk, net, lwk)
                     .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
                 let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
@@ -680,9 +680,10 @@ impl UserElementsWallet {
                     .broadcast(&tx)
                     .map_err(|e| ElementsWalletError::BroadcastRejected(e.to_string()))?;
                 Ok((txid.to_string(), fee_sat, raw_hex))
-            })
-            .await
-            .expect("spawn_blocking join")?;
+            },
+        )
+        .await
+        .expect("spawn_blocking join")?;
 
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let amount_sat_i = (amount_btc * 100_000_000.0).round() as i64;
