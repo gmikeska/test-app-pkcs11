@@ -8,7 +8,7 @@
     <dd>{{ current.threshold }}-of-{{ current.signer_count }}</dd>
 
     <dt>Version</dt>
-    <dd>{{ current.version_index }} (of {{ version_count }} total)</dd>
+    <dd>v{{ current.version_index + 1 }} (of {{ version_count }} total)</dd>
   </dl>
 
   <h3>Signers</h3>
@@ -40,7 +40,7 @@
     <div class="card {% if v.is_current %}current-version{% endif %}" style="margin-bottom: 0.75rem;">
       <dl class="kv-grid">
         <dt>Version</dt>
-        <dd>{{ v.version_index }}{% if v.is_current %} <span class="badge regtest">current</span>{% endif %}</dd>
+        <dd>v{{ v.version_index + 1 }}{% if v.is_current %} <span class="badge regtest">current</span>{% endif %}</dd>
 
         <dt>Policy</dt>
         <dd>{{ v.threshold }}-of-{{ v.signer_count }}</dd>
