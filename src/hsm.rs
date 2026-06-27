@@ -2,14 +2,14 @@
 //!
 //! ## Token initialization
 //!
-//! At startup, [`HsmFleet::new`] calls [`asterism::dev_signer::init_dev_token`]
+//! At startup, [`HsmFleet::new`] calls [`emvault::dev_signer::init_dev_token`]
 //! for each discovered token. The helper is idempotent — already
 //! initialized tokens are left alone.
 //!
 //! ## Per-signer derivation
 //!
 //! Each customer's BIP-48 federation lives on the same set of tokens, but
-//! at a different *Asterism label*: `signer-{uuid}`. The first time
+//! at a different *EmVault label*: `signer-{uuid}`. The first time
 //! [`HsmFleet::signers_for`] is called for a signer ID, the fleet opens
 //! authenticated sessions and either:
 //!
@@ -19,7 +19,7 @@
 //!    (`Pkcs11Signer::derive_from_seed` with an empty seed — the shim
 //!    looks up the slot's preconfigured BIP-39 mnemonic).
 //!
-//! [`asterism::dev_signer::setup_dev_federation`] would be the obvious
+//! [`emvault::dev_signer::setup_dev_federation`] would be the obvious
 //! shortcut, but it hardcodes `Network::Testnet`. We bypass it so the
 //! signers honour the `BITCOIN_NETWORK` from `.env` (typically
 //! `Network::Regtest`).
@@ -31,9 +31,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use asterism::dev_signer::{DevBackend, DevConfig, init_dev_token};
-use asterism::pkcs11::config::SlotIdentifier;
-use asterism::pkcs11::{Pkcs11Config, Pkcs11Error, Pkcs11Session, Pkcs11Signer};
+use emvault::dev_signer::{DevBackend, DevConfig, init_dev_token};
+use emvault::pkcs11::config::SlotIdentifier;
+use emvault::pkcs11::{Pkcs11Config, Pkcs11Error, Pkcs11Session, Pkcs11Signer};
 use bitcoin::Network;
 use bitcoin::bip32::DerivationPath;
 use tokio::sync::Mutex as AsyncMutex;
@@ -47,9 +47,9 @@ pub enum HsmError {
     /// Token initialization failure (programmatic `pkcs11-tool
     /// --init-token` equivalent).
     #[error("dev token initialization failed: {0}")]
-    InitToken(#[from] asterism::dev_signer::DevSetupError),
+    InitToken(#[from] emvault::dev_signer::DevSetupError),
 
-    /// Underlying [`asterism::pkcs11`] error (session open, key derive,
+    /// Underlying [`emvault::pkcs11`] error (session open, key derive,
     /// xpub read, etc.).
     #[error("PKCS#11 error: {0}")]
     Pkcs11(#[from] Pkcs11Error),
@@ -117,8 +117,8 @@ impl HsmFleet {
         self.network
     }
 
-    /// Build the Asterism-namespace label this fleet uses for `signer_id`.
-    /// Matches the on-token namespace `asterism/v1/{label}/{priv,policy,sigrate}`.
+    /// Build the EmVault-namespace label this fleet uses for `signer_id`.
+    /// Matches the on-token namespace `emvault/v1/{label}/{priv,policy,sigrate}`.
     #[must_use]
     pub fn signer_label(signer_id: Uuid) -> String {
         format!("signer-{signer_id}")
@@ -165,7 +165,7 @@ impl HsmFleet {
         self.cache.lock().await.remove(&signer_id);
     }
 
-    /// Permanently delete every Asterism-namespace object for `signer_id`
+    /// Permanently delete every EmVault-namespace object for `signer_id`
     /// from each token, and evict any cached set.
     ///
     /// Used by tests and by future "reset wallet" flows. Fresh sessions
@@ -257,7 +257,7 @@ fn delete_key_objects(
             Box::new(DevBackend),
         );
         let session = Pkcs11Session::open(&cfg, &SlotIdentifier::label(&token.label), &token.pin)?;
-        asterism::pkcs11::key_ops::delete_key(&session, label)?;
+        emvault::pkcs11::key_ops::delete_key(&session, label)?;
     }
     Ok(())
 }

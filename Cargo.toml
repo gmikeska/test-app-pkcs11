@@ -2,18 +2,18 @@
 name = "test-app-pkcs11"
 version = "0.1.0"
 edition = "2024"
-description = "Test web app exercising asterism-pkcs11: customer-facing wallets backed by a 3-of-3 federation of emulated HSMs."
+description = "Test web app exercising emvault-pkcs11: customer-facing wallets backed by a 3-of-3 federation of emulated HSMs."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gmikeska/test-app-pkcs11"
 publish = false
 
 [dependencies]
-# Asterism — consumed through the `asterism` facade. `pkcs11` +
-# `elements` reproduce the old `asterism-pkcs11 { features = ["elements"] }`
+# EmVault — consumed through the `emvault` facade. `pkcs11` +
+# `elements` reproduce the old `emvault-pkcs11 { features = ["elements"] }`
 # wiring (HSM signing over Bitcoin + Elements); `dev-signer` adds the dev-only
 # HSM helpers (DevBackend, init_dev_token) and implies `pkcs11`. The
 # `setup_dev_federation` helper is bypassed on purpose — see src/hsm.rs.
-asterism = { path = "../asterism", features = ["pkcs11", "elements", "dev-signer"] }
+emvault = { path = "../emvault", features = ["pkcs11", "elements", "dev-signer"] }
 
 bitcoin = "0.32"
 miniscript = "12"
@@ -81,11 +81,11 @@ axum-extra = { version = "0.12.6", features = ["form"] }
 toml = "0.8"
 
 [dev-dependencies]
-# Enables `asterism::elements::testkit::SoftwareSigner` for the Elements
+# Enables `emvault::elements::testkit::SoftwareSigner` for the Elements
 # end-to-end integration test (node + Postgres backed). Cargo unions this with
-# the normal `asterism` dep, so the test build gets pkcs11 + elements +
+# the normal `emvault` dep, so the test build gets pkcs11 + elements +
 # dev-signer + test-utils.
-asterism = { path = "../asterism", features = ["test-utils"] }
+emvault = { path = "../emvault", features = ["test-utils"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

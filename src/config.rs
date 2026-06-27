@@ -14,14 +14,14 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use asterism::config::{hex_decode, optional, require};
-use asterism::elements::ElementsNetwork;
+use emvault::config::{hex_decode, optional, require};
+use emvault::elements::ElementsNetwork;
 use bitcoin::Network;
 use bitcoin::bip32::{ChildNumber, DerivationPath};
 
 // Re-exported so `crate::config::ConfigError` keeps resolving across the app
 // (used via `#[from]` in `WalletError` and `ElementsWalletError`).
-pub use asterism::config::ConfigError;
+pub use emvault::config::ConfigError;
 
 /// Configuration for a single federation HSM token.
 #[derive(Clone, Debug)]
@@ -58,7 +58,7 @@ pub struct AppConfig {
     pub bitcoin_rpc_password: String,
     /// Name passed to Bitcoin Core's `loadwallet` when needed.
     pub bitcoin_wallet_name: String,
-    /// Path to `libasterism_dev_hsm.so` (or, in production, the vendor
+    /// Path to `libemvault_dev_hsm.so` (or, in production, the vendor
     /// PKCS#11 library).
     pub pkcs11_library_path: PathBuf,
     /// Token configs, discovered sequentially from `APP_HSM_{1,2,...}_*`
@@ -149,7 +149,7 @@ impl AppConfig {
         let bitcoin_rpc_user = require("BITCOIN_RPC_USER")?;
         let bitcoin_rpc_password = require("BITCOIN_RPC_PASSWORD")?;
         let bitcoin_wallet_name =
-            optional("BITCOIN_WALLET_NAME").unwrap_or_else(|| "asterism-pkcs11".to_string());
+            optional("BITCOIN_WALLET_NAME").unwrap_or_else(|| "emvault-pkcs11".to_string());
 
         let pkcs11_library_path = PathBuf::from(require("PKCS11_LIB")?);
 
@@ -313,6 +313,6 @@ fn discover_hsm_tokens() -> Result<Vec<HsmTokenConfig>, ConfigError> {
 }
 
 // `require`, `optional`, `hex_decode`, and `ConfigError` now live in
-// `asterism::config` (imported above) — deduplicated in extraction phase E5b.
+// `emvault::config` (imported above) — deduplicated in extraction phase E5b.
 // The pkcs11-only `discover_hsm_tokens`, `hardened`, `derivation_path_for`, and
 // `default_bip48_coin_index` helpers stay here (single-consumer).

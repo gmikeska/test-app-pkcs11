@@ -1,4 +1,4 @@
--- test-app-pkcs11 schema (asterism_pkcs11 database).
+-- test-app-pkcs11 schema (emvault_pkcs11 database).
 --
 -- Customer-facing app: users own no signers — they are isolated by their
 -- own BIP-48 account index against a single global 3-of-3 HSM federation.

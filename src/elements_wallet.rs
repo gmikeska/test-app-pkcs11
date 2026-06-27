@@ -5,7 +5,7 @@
 //! ([`crate::elements_sync`] + [`crate::elements_ingest`]) into Postgres, *not*
 //! by per-user daemon wallets (which do not scale). Balance/addresses read from
 //! [`PgWalletUtxoStore`]; sends build a PSET via
-//! [`asterism::elements::build_spend_pset`], sign with the HSM federation, and
+//! [`emvault::elements::build_spend_pset`], sign with the HSM federation, and
 //! broadcast through [`RpcChainSource`].
 //!
 //! The `daemon_wallet_name` column is retained as a vestigial label (federation
@@ -16,11 +16,11 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use asterism::config::hex_encode;
-use asterism::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
-use asterism::elements::signer::ElementsSigner;
-use asterism::elements::sync::{ElementsChainSource, KeychainKind, WalletId, WalletUtxoStore};
-use asterism::elements::{
+use emvault::config::hex_encode;
+use emvault::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
+use emvault::elements::signer::ElementsSigner;
+use emvault::elements::sync::{ElementsChainSource, KeychainKind, WalletId, WalletUtxoStore};
+use emvault::elements::{
     ElementsNetwork, ElementsWollet, LwkNetwork, build_spend_pset, finalize_p2wsh_pset,
 };
 use sqlx::PgPool;
@@ -33,7 +33,7 @@ use crate::elements_sync::{PgWalletUtxoStore, RpcChainSource, node_lwk_network};
 use crate::hsm::{HsmError, HsmFleet, SignerSet};
 use crate::models::ElementsWalletRow;
 use crate::wallet::NetworkPatchedSigner;
-use asterism::elements::rpc::{ElementsBalances, ElementsRpc, ElementsRpcError};
+use emvault::elements::rpc::{ElementsBalances, ElementsRpc, ElementsRpcError};
 
 #[allow(dead_code)]
 pub const REVEAL_COUNT: u32 = 20;
@@ -459,7 +459,7 @@ impl UserElementsWallet {
     /// All unspent captured UTXOs for this wallet (from the block-scan store).
     pub async fn captured_utxos(
         &self,
-    ) -> Result<Vec<asterism::elements::CapturedUtxo>, ElementsWalletError> {
+    ) -> Result<Vec<emvault::elements::CapturedUtxo>, ElementsWalletError> {
         let store = PgWalletUtxoStore::new(self.pool.clone());
         let wid = self.wallet_key();
         tokio::task::spawn_blocking(move || store.list_unspent(wid).map_err(pipeline_err))
@@ -488,7 +488,7 @@ impl UserElementsWallet {
                 .list_unspent(wid)
                 .map_err(pipeline_err)?
                 .iter()
-                .map(asterism::elements::CapturedUtxo::value)
+                .map(emvault::elements::CapturedUtxo::value)
                 .sum())
         })
         .await
@@ -827,7 +827,7 @@ impl UserElementsWallet {
                 }
                 let total: u64 = utxos
                     .iter()
-                    .map(asterism::elements::CapturedUtxo::value)
+                    .map(emvault::elements::CapturedUtxo::value)
                     .sum();
                 let recipient_addr =
                     elements::Address::from_str(&recipient_owned).map_err(|e| {
@@ -837,7 +837,7 @@ impl UserElementsWallet {
                         }
                     })?;
 
-                let blinded = asterism::elements::build_sweep_pset(
+                let blinded = emvault::elements::build_sweep_pset(
                     &wollet,
                     &utxos,
                     &recipient_addr,
@@ -946,7 +946,7 @@ fn derive_master_blinding_key(user_id: Uuid, account_idx: i32) -> [u8; 32] {
     let h1 = hasher.finish();
     let mut hasher2 = DefaultHasher::new();
     h1.hash(&mut hasher2);
-    "asterism-elements-mbk-v1".hash(&mut hasher2);
+    "emvault-elements-mbk-v1".hash(&mut hasher2);
     let h2 = hasher2.finish();
 
     let mut key = [0u8; 32];
@@ -957,7 +957,7 @@ fn derive_master_blinding_key(user_id: Uuid, account_idx: i32) -> [u8; 32] {
     key
 }
 
-// `hex_encode` now lives in `asterism::config` (imported above) — deduplicated
+// `hex_encode` now lives in `emvault::config` (imported above) — deduplicated
 // in extraction phase E5b.
 
 /// Parse a 64-char hex string into a 32-byte SLIP-77 master blinding key.
@@ -975,7 +975,7 @@ fn parse_mbk_hex(s: &str) -> Option<[u8; 32]> {
 /// Per-script-pubkey totals across captured UTXOs: `(total_received, unspent)`.
 /// `total_received` includes spent UTXOs (historical), `unspent` excludes them.
 fn balances_by_spk(
-    utxos: &[asterism::elements::CapturedUtxo],
+    utxos: &[emvault::elements::CapturedUtxo],
 ) -> (
     HashMap<elements::Script, u64>,
     HashMap<elements::Script, u64>,

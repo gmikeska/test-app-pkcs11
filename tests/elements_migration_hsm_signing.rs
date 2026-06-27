@@ -1,11 +1,11 @@
 //! Node-free **dev-HSM signing gate** for the Elements federation migration.
 //!
-//! This is the dev-HSM analog of `asterism-elements`'s offline software gates
+//! This is the dev-HSM analog of `emvault-elements`'s offline software gates
 //! (`migration_fee_account_pays_and_multi_account_signs` and
 //! `batched_migration_chains_fee_change_offline`). Where those prove the
 //! migration *logic* with in-memory `SoftwareSigner`s, this proves the same
 //! flows sign correctly when every old-federation input is signed by a **real
-//! PKCS#11 signer** (`Pkcs11Signer` over the `libasterism_dev_hsm.so` shim) —
+//! PKCS#11 signer** (`Pkcs11Signer` over the `libemvault_dev_hsm.so` shim) —
 //! i.e. actual cryptoki ECDSA, not software keys.
 //!
 //! The novel signal over the software gates: all accounts share the same three
@@ -17,7 +17,7 @@
 //!
 //! No Elements node and no Postgres: inputs are synthetic [`CapturedUtxo`]s
 //! built directly against each account's derived address (same trick the
-//! `asterism-elements` offline gates use), and transactions are signed +
+//! `emvault-elements` offline gates use), and transactions are signed +
 //! finalized + extracted but never broadcast.
 //!
 //! Skips cleanly when `PKCS11_LIB` / the shim / the dev tokens are unavailable.
@@ -38,16 +38,16 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use asterism::core::signer::Signer;
-use asterism::dev_signer::DevBackend;
-use asterism::elements::descriptor::{CtDescriptorBuilder, CtKeyMode};
-use asterism::elements::signer::ElementsSigner;
-use asterism::elements::sync::{CapturedUtxo, KeychainKind, WalletId};
-use asterism::elements::{
+use emvault::core::signer::Signer;
+use emvault::dev_signer::DevBackend;
+use emvault::elements::descriptor::{CtDescriptorBuilder, CtKeyMode};
+use emvault::elements::signer::ElementsSigner;
+use emvault::elements::sync::{CapturedUtxo, KeychainKind, WalletId};
+use emvault::elements::{
     ElementsNetwork, ElementsWalletHandle, ElementsWollet, build_migration_pset,
     captured_from_output, finalize_p2wsh_pset,
 };
-use asterism::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
+use emvault::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
 use bitcoin::Network;
 use bitcoin::bip32::DerivationPath;
 use elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
@@ -166,7 +166,7 @@ fn hsm_account(env: &DevEnv, key_tag: &str, acct: i32, blinding_byte: u8) -> Hsm
 }
 
 // ---------------------------------------------------------------------------
-// Synthetic (node-free) UTXOs — same approach as the asterism-elements gates
+// Synthetic (node-free) UTXOs — same approach as the emvault-elements gates
 // ---------------------------------------------------------------------------
 
 fn lbtc() -> AssetId {

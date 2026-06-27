@@ -3,7 +3,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
-use asterism::core::DescriptorError;
+use emvault::core::DescriptorError;
 
 use crate::elements_wallet::ElementsWalletError;
 use crate::hsm::HsmError;
@@ -36,7 +36,7 @@ pub enum AppError {
     #[error("HSM error: {0}")]
     Hsm(#[from] HsmError),
 
-    /// `asterism-core` descriptor builder rejected the federation.
+    /// `emvault-core` descriptor builder rejected the federation.
     #[error("descriptor builder rejected federation: {0}")]
     DescriptorBuilderRejected(#[from] DescriptorError),
 

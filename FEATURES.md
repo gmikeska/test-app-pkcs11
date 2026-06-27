@@ -2,7 +2,7 @@
 
 > A complete, developer-oriented tour of every feature in `test-app-pkcs11`,
 > the custodial reference app for
-> [`asterism-pkcs11`](https://github.com/gmikeska/asterism-pkcs11).
+> [`emvault-pkcs11`](https://github.com/gmikeska/emvault-pkcs11).
 >
 > **Audience:** AI coding agents and human developers who need to understand —
 > quickly and exactly — what this app can do, how each capability is wired, and
@@ -52,7 +52,7 @@ vault; each customer owns a numbered box (account index) inside it.
                  │          │                       │          │
           bitcoind regtest  │                 PgWalletUtxoStore │
                             └──── PKCS#11 dev shim ─────┘  (elements_sync.rs)
-                                 (libasterism_dev_hsm)          │
+                                 (libemvault_dev_hsm)          │
                                                        Block-scan ingestion
                                                        (elements_ingest.rs)
                                                                 │
@@ -87,7 +87,7 @@ router → serve on `APP_HOST:APP_PORT` (default `127.0.0.1:8095`).
 | Seeded test users | `auth::seed_test_users` | Idempotent. Seeds `test1/2/3@test.com` **and** `admin@test.com`, password `test1234`. `admin` is the conventional fee/house account (forced to account index 99). |
 
 Sessions are signed (`with_signed(cookie_key)`), `SameSite::Lax`, 7-day inactivity
-expiry, cookie name `asterism_session`. A background task
+expiry, cookie name `emvault_session`. A background task
 (`session_store.continuously_delete_expired`) prunes expired rows every minute and
 is aborted on graceful shutdown.
 
@@ -109,15 +109,15 @@ is aborted on graceful shutdown.
 ### 3.3 The HSM federation — `src/hsm.rs` (`HsmFleet`)
 
 This is the heart of the app and the main thing it demonstrates about
-`asterism-pkcs11`.
+`emvault-pkcs11`.
 
 - **Token discovery & init.** `HsmFleet::new` verifies `PKCS11_LIB` exists, then
-  calls `asterism::dev_signer::init_dev_token` for every discovered token
+  calls `emvault::dev_signer::init_dev_token` for every discovered token
   (idempotent — the programmatic equivalent of `pkcs11-tool --init-token`).
 - **Per-customer key namespace.** Every customer's federation lives on the *same*
-  physical tokens but under a distinct Asterism label `signer-{user_uuid}`
+  physical tokens but under a distinct EmVault label `signer-{user_uuid}`
   (`HsmFleet::signer_label`). On-token objects live at
-  `asterism/v1/{label}/{priv,policy,sigrate}`.
+  `emvault/v1/{label}/{priv,policy,sigrate}`.
 - **Lazy derive-or-load with caching.** `HsmFleet::signers_for(signer_id, path)`
   opens authenticated sessions (one per token, on a `spawn_blocking` thread) and
   either `Pkcs11Signer::load`s existing keys or `derive_from_seed`s a fresh master
@@ -126,7 +126,7 @@ This is the heart of the app and the main thing it demonstrates about
 - **Network correctness.** `setup_dev_federation` is deliberately **bypassed**
   because it hardcodes `Network::Testnet`; the fleet honours `BITCOIN_NETWORK`
   instead. Derived signers are wrapped in `NetworkPatchedSigner` (re-exported from
-  `asterism-pkcs11`) so descriptors stamp the right network.
+  `emvault-pkcs11`) so descriptors stamp the right network.
 - **Key lifecycle helpers.** `HsmFleet::evict` drops a cached set (closing sessions);
   `HsmFleet::delete_keys` permanently deletes a signer's on-token objects (used by
   tests and future "reset wallet" flows).
@@ -211,7 +211,7 @@ changes or a migration runs.
 
 ### 3.7 Scalable Elements block-scan ingestion — `src/elements_sync.rs` + `src/elements_ingest.rs`
 
-This is the consuming-app half of `asterism-elements`'s `sync` traits, and the
+This is the consuming-app half of `emvault-elements`'s `sync` traits, and the
 reason the Elements side scales to many customers:
 
 - `PgBlockStore` / `PgWalletUtxoStore` — Postgres implementations of `BlockStore`
@@ -226,7 +226,7 @@ reason the Elements side scales to many customers:
   fetches each new block **once**, and matches it against the union of all watched
   scripts. Reorg-aware (`rollback_above`), gap-limit `SCAN_GAP = 100`.
 
-The in-memory fakes in `asterism-elements::sync::tests` and the Postgres stores
+The in-memory fakes in `emvault-elements::sync::tests` and the Postgres stores
 share the same contract; `elements_sync.rs`'s `pg_stores_honor_contracts` test
 asserts that (skips gracefully without a DB).
 
@@ -289,7 +289,7 @@ exposes every module publicly) and load the same `.env` as the web server.
 - **Web/DB:** `APP_HOST`, `APP_PORT`, `APP_SESSION_SECRET` (≥64 bytes hex),
   `DATABASE_URL`.
 - **Bitcoin Core RPC:** `BITCOIN_RPC_HOST/PORT/USER/PASSWORD`, `BITCOIN_NETWORK`,
-  `BITCOIN_WALLET_NAME` (default `asterism-pkcs11`), `APP_BIP48_COIN_INDEX`
+  `BITCOIN_WALLET_NAME` (default `emvault-pkcs11`), `APP_BIP48_COIN_INDEX`
   (optional; defaults from network).
 - **HSM federation:** `PKCS11_LIB`, sequential `APP_HSM_{N}_LABEL/_PIN/_SO_PIN`
   (scanned from N=1 until a gap), `APP_FED_THRESHOLD`, `APP_FED_SIGNERS`
@@ -299,7 +299,7 @@ exposes every module publicly) and load the same `.env` as the web server.
 
 The dev shim also reads `SOFTHSM2_LIB`, `SOFTHSM2_CONF`, and `DEV_HSM_CONFIG`
 (`dev-hsm.toml`, the per-token BIP-39 mnemonics) — those are consumed by
-`libasterism_dev_hsm`, not by this app directly.
+`libemvault_dev_hsm`, not by this app directly.
 
 ### 3.11 Route map
 
@@ -352,17 +352,17 @@ client-side JS, no `node_modules`.**
 | Add captured-UTXO queries (Elements) | `PgWalletUtxoStore` in `src/elements_sync.rs`. |
 | Add a config knob | `AppConfig` + `AppConfig::from_env` in `src/config.rs`. |
 
-## 5. Relationship to the rest of Asterism
+## 5. Relationship to the rest of EmVault
 
-- Library crate: [`asterism-pkcs11`](https://github.com/gmikeska/asterism-pkcs11)
-  (HSM signer), consumed through the [`asterism`](https://github.com/gmikeska/asterism)
+- Library crate: [`emvault-pkcs11`](https://github.com/gmikeska/emvault-pkcs11)
+  (HSM signer), consumed through the [`emvault`](https://github.com/gmikeska/emvault)
   facade with features `pkcs11`, `elements`, `dev-signer`.
 - Core descriptor/PSBT/federation machinery:
-  [`asterism-core`](https://github.com/gmikeska/asterism-core).
+  [`emvault-core`](https://github.com/gmikeska/emvault-core).
 - Elements wallet + sync traits:
-  [`asterism-elements`](https://github.com/gmikeska/asterism-elements).
-- Dev HSM shim: [`asterism-dev-signer`](https://github.com/gmikeska/asterism-dev-signer)
-  / `libasterism_dev_hsm`.
+  [`emvault-elements`](https://github.com/gmikeska/emvault-elements).
+- Dev HSM shim: [`emvault-dev-signer`](https://github.com/gmikeska/emvault-dev-signer)
+  / `libemvault_dev_hsm`.
 - Sibling app (self-custody, hardware wallets, proposal-based signing):
   [`test-app-xpub`](https://github.com/gmikeska/test-app-xpub) — see its
   `FEATURES.md` for the contrasting model.

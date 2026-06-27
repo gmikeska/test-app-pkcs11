@@ -5,7 +5,7 @@
 //! Where that gate proves the Phase B chained-fee-change *logic* with BDK's
 //! in-memory software signer, this proves the same three-transaction batch
 //! signs correctly when every old-federation input is signed by a **real
-//! PKCS#11 signer** (`Pkcs11Signer` over `libasterism_dev_hsm.so`) — actual
+//! PKCS#11 signer** (`Pkcs11Signer` over `libemvault_dev_hsm.so`) — actual
 //! cryptoki ECDSA, not software keys.
 //!
 //! The novel signal: every account reuses the same three dev-HSM tokens
@@ -36,9 +36,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use asterism::core::descriptor::{KeyMode, to_multipath_string};
-use asterism::core::federation::Federation;
-use asterism::core::network::NetworkType;
+use emvault::core::descriptor::{KeyMode, to_multipath_string};
+use emvault::core::federation::Federation;
+use emvault::core::network::NetworkType;
 use bdk_wallet::bitcoin::bip32::DerivationPath as BtcDerivationPath;
 use bdk_wallet::bitcoin::hashes::Hash;
 use bdk_wallet::bitcoin::{
@@ -49,8 +49,8 @@ use bdk_wallet::miniscript::psbt::PsbtExt;
 use bdk_wallet::signer::SignerOrdering;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet};
 
-use asterism::dev_signer::DevBackend;
-use asterism::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
+use emvault::dev_signer::DevBackend;
+use emvault::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
 use test_app_pkcs11::wallet::NetworkPatchedSigner;
 
 const NETWORK: Network = Network::Regtest;

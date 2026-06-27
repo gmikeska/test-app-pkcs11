@@ -35,8 +35,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use asterism::core::descriptor::KeyMode;
-use asterism::core::signer::Signer;
+use emvault::core::descriptor::KeyMode;
+use emvault::core::signer::Signer;
 use bitcoin::Amount;
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -408,7 +408,7 @@ fn cli_estimate_fee(input_count: usize, output_count: usize, fee_rate: bitcoin::
 }
 
 fn display_sweep_plan(
-    plan: &asterism::core::MigrationPlan<asterism::core::psbt::UnsignedPsbt>,
+    plan: &emvault::core::MigrationPlan<emvault::core::psbt::UnsignedPsbt>,
     accounts: &[AccountSummary],
     fee_account_idx: Option<u32>,
     fee_rate: bitcoin::FeeRate,
@@ -606,7 +606,7 @@ async fn build_new_elements_federation(
     manager: &ElementsWalletManager,
     pool: &sqlx::PgPool,
 ) -> Result<(String, [u8; 32], i32), String> {
-    use asterism::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
+    use emvault::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
 
     let acct_idx = wallet.account_idx() as u32;
     let path = manager
@@ -665,7 +665,7 @@ struct ElementsExecAccount {
     is_fee: bool,
     old_descriptor: String,
     old_mbk: [u8; 32],
-    utxos: Vec<asterism::elements::CapturedUtxo>,
+    utxos: Vec<emvault::elements::CapturedUtxo>,
     signers: test_app_pkcs11::hsm::SignerSet,
     dest: elements::Address,
     balance_sat: u64,
@@ -674,7 +674,7 @@ struct ElementsExecAccount {
 // =========================================================================
 // Batched migration planner (Elements)
 //
-// `asterism::core::migration::AccountForAccountBatchedSweep` is bitcoin-typed,
+// `emvault::core::migration::AccountForAccountBatchedSweep` is bitcoin-typed,
 // so — as with the account-for-account split — we reimplement the simple amount
 // math inline for Elements. Produces the ordered transaction shape; the
 // executor maps each tx's customer accounts to their UTXOs / wollets / dests
@@ -869,8 +869,8 @@ async fn run_elements_migration(
     dry_run: bool,
     sweep_only: bool,
 ) {
-    use asterism::elements::sync::KeychainKind;
-    use asterism::elements::{
+    use emvault::elements::sync::KeychainKind;
+    use emvault::elements::{
         ElementsWollet, build_migration_pset, captured_from_output, finalize_p2wsh_pset,
     };
 
@@ -926,7 +926,7 @@ async fn run_elements_migration(
         };
         let balance_sat: u64 = utxos
             .iter()
-            .map(asterism::elements::CapturedUtxo::value)
+            .map(emvault::elements::CapturedUtxo::value)
             .sum();
         #[allow(clippy::cast_precision_loss)]
         let balance_btc = balance_sat as f64 / 100_000_000.0;
@@ -1174,7 +1174,7 @@ async fn run_elements_migration(
         }
         let balance_sat: u64 = utxos
             .iter()
-            .map(asterism::elements::CapturedUtxo::value)
+            .map(emvault::elements::CapturedUtxo::value)
             .sum();
         let (desc, mbk, _) = new_feds.get(&acct_idx).cloned().expect("resolved above");
         let dest = match ElementsWollet::from_descriptor_str(&desc, mbk, net, lwk_net)
@@ -1235,8 +1235,8 @@ async fn run_elements_migration(
 
     type TxResult = (String, Vec<(i32, u64)>, bool);
     let result = tokio::task::spawn_blocking(move || -> Result<Vec<TxResult>, String> {
-        use asterism::elements::signer::ElementsSigner;
-        use asterism::elements::sync::{ElementsChainSource, KeychainKind};
+        use emvault::elements::signer::ElementsSigner;
+        use emvault::elements::sync::{ElementsChainSource, KeychainKind};
         use test_app_pkcs11::elements_sync::RpcChainSource;
 
         // Build each account's old (input-owning) wollet.
@@ -1323,11 +1323,11 @@ async fn run_elements_migration(
                 .ok_or("fee account has no UTXOs")?
                 .wallet_id;
 
-            let mut chained: Option<asterism::elements::CapturedUtxo> = None;
+            let mut chained: Option<emvault::elements::CapturedUtxo> = None;
             let mut fee_seed_used = false;
 
             for txp in &plan.txs {
-                let mut inputs: Vec<(asterism::elements::CapturedUtxo, &ElementsWollet)> =
+                let mut inputs: Vec<(emvault::elements::CapturedUtxo, &ElementsWollet)> =
                     Vec::new();
                 let mut recipients: Vec<(elements::Address, u64)> = Vec::new();
                 let mut report: Vec<(i32, u64)> = Vec::new();
@@ -1410,7 +1410,7 @@ async fn run_elements_migration(
             }
         } else {
             // --- account-for-account: single fee-account-pays transaction ---
-            let mut inputs: Vec<(asterism::elements::CapturedUtxo, &ElementsWollet)> = Vec::new();
+            let mut inputs: Vec<(emvault::elements::CapturedUtxo, &ElementsWollet)> = Vec::new();
             let mut customers: Vec<(elements::Address, u64)> = Vec::new();
             let mut report: Vec<(i32, u64)> = Vec::new();
             let mut owner: std::collections::HashMap<elements::OutPoint, i32> =
@@ -1515,12 +1515,12 @@ fn derive_elements_mbk(user_id: uuid::Uuid, account_idx: i32, version: i32) -> [
     account_idx.hash(&mut hasher);
     if version > 0 {
         version.hash(&mut hasher);
-        "asterism-elements-mbk-rotated".hash(&mut hasher);
+        "emvault-elements-mbk-rotated".hash(&mut hasher);
     }
     let h1 = hasher.finish();
     let mut hasher2 = DefaultHasher::new();
     h1.hash(&mut hasher2);
-    "asterism-elements-mbk-v1".hash(&mut hasher2);
+    "emvault-elements-mbk-v1".hash(&mut hasher2);
     let h2 = hasher2.finish();
 
     let mut key = [0u8; 32];
@@ -1757,9 +1757,9 @@ async fn main() {
     );
 
     let mut migration_plan: Option<
-        asterism::core::MigrationPlan<asterism::core::psbt::UnsignedPsbt>,
+        emvault::core::MigrationPlan<emvault::core::psbt::UnsignedPsbt>,
     > = None;
-    let mut account_utxo_sets: Vec<asterism::core::AccountUtxoSet> = Vec::new();
+    let mut account_utxo_sets: Vec<emvault::core::AccountUtxoSet> = Vec::new();
 
     if total_balance > Amount::ZERO {
         for wallet in &user_wallets {
@@ -1799,10 +1799,10 @@ async fn main() {
                 .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
                 .collect();
 
-            let new_fed = match asterism::core::Federation::with_key_mode(
+            let new_fed = match emvault::core::Federation::with_key_mode(
                 cfg.federation.threshold,
                 new_signers,
-                asterism::core::network::NetworkType::Bitcoin(app_config.network),
+                emvault::core::network::NetworkType::Bitcoin(app_config.network),
                 KeyMode::Ranged,
             ) {
                 Ok(f) => f,
@@ -1812,7 +1812,7 @@ async fn main() {
                 }
             };
 
-            let dest_desc_str = asterism::core::descriptor::to_multipath_string(
+            let dest_desc_str = emvault::core::descriptor::to_multipath_string(
                 new_fed
                     .try_descriptor()
                     .expect("Bitcoin federation has a descriptor"),
@@ -1831,7 +1831,7 @@ async fn main() {
             };
 
             let dest_addr_str = dest_addr.to_string();
-            account_utxo_sets.push(asterism::core::AccountUtxoSet {
+            account_utxo_sets.push(emvault::core::AccountUtxoSet {
                 account_idx: acct_idx,
                 utxos,
                 destination_address: dest_addr,
@@ -1852,12 +1852,12 @@ async fn main() {
         display_account_table(&account_summaries, fee_account_idx);
 
         let plan_result: Result<
-            asterism::core::MigrationPlan<asterism::core::psbt::UnsignedPsbt>,
-            asterism::core::MigrationError,
+            emvault::core::MigrationPlan<emvault::core::psbt::UnsignedPsbt>,
+            emvault::core::MigrationError,
         > = if cfg.migration.strategy == "account-for-account" {
             let alg =
-                asterism::core::AccountForAccountSweep::new(fee_account_idx.expect("validated"));
-            asterism::core::SweepAlgorithm::plan(
+                emvault::core::AccountForAccountSweep::new(fee_account_idx.expect("validated"));
+            emvault::core::SweepAlgorithm::plan(
                 &alg,
                 &account_utxo_sets,
                 first_wallet.federation().network(),
@@ -1865,11 +1865,11 @@ async fn main() {
                 fee_rate,
             )
         } else {
-            let alg = asterism::core::AccountForAccountBatchedSweep::new(
+            let alg = emvault::core::AccountForAccountBatchedSweep::new(
                 fee_account_idx.expect("validated"),
                 Amount::from_sat(cfg.migration.small_account_threshold),
             );
-            asterism::core::SweepAlgorithm::plan(
+            emvault::core::SweepAlgorithm::plan(
                 &alg,
                 &account_utxo_sets,
                 first_wallet.federation().network(),
@@ -1970,10 +1970,10 @@ async fn main() {
                 .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
                 .collect();
 
-            let new_federation = match asterism::core::Federation::with_key_mode(
+            let new_federation = match emvault::core::Federation::with_key_mode(
                 cfg.federation.threshold,
                 new_signers,
-                asterism::core::network::NetworkType::Bitcoin(app_config.network),
+                emvault::core::network::NetworkType::Bitcoin(app_config.network),
                 KeyMode::Ranged,
             ) {
                 Ok(f) => f,
@@ -1995,13 +1995,13 @@ async fn main() {
                 };
             let new_version_index = i32::try_from(versions.len()).unwrap_or(0);
 
-            let descriptor_str = asterism::core::descriptor::to_multipath_string(
+            let descriptor_str = emvault::core::descriptor::to_multipath_string(
                 new_federation
                     .try_descriptor()
                     .expect("Bitcoin federation has a descriptor"),
             );
             let snapshot =
-                asterism::core::snapshot::FederationSnapshot::from_federation(&new_federation);
+                emvault::core::snapshot::FederationSnapshot::from_federation(&new_federation);
             let snapshot_json = serde_json::to_value(&snapshot).expect("snapshot serializes");
 
             match db::insert_federation_version(
@@ -2240,12 +2240,12 @@ async fn main() {
             // and its NEW-fed address only on the final fee-account tx.
             for output in &sweep_tx.outputs {
                 match output {
-                    asterism::core::SweepOutput::Customer {
+                    emvault::core::SweepOutput::Customer {
                         address, amount, ..
                     } => {
                         builder.add_recipient(address.script_pubkey(), *amount);
                     }
-                    asterism::core::SweepOutput::FeeChange { .. } => {
+                    emvault::core::SweepOutput::FeeChange { .. } => {
                         let dest = if sweep_tx.is_fee_final {
                             &fee_new_dest
                         } else {
@@ -2418,8 +2418,8 @@ async fn main() {
         for output in &sweep_tx.outputs {
             let out_acct = output.account_idx();
             let recipient = match output {
-                asterism::core::SweepOutput::Customer { address, .. } => address.to_string(),
-                asterism::core::SweepOutput::FeeChange { .. } => {
+                emvault::core::SweepOutput::Customer { address, .. } => address.to_string(),
+                emvault::core::SweepOutput::FeeChange { .. } => {
                     if sweep_tx.is_fee_final {
                         fee_new_dest.to_string()
                     } else {

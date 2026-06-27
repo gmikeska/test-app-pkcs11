@@ -1,7 +1,7 @@
 # test-app-pkcs11
 
 > Customer-facing test web app exercising
-> [`asterism-pkcs11`](https://github.com/gmikeska/asterism-pkcs11): each user gets a 3-of-3
+> [`emvault-pkcs11`](https://github.com/gmikeska/emvault-pkcs11): each user gets a 3-of-3
 > HSM-backed Bitcoin wallet, every spend is signed by all 3 emulated HSMs
 > server-side and broadcast immediately.
 
@@ -40,10 +40,10 @@ the deep reference.
 
 1. **Build the dev shim.** From the repo root:
    ```bash
-   cargo build --release -p libasterism_dev_hsm
+   cargo build --release -p libemvault-dev-hsm
    ```
    Make sure `PKCS11_LIB` in `.env` points at the resulting `.so`.
-2. **PostgreSQL.** Create the database (`createdb asterism_pkcs11`) and
+2. **PostgreSQL.** Create the database (`createdb emvault_pkcs11`) and
    make sure `DATABASE_URL` in `.env` matches.
 3. **Bitcoin Core regtest.** Same node `test-app-xpub` uses; configured
    via `BITCOIN_RPC_*` in `.env`.

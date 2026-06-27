@@ -1,4 +1,4 @@
-//! `test-app-pkcs11` — Axum web app exercising `asterism-pkcs11` with
+//! `test-app-pkcs11` — Axum web app exercising `emvault-pkcs11` with
 //! customer wallets backed by an m-of-n federation of emulated HSMs.
 //!
 //! Boot sequence:
@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_secure(false)
         .with_same_site(tower_sessions::cookie::SameSite::Lax)
         .with_expiry(Expiry::OnInactivity(TimeDuration::days(7)))
-        .with_name("asterism_session");
+        .with_name("emvault_session");
 
     let hsm = Arc::new(HsmFleet::new(&config)?);
     tracing::info!(

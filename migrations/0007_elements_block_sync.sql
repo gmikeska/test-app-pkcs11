@@ -1,5 +1,5 @@
 -- Shared block-scan pipeline storage (Postgres implementation of the
--- asterism-elements `sync` traits). Replaces per-wallet daemon-wallet UTXO
+-- emvault-elements `sync` traits). Replaces per-wallet daemon-wallet UTXO
 -- capture, which does not scale past 1-2 wallets on the Elements node.
 --
 -- Each block is fetched from the node and stored exactly once; the scan engine

@@ -17,16 +17,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use asterism::core::chain_sync::{self, ChainSyncError, InitWalletError};
-use asterism::core::descriptor::{KeyMode, to_multipath_string};
-use asterism::core::error::PsbtError;
-use asterism::core::federated_wallet::FederatedWallet as FederatedWalletTrait;
-use asterism::core::network::NetworkType;
-use asterism::core::psbt as core_psbt;
-use asterism::core::psbt::{SigningCoordinator, UnsignedPsbt};
-use asterism::core::signer::{Signer, SignerId};
-use asterism::core::{BtcFederatedWallet, Federation, FederationWallet};
-use asterism::pkcs11::Pkcs11Signer;
+use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
+use emvault::core::descriptor::{KeyMode, to_multipath_string};
+use emvault::core::error::PsbtError;
+use emvault::core::federated_wallet::FederatedWallet as FederatedWalletTrait;
+use emvault::core::network::NetworkType;
+use emvault::core::psbt as core_psbt;
+use emvault::core::psbt::{SigningCoordinator, UnsignedPsbt};
+use emvault::core::signer::{Signer, SignerId};
+use emvault::core::{BtcFederatedWallet, Federation, FederationWallet};
+use emvault::pkcs11::Pkcs11Signer;
 // `Emitter`/`NO_EXPECTED_MEMPOOL_TXS` remain for the best-effort version-wallet
 // fan-out sync below; the primary wallet sync uses `chain_sync::emitter_sync`.
 use bdk_bitcoind_rpc::{Emitter, NO_EXPECTED_MEMPOOL_TXS};
@@ -59,13 +59,13 @@ type SavedBip32Derivation = (
 pub const REVEAL_COUNT: u32 = 20;
 
 // ---------------------------------------------------------------------------
-// Network-patched signer wrapper — extracted to `asterism-pkcs11`
+// Network-patched signer wrapper — extracted to `emvault-pkcs11`
 // ---------------------------------------------------------------------------
 
-// `NetworkPatchedSigner` now lives in `asterism-pkcs11` (every PKCS#11 consumer
+// `NetworkPatchedSigner` now lives in `emvault-pkcs11` (every PKCS#11 consumer
 // on a non-mainnet network needs it). Re-exported here so existing
 // `crate::wallet::NetworkPatchedSigner` paths keep resolving.
-pub use asterism::pkcs11::NetworkPatchedSigner;
+pub use emvault::pkcs11::NetworkPatchedSigner;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -167,15 +167,15 @@ pub enum WalletError {
 
     /// `DescriptorBuilder` (via `Federation`) rejected the federation.
     #[error("descriptor builder error: {0}")]
-    Descriptor(#[from] asterism::core::DescriptorError),
+    Descriptor(#[from] emvault::core::DescriptorError),
 
     /// `Federation::with_key_mode` rejected the inputs.
     #[error("federation construction failed: {0}")]
-    Federation(#[from] asterism::core::error::FederationError),
+    Federation(#[from] emvault::core::error::FederationError),
 
     /// `UnsignedPsbt::new` / `SigningCoordinator` rejected the PSBT.
     #[error("PSBT pipeline error: {0}")]
-    Psbt(#[from] asterism::core::error::PsbtError),
+    Psbt(#[from] emvault::core::error::PsbtError),
 
     /// Configuration error (e.g. invalid derivation index).
     #[error("config error: {0}")]
@@ -547,7 +547,7 @@ impl WalletManager {
             )?
         };
 
-        // Init-or-load BDK construction lives in `asterism::core::chain_sync`
+        // Init-or-load BDK construction lives in `emvault::core::chain_sync`
         // (E3b). Core leaves the staged changeset intact on the fresh path and
         // returns an empty aggregate, matching this app's prior behavior
         // exactly (signers are registered just below, then persisted).
@@ -779,7 +779,7 @@ impl UserWallet {
 
         let (summary, delta) = {
             let mut wallet = self.inner.lock().await;
-            // Pure-BDK emitter drive lives in `asterism::core::chain_sync` (E3b);
+            // Pure-BDK emitter drive lives in `emvault::core::chain_sync` (E3b);
             // persistence (changeset merge + DB write) stays here.
             let result = chain_sync::emitter_sync(&mut wallet, &*self.rpc)
                 .map_err(WalletError::from_chain_sync)?;
@@ -827,7 +827,7 @@ impl UserWallet {
         &self,
         target_count: u32,
     ) -> Result<Vec<RevealedAddress>, WalletError> {
-        use asterism::core::federated_wallet::FederatedWallet as _;
+        use emvault::core::federated_wallet::FederatedWallet as _;
         if target_count == 0 {
             return Ok(Vec::new());
         }
@@ -898,7 +898,7 @@ impl UserWallet {
         &self,
         count: u32,
     ) -> Vec<(usize, Vec<RevealedAddress>)> {
-        use asterism::core::federated_wallet::FederatedWallet as _;
+        use emvault::core::federated_wallet::FederatedWallet as _;
 
         let mut results = Vec::with_capacity(self.version_wallets.len());
 

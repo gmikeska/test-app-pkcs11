@@ -2,7 +2,7 @@
 //! federation migration with **decision (b)** fee-change routing.
 //!
 //! This is the Bitcoin analogue of the Elements offline gate
-//! `asterism::elements::spend::tests::batched_migration_chains_fee_change_offline`.
+//! `emvault::elements::spend::tests::batched_migration_chains_fee_change_offline`.
 //! It proves the chained fee-change mechanic that `run_bitcoin_migration`
 //! implements (in `examples/federation_migration.rs`) **without** a node,
 //! Postgres, PKCS#11, or any `UserWallet` — using in-process software

@@ -170,98 +170,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "asterism"
-version = "0.1.0"
-dependencies = [
- "asterism-core",
- "asterism-dev-signer",
- "asterism-elements",
- "asterism-pkcs11",
- "asterism-xpub",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "asterism-core"
-version = "0.1.0"
-dependencies = [
- "bdk_bitcoind_rpc",
- "bdk_wallet",
- "bitcoin",
- "bitcoincore-rpc",
- "hex",
- "miniscript",
- "serde",
- "serde_json",
- "serde_with",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "asterism-dev-signer"
-version = "0.1.0"
-dependencies = [
- "asterism-core",
- "asterism-pkcs11",
- "bitcoin",
- "cryptoki",
- "dotenvy",
- "hex",
- "log",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "asterism-elements"
-version = "0.1.0"
-dependencies = [
- "asterism-core",
- "bitcoin",
- "bitcoincore-rpc",
- "elements 0.25.3",
- "elements-miniscript",
- "lwk_common",
- "lwk_wollet",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "asterism-pkcs11"
-version = "0.1.0"
-dependencies = [
- "asterism-core",
- "asterism-elements",
- "bdk_wallet",
- "bitcoin",
- "cryptoki",
- "elements 0.25.3",
- "hex",
- "miniscript",
- "secrecy",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "asterism-xpub"
-version = "0.1.0"
-dependencies = [
- "asterism-core",
- "bip39",
- "bitcoin",
- "miniscript",
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -968,6 +876,98 @@ dependencies = [
  "elements 0.25.3",
  "miniscript",
  "serde",
+]
+
+[[package]]
+name = "emvault"
+version = "0.1.0"
+dependencies = [
+ "emvault-core",
+ "emvault-dev-signer",
+ "emvault-elements",
+ "emvault-pkcs11",
+ "emvault-xpub",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "emvault-core"
+version = "0.1.0"
+dependencies = [
+ "bdk_bitcoind_rpc",
+ "bdk_wallet",
+ "bitcoin",
+ "bitcoincore-rpc",
+ "hex",
+ "miniscript",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "emvault-dev-signer"
+version = "0.1.0"
+dependencies = [
+ "bitcoin",
+ "cryptoki",
+ "dotenvy",
+ "emvault-core",
+ "emvault-pkcs11",
+ "hex",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "emvault-elements"
+version = "0.1.0"
+dependencies = [
+ "bitcoin",
+ "bitcoincore-rpc",
+ "elements 0.25.3",
+ "elements-miniscript",
+ "emvault-core",
+ "lwk_common",
+ "lwk_wollet",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "emvault-pkcs11"
+version = "0.1.0"
+dependencies = [
+ "bdk_wallet",
+ "bitcoin",
+ "cryptoki",
+ "elements 0.25.3",
+ "emvault-core",
+ "emvault-elements",
+ "hex",
+ "miniscript",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "emvault-xpub"
+version = "0.1.0"
+dependencies = [
+ "bip39",
+ "bitcoin",
+ "emvault-core",
+ "miniscript",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2842,7 +2842,6 @@ dependencies = [
  "argon2",
  "askama",
  "askama_web",
- "asterism",
  "async-trait",
  "axum",
  "axum-extra",
@@ -2855,6 +2854,7 @@ dependencies = [
  "dotenvy",
  "elements 0.25.3",
  "elements-miniscript",
+ "emvault",
  "miniscript",
  "password-hash",
  "qrcode",

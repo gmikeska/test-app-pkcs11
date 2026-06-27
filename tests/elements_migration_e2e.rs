@@ -25,14 +25,14 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use asterism::core::signer::Signer;
-use asterism::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
-use asterism::elements::signer::ElementsSigner;
-use asterism::elements::sync::{
+use emvault::core::signer::Signer;
+use emvault::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
+use emvault::elements::signer::ElementsSigner;
+use emvault::elements::sync::{
     BlockScanEngine, CapturedUtxo, ElementsChainSource, KeychainKind, WalletId, WalletUtxoStore,
 };
-use asterism::elements::testkit::SoftwareSigner;
-use asterism::elements::{
+use emvault::elements::testkit::SoftwareSigner;
+use emvault::elements::{
     ElementsNetwork, ElementsWalletHandle, ElementsWollet, LwkNetwork, build_migration_pset,
     captured_from_output, finalize_p2wsh_pset,
 };

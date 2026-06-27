@@ -12,7 +12,7 @@
 //!   partly-unconfirmed spends)**.
 //!
 //! The old-federation (signed) accounts use `Pkcs11Signer`s over
-//! `libasterism_dev_hsm.so`; the new-federation destinations are dev-HSM
+//! `libemvault_dev_hsm.so`; the new-federation destinations are dev-HSM
 //! federations too but are never signed here (their outputs are spent by a
 //! *future* migration) — only their addresses matter.
 //!
@@ -25,7 +25,7 @@
 //! Skips cleanly when either layer is unavailable:
 //!   * the live node — activated only when `BITCOIN_RPC_URL` is explicitly
 //!     exported (with `BITCOIN_RPC_USER` / `BITCOIN_RPC_PASSWORD`; optional
-//!     `BITCOIN_WALLET_NAME`, default `asterism-pkcs11` to match `config.rs`),
+//!     `BITCOIN_WALLET_NAME`, default `emvault-pkcs11` to match `config.rs`),
 //!     mirroring how the sibling Elements e2es gate on `ELEMENTS_RPC_URL`, or
 //!   * `PKCS11_LIB` + `APP_HSM_{5,6,7}_LABEL`/`_PIN` (the dev-HSM federation,
 //!     loaded from `.env`).
@@ -47,9 +47,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use asterism::core::descriptor::{KeyMode, to_multipath_string};
-use asterism::core::federation::Federation;
-use asterism::core::network::NetworkType;
+use emvault::core::descriptor::{KeyMode, to_multipath_string};
+use emvault::core::federation::Federation;
+use emvault::core::network::NetworkType;
 use bdk_wallet::bitcoin::bip32::DerivationPath as BtcDerivationPath;
 use bdk_wallet::bitcoin::consensus::Encodable;
 use bdk_wallet::bitcoin::{
@@ -59,8 +59,8 @@ use bdk_wallet::miniscript::psbt::PsbtExt;
 use bdk_wallet::signer::SignerOrdering;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet};
 
-use asterism::dev_signer::DevBackend;
-use asterism::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
+use emvault::dev_signer::DevBackend;
+use emvault::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
 use serde_json::json;
 use test_app_pkcs11::wallet::NetworkPatchedSigner;
@@ -99,13 +99,13 @@ fn node_env() -> Option<NodeEnv> {
     // regtest node is up, run the e2e". We deliberately do not load `.env` or
     // compose from `BITCOIN_RPC_HOST/PORT`, so the test skips cleanly under a
     // plain `cargo test` even though `.env` exists. `BITCOIN_WALLET_NAME`
-    // defaults to `asterism-pkcs11`, matching `config.rs`.
+    // defaults to `emvault-pkcs11`, matching `config.rs`.
     Some(NodeEnv {
         rpc_url: std::env::var("BITCOIN_RPC_URL").ok()?,
         rpc_user: std::env::var("BITCOIN_RPC_USER").ok()?,
         rpc_pass: std::env::var("BITCOIN_RPC_PASSWORD").ok()?,
         wallet_name: std::env::var("BITCOIN_WALLET_NAME")
-            .unwrap_or_else(|_| "asterism-pkcs11".to_string()),
+            .unwrap_or_else(|_| "emvault-pkcs11".to_string()),
     })
 }
 

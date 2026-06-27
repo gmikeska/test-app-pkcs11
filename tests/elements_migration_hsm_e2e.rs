@@ -11,7 +11,7 @@
 //!
 //! It mirrors the proven `SoftwareSigner` e2es in `elements_migration_e2e.rs`
 //! one-for-one, swapping the in-memory software signers on the **old-federation
-//! (signed)** accounts for `Pkcs11Signer`s over `libasterism_dev_hsm.so`. The
+//! (signed)** accounts for `Pkcs11Signer`s over `libemvault_dev_hsm.so`. The
 //! **new-federation destinations stay software wallets** — they are never signed
 //! in this migration (their outputs are spent by a *future* migration), so they
 //! need only an address to receive at and a master blinding key to unblind for
@@ -51,19 +51,19 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use asterism::core::signer::Signer;
-use asterism::dev_signer::DevBackend;
-use asterism::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
-use asterism::elements::signer::ElementsSigner;
-use asterism::elements::sync::{
+use emvault::core::signer::Signer;
+use emvault::dev_signer::DevBackend;
+use emvault::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
+use emvault::elements::signer::ElementsSigner;
+use emvault::elements::sync::{
     BlockScanEngine, CapturedUtxo, ElementsChainSource, KeychainKind, WalletId, WalletUtxoStore,
 };
-use asterism::elements::testkit::SoftwareSigner;
-use asterism::elements::{
+use emvault::elements::testkit::SoftwareSigner;
+use emvault::elements::{
     ElementsNetwork, ElementsWalletHandle, ElementsWollet, LwkNetwork, build_migration_pset,
     captured_from_output, finalize_p2wsh_pset,
 };
-use asterism::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
+use emvault::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
 use bitcoin::Network;
 use bitcoin::bip32::DerivationPath;
 
