@@ -17,8 +17,24 @@ rather than signer custodians:
 - Sending collapses build → sign (3-of-3) → finalize → broadcast into a
   single `POST /wallet/send`. There is no proposal lifecycle.
 
-Bitcoin only in v1; Elements parity is planned once `asterism-elements`
-plus `Pkcs11Signer`'s `elements` feature are wired together.
+Both Bitcoin **and** Elements/Liquid are wired up: each user gets a
+parallel client-side Elements wallet, and the app supports federation
+migration (HSM rotation + fund sweep) on both chains.
+
+## Feature guide
+
+For an exhaustive, developer-oriented walkthrough of **every** feature —
+the HSM federation model, the Bitcoin and Elements wallet surfaces,
+federation versioning and migration, the scalable block-scan ingestion
+service, the CLI example tools, the full configuration surface, and a
+"where do I start?" map of key functions and routes — see
+**[`FEATURES.md`](FEATURES.md)**.
+
+`FEATURES.md` is written as an AI/human developer-ergonomics reference:
+every capability is cross-linked to the source symbol that implements it
+(`src/file.rs::symbol`) so you can learn the app quickly and jump
+straight to the code. This README is the quick-start; `FEATURES.md` is
+the deep reference.
 
 ## Prerequisites
 
