@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Test web app exercising asterism-pkcs11: customer-facing wallets backed by a 3-of-3 federation of emulated HSMs."
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/gmikeska/test-app-pkcs11"
 publish = false
 
 [dependencies]

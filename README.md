@@ -1,12 +1,12 @@
 # test-app-pkcs11
 
 > Customer-facing test web app exercising
-> [`asterism-pkcs11`](../asterism-pkcs11/): each user gets a 3-of-3
+> [`asterism-pkcs11`](https://github.com/gmikeska/asterism-pkcs11): each user gets a 3-of-3
 > HSM-backed Bitcoin wallet, every spend is signed by all 3 emulated HSMs
 > server-side and broadcast immediately.
 
 `test-app-pkcs11` mirrors the architecture, layout, and styling of
-[`test-app-xpub`](../test-app-xpub/), but treats users as customers
+[`test-app-xpub`](https://github.com/gmikeska/test-app-xpub), but treats users as customers
 rather than signer custodians:
 
 - Users never bring an XPUB. There is no onboarding flow.
