@@ -14,7 +14,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use asterism_elements::ElementsNetwork;
+use asterism::elements::ElementsNetwork;
 use bitcoin::Network;
 use bitcoin::bip32::{ChildNumber, DerivationPath};
 

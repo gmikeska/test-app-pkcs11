@@ -38,16 +38,16 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use asterism_core::signer::Signer;
-use asterism_dev_signer::DevBackend;
-use asterism_elements::descriptor::{CtDescriptorBuilder, CtKeyMode};
-use asterism_elements::signer::ElementsSigner;
-use asterism_elements::sync::{CapturedUtxo, KeychainKind, WalletId};
-use asterism_elements::{
+use asterism::core::signer::Signer;
+use asterism::dev_signer::DevBackend;
+use asterism::elements::descriptor::{CtDescriptorBuilder, CtKeyMode};
+use asterism::elements::signer::ElementsSigner;
+use asterism::elements::sync::{CapturedUtxo, KeychainKind, WalletId};
+use asterism::elements::{
     ElementsNetwork, ElementsWalletHandle, ElementsWollet, build_migration_pset,
     captured_from_output, finalize_p2wsh_pset,
 };
-use asterism_pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
+use asterism::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
 use bitcoin::Network;
 use bitcoin::bip32::DerivationPath;
 use elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};

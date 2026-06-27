@@ -17,21 +17,26 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use asterism_core::descriptor::{KeyMode, to_multipath_string};
-use asterism_core::federated_wallet::FederatedWallet as FederatedWalletTrait;
-use asterism_core::network::NetworkType;
-use asterism_core::psbt::{SigningCoordinator, UnsignedPsbt};
-use asterism_core::signer::{Signer, SignerCapabilities, SignerHealth, SignerId, SignerType};
-use asterism_core::{BtcFederatedWallet, Federation, FederationWallet, error::SignerError};
-use asterism_pkcs11::Pkcs11Signer;
+use asterism::core::descriptor::{KeyMode, to_multipath_string};
+use asterism::core::federated_wallet::FederatedWallet as FederatedWalletTrait;
+use asterism::core::network::NetworkType;
+use asterism::core::error::PsbtError;
+use asterism::core::psbt as core_psbt;
+use asterism::core::psbt::{SigningCoordinator, UnsignedPsbt};
+use asterism::core::signer::{Signer, SignerId};
+use asterism::core::chain_sync::{self, ChainSyncError, InitWalletError};
+use asterism::core::{BtcFederatedWallet, Federation, FederationWallet};
+use asterism::pkcs11::Pkcs11Signer;
+// `Emitter`/`NO_EXPECTED_MEMPOOL_TXS` remain for the best-effort version-wallet
+// fan-out sync below; the primary wallet sync uses `chain_sync::emitter_sync`.
 use bdk_bitcoind_rpc::{Emitter, NO_EXPECTED_MEMPOOL_TXS};
 use bdk_wallet::chain::{ChainPosition, Merge};
 use bdk_wallet::signer::SignerOrdering;
 use bdk_wallet::{AddressInfo, ChangeSet, KeychainKind, SignOptions, Wallet};
 use bitcoin::address::NetworkUnchecked;
-use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
+use bitcoin::bip32::{DerivationPath, Fingerprint};
 use bitcoin::consensus::Encodable;
-use bitcoin::{Address, Amount, FeeRate, Network, NetworkKind, OutPoint, ScriptBuf, Txid, Weight};
+use bitcoin::{Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Txid, Weight};
 use bitcoincore_rpc::{Auth, Client as RpcClient, RpcApi};
 use sqlx::PgPool;
 use tokio::sync::Mutex as AsyncMutex;
@@ -54,75 +59,13 @@ type SavedBip32Derivation = (
 pub const REVEAL_COUNT: u32 = 20;
 
 // ---------------------------------------------------------------------------
-// Network-patched signer wrapper
+// Network-patched signer wrapper — extracted to `asterism-pkcs11`
 // ---------------------------------------------------------------------------
 
-/// Adapter around [`Pkcs11Signer`] that re-stamps the xpub network kind.
-///
-/// The dev-shim backend (and the default `HsmBackend::read_xpub`
-/// implementation) always reports an xpub with `NetworkKind::Main`,
-/// while the wallet runs on `Network::Regtest`. `DescriptorBuilder`
-/// rejects that mismatch with `DescriptorError::NetworkMismatch`. This
-/// wrapper carries a cloned xpub with the `network` field corrected so
-/// federation construction succeeds; the underlying chain code, public
-/// key, and BIP-32 metadata are untouched, and the actual `cryptoki`
-/// signing path runs through the inner [`Pkcs11Signer`] (registered
-/// separately on `bdk_wallet::Wallet` via `add_signer`).
-#[derive(Clone, Debug)]
-pub struct NetworkPatchedSigner {
-    inner: Pkcs11Signer,
-    patched_xpub: Xpub,
-}
-
-impl NetworkPatchedSigner {
-    /// Wrap `inner` with an xpub network kind matching `network`.
-    #[must_use]
-    pub fn new(inner: Pkcs11Signer, network: Network) -> Self {
-        let mut xpub = *inner.xpub();
-        xpub.network = NetworkKind::from(network);
-        Self {
-            inner,
-            patched_xpub: xpub,
-        }
-    }
-
-    /// Borrow the inner [`Pkcs11Signer`].
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn inner(&self) -> &Pkcs11Signer {
-        &self.inner
-    }
-}
-
-impl Signer for NetworkPatchedSigner {
-    fn id(&self) -> SignerId {
-        self.inner.id()
-    }
-    fn label(&self) -> Option<&str> {
-        self.inner.label()
-    }
-    fn xpub(&self) -> &Xpub {
-        &self.patched_xpub
-    }
-    fn fingerprint(&self) -> Fingerprint {
-        self.inner.fingerprint()
-    }
-    fn derivation_path(&self) -> &DerivationPath {
-        self.inner.derivation_path()
-    }
-    fn signer_type(&self) -> SignerType {
-        self.inner.signer_type()
-    }
-    fn supported_networks(&self) -> Vec<NetworkType> {
-        self.inner.supported_networks()
-    }
-    fn capabilities(&self) -> SignerCapabilities {
-        self.inner.capabilities()
-    }
-    fn health_check(&self) -> Result<SignerHealth, SignerError> {
-        self.inner.health_check()
-    }
-}
+// `NetworkPatchedSigner` now lives in `asterism-pkcs11` (every PKCS#11 consumer
+// on a non-mainnet network needs it). Re-exported here so existing
+// `crate::wallet::NetworkPatchedSigner` paths keep resolving.
+pub use asterism::pkcs11::NetworkPatchedSigner;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -224,15 +167,15 @@ pub enum WalletError {
 
     /// `DescriptorBuilder` (via `Federation`) rejected the federation.
     #[error("descriptor builder error: {0}")]
-    Descriptor(#[from] asterism_core::DescriptorError),
+    Descriptor(#[from] asterism::core::DescriptorError),
 
     /// `Federation::with_key_mode` rejected the inputs.
     #[error("federation construction failed: {0}")]
-    Federation(#[from] asterism_core::error::FederationError),
+    Federation(#[from] asterism::core::error::FederationError),
 
     /// `UnsignedPsbt::new` / `SigningCoordinator` rejected the PSBT.
     #[error("PSBT pipeline error: {0}")]
-    Psbt(#[from] asterism_core::error::PsbtError),
+    Psbt(#[from] asterism::core::error::PsbtError),
 
     /// Configuration error (e.g. invalid derivation index).
     #[error("config error: {0}")]
@@ -245,6 +188,27 @@ pub enum WalletError {
     /// Database error.
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
+}
+
+impl WalletError {
+    /// Map a core [`ChainSyncError`] back into this app's `WalletError`.
+    fn from_chain_sync(err: ChainSyncError) -> Self {
+        match err {
+            ChainSyncError::Rpc(source) => Self::Rpc(source),
+            ChainSyncError::ApplyBlock { height, source } => Self::ApplyBlock { height, source },
+        }
+    }
+
+    /// Map a core [`InitWalletError`] back into this app's `WalletError`,
+    /// preserving the prior stringified `LoadWallet`/`CreateWallet` surfaces.
+    fn from_init_wallet(id: Uuid, err: InitWalletError) -> Self {
+        match err {
+            InitWalletError::Decode(source) => Self::DecodeChangeSet { id, source },
+            InitWalletError::Load(source) => Self::LoadWallet(source.to_string()),
+            InitWalletError::EmptyChangeSet => Self::LoadWallet("empty changeset".into()),
+            InitWalletError::Create(source) => Self::CreateWallet(source.to_string()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -583,26 +547,14 @@ impl WalletManager {
             )?
         };
 
-        let (mut wallet, initial_changeset) = if let Some(json) = row.bdk_changeset.clone() {
-            let aggregate: ChangeSet =
-                serde_json::from_value(json).map_err(|source| WalletError::DecodeChangeSet {
-                    id: wallet_id,
-                    source,
-                })?;
-            let w = Wallet::load()
-                .check_network(self.network)
-                .load_wallet_no_persist(aggregate.clone())
-                .map_err(|e| WalletError::LoadWallet(e.to_string()))?
-                .ok_or_else(|| WalletError::LoadWallet("empty changeset".into()))?;
-            (w, aggregate)
-        } else {
-            let multipath = row.descriptor.clone();
-            let w = Wallet::create_from_two_path_descriptor(multipath)
-                .network(self.network)
-                .create_wallet_no_persist()
-                .map_err(|e| WalletError::CreateWallet(e.to_string()))?;
-            (w, ChangeSet::default())
-        };
+        // Init-or-load BDK construction lives in `asterism::core::chain_sync`
+        // (E3b). Core leaves the staged changeset intact on the fresh path and
+        // returns an empty aggregate, matching this app's prior behavior
+        // exactly (signers are registered just below, then persisted).
+        let loaded =
+            chain_sync::init_or_load_wallet(self.network, row.descriptor.clone(), row.bdk_changeset.clone())
+                .map_err(|e| WalletError::from_init_wallet(wallet_id, e))?;
+        let (mut wallet, initial_changeset) = (loaded.wallet, loaded.changeset);
 
         // Register all Pkcs11Signers on both keychains.
         for s in signers_arc.iter() {
@@ -824,34 +776,18 @@ impl UserWallet {
 
         let (summary, delta) = {
             let mut wallet = self.inner.lock().await;
-            let cp = wallet.latest_checkpoint();
-            let start_height = cp.height();
-            let mut emitter = Emitter::new(&*self.rpc, cp, start_height, NO_EXPECTED_MEMPOOL_TXS);
-
-            let mut new_blocks: u32 = 0;
-            while let Some(block_event) = emitter.next_block()? {
-                let height = block_event.block_height();
-                let connected_to = block_event.connected_to();
-                wallet
-                    .apply_block_connected_to(&block_event.block, height, connected_to)
-                    .map_err(|source| WalletError::ApplyBlock { height, source })?;
-                new_blocks = new_blocks.saturating_add(1);
-            }
-
-            let mempool = emitter.mempool()?;
-            let new_mempool_txs = u32::try_from(mempool.update.len()).unwrap_or(u32::MAX);
-            wallet.apply_unconfirmed_txs(mempool.update);
-
-            let tip_height = wallet.latest_checkpoint().height();
-            let delta = wallet.take_staged();
+            // Pure-BDK emitter drive lives in `asterism::core::chain_sync` (E3b);
+            // persistence (changeset merge + DB write) stays here.
+            let result = chain_sync::emitter_sync(&mut wallet, &*self.rpc)
+                .map_err(WalletError::from_chain_sync)?;
             drop(wallet);
             (
                 SyncSummary {
-                    tip_height,
-                    new_blocks,
-                    new_mempool_txs,
+                    tip_height: result.tip_height,
+                    new_blocks: result.blocks_synced,
+                    new_mempool_txs: result.new_mempool_txs,
                 },
-                delta,
+                result.changeset,
             )
         };
 
@@ -888,7 +824,7 @@ impl UserWallet {
         &self,
         target_count: u32,
     ) -> Result<Vec<RevealedAddress>, WalletError> {
-        use asterism_core::federated_wallet::FederatedWallet as _;
+        use asterism::core::federated_wallet::FederatedWallet as _;
         if target_count == 0 {
             return Ok(Vec::new());
         }
@@ -959,7 +895,7 @@ impl UserWallet {
         &self,
         count: u32,
     ) -> Vec<(usize, Vec<RevealedAddress>)> {
-        use asterism_core::federated_wallet::FederatedWallet as _;
+        use asterism::core::federated_wallet::FederatedWallet as _;
 
         let mut results = Vec::with_capacity(self.version_wallets.len());
 
@@ -1405,15 +1341,16 @@ impl UserWallet {
         // mutex so concurrent requests for the same user serialize.
         let (raw_tx, txid, fee_sat, recipient_sat, delta, tip) = {
             let mut wallet = self.inner.lock().await;
-            let psbt = {
-                let mut builder = wallet.build_tx();
-                builder
-                    .add_recipient(recipient_spk.clone(), amount)
-                    .fee_rate(fee_rate);
-                builder
-                    .finish()
-                    .map_err(|e| WalletError::BuildTx(e.to_string()))?
-            };
+            let psbt = core_psbt::build_spend(
+                &mut wallet,
+                recipient_spk.clone(),
+                amount,
+                fee_rate,
+            )
+            .map_err(|e| match e {
+                PsbtError::BuildFailed(s) => WalletError::BuildTx(s),
+                other => WalletError::BuildTx(other.to_string()),
+            })?;
 
             let unsigned = UnsignedPsbt::new(psbt)?;
             let mut coord = SigningCoordinator::new(&self.federation, unsigned);

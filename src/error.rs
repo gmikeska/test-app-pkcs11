@@ -3,7 +3,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
-use asterism_core::DescriptorError;
+use asterism::core::DescriptorError;
 
 use crate::elements_wallet::ElementsWalletError;
 use crate::hsm::HsmError;

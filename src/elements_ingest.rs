@@ -7,9 +7,9 @@
 
 use std::time::Duration;
 
-use asterism_elements::ElementsNetwork;
-use asterism_elements::ElementsWollet;
-use asterism_elements::sync::{BlockScanEngine, WalletId};
+use asterism::elements::ElementsNetwork;
+use asterism::elements::ElementsWollet;
+use asterism::elements::sync::{BlockScanEngine, WalletId};
 use sqlx::PgPool;
 use tokio::task::JoinHandle;
 use uuid::Uuid;

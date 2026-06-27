@@ -5,7 +5,7 @@
 //! ([`crate::elements_sync`] + [`crate::elements_ingest`]) into Postgres, *not*
 //! by per-user daemon wallets (which do not scale). Balance/addresses read from
 //! [`PgWalletUtxoStore`]; sends build a PSET via
-//! [`asterism_elements::build_spend_pset`], sign with the HSM federation, and
+//! [`asterism::elements::build_spend_pset`], sign with the HSM federation, and
 //! broadcast through [`RpcChainSource`].
 //!
 //! The `daemon_wallet_name` column is retained as a vestigial label (federation
@@ -16,10 +16,10 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use asterism_elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
-use asterism_elements::signer::ElementsSigner;
-use asterism_elements::sync::{ElementsChainSource, KeychainKind, WalletId, WalletUtxoStore};
-use asterism_elements::{
+use asterism::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
+use asterism::elements::signer::ElementsSigner;
+use asterism::elements::sync::{ElementsChainSource, KeychainKind, WalletId, WalletUtxoStore};
+use asterism::elements::{
     ElementsNetwork, ElementsWollet, LwkNetwork, build_spend_pset, finalize_p2wsh_pset,
 };
 use sqlx::PgPool;
@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::config::AppConfig;
 use crate::db;
-use crate::elements_rpc::{ElementsBalances, ElementsRpc, ElementsRpcError};
+use asterism::elements::rpc::{ElementsBalances, ElementsRpc, ElementsRpcError};
 use crate::elements_sync::{PgWalletUtxoStore, RpcChainSource, node_lwk_network};
 use crate::hsm::{HsmError, HsmFleet, SignerSet};
 use crate::models::ElementsWalletRow;
@@ -458,7 +458,7 @@ impl UserElementsWallet {
     /// All unspent captured UTXOs for this wallet (from the block-scan store).
     pub async fn captured_utxos(
         &self,
-    ) -> Result<Vec<asterism_elements::CapturedUtxo>, ElementsWalletError> {
+    ) -> Result<Vec<asterism::elements::CapturedUtxo>, ElementsWalletError> {
         let store = PgWalletUtxoStore::new(self.pool.clone());
         let wid = self.wallet_key();
         tokio::task::spawn_blocking(move || store.list_unspent(wid).map_err(pipeline_err))
@@ -487,7 +487,7 @@ impl UserElementsWallet {
                 .list_unspent(wid)
                 .map_err(pipeline_err)?
                 .iter()
-                .map(asterism_elements::CapturedUtxo::value)
+                .map(asterism::elements::CapturedUtxo::value)
                 .sum())
         })
         .await
@@ -826,7 +826,7 @@ impl UserElementsWallet {
                 }
                 let total: u64 = utxos
                     .iter()
-                    .map(asterism_elements::CapturedUtxo::value)
+                    .map(asterism::elements::CapturedUtxo::value)
                     .sum();
                 let recipient_addr =
                     elements::Address::from_str(&recipient_owned).map_err(|e| {
@@ -836,7 +836,7 @@ impl UserElementsWallet {
                         }
                     })?;
 
-                let blinded = asterism_elements::build_sweep_pset(
+                let blinded = asterism::elements::build_sweep_pset(
                     &wollet,
                     &utxos,
                     &recipient_addr,
@@ -980,7 +980,7 @@ fn parse_mbk_hex(s: &str) -> Option<[u8; 32]> {
 /// Per-script-pubkey totals across captured UTXOs: `(total_received, unspent)`.
 /// `total_received` includes spent UTXOs (historical), `unspent` excludes them.
 fn balances_by_spk(
-    utxos: &[asterism_elements::CapturedUtxo],
+    utxos: &[asterism::elements::CapturedUtxo],
 ) -> (
     HashMap<elements::Script, u64>,
     HashMap<elements::Script, u64>,

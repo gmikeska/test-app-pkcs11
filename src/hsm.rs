@@ -2,7 +2,7 @@
 //!
 //! ## Token initialization
 //!
-//! At startup, [`HsmFleet::new`] calls [`asterism_dev_signer::init_dev_token`]
+//! At startup, [`HsmFleet::new`] calls [`asterism::dev_signer::init_dev_token`]
 //! for each discovered token. The helper is idempotent — already
 //! initialized tokens are left alone.
 //!
@@ -19,7 +19,7 @@
 //!    (`Pkcs11Signer::derive_from_seed` with an empty seed — the shim
 //!    looks up the slot's preconfigured BIP-39 mnemonic).
 //!
-//! [`asterism_dev_signer::setup_dev_federation`] would be the obvious
+//! [`asterism::dev_signer::setup_dev_federation`] would be the obvious
 //! shortcut, but it hardcodes `Network::Testnet`. We bypass it so the
 //! signers honour the `BITCOIN_NETWORK` from `.env` (typically
 //! `Network::Regtest`).
@@ -31,9 +31,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use asterism_dev_signer::{DevBackend, DevConfig, init_dev_token};
-use asterism_pkcs11::config::SlotIdentifier;
-use asterism_pkcs11::{Pkcs11Config, Pkcs11Error, Pkcs11Session, Pkcs11Signer};
+use asterism::dev_signer::{DevBackend, DevConfig, init_dev_token};
+use asterism::pkcs11::config::SlotIdentifier;
+use asterism::pkcs11::{Pkcs11Config, Pkcs11Error, Pkcs11Session, Pkcs11Signer};
 use bitcoin::Network;
 use bitcoin::bip32::DerivationPath;
 use tokio::sync::Mutex as AsyncMutex;
@@ -47,9 +47,9 @@ pub enum HsmError {
     /// Token initialization failure (programmatic `pkcs11-tool
     /// --init-token` equivalent).
     #[error("dev token initialization failed: {0}")]
-    InitToken(#[from] asterism_dev_signer::DevSetupError),
+    InitToken(#[from] asterism::dev_signer::DevSetupError),
 
-    /// Underlying [`asterism_pkcs11`] error (session open, key derive,
+    /// Underlying [`asterism::pkcs11`] error (session open, key derive,
     /// xpub read, etc.).
     #[error("PKCS#11 error: {0}")]
     Pkcs11(#[from] Pkcs11Error),
@@ -257,7 +257,7 @@ fn delete_key_objects(
             Box::new(DevBackend),
         );
         let session = Pkcs11Session::open(&cfg, &SlotIdentifier::label(&token.label), &token.pin)?;
-        asterism_pkcs11::key_ops::delete_key(&session, label)?;
+        asterism::pkcs11::key_ops::delete_key(&session, label)?;
     }
     Ok(())
 }

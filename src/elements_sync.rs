@@ -1,5 +1,5 @@
 //! Postgres + Elements-RPC implementations of the `asterism-elements`
-//! [`sync`](asterism_elements::sync) traits — the consuming application's half
+//! [`sync`](asterism::elements::sync) traits — the consuming application's half
 //! of the shared block-scan pipeline.
 //!
 //! - [`PgBlockStore`] / [`PgWalletUtxoStore`] persist blocks and per-wallet
@@ -26,11 +26,11 @@
 
 use std::str::FromStr;
 
-use asterism_elements::sync::{
+use asterism::elements::sync::{
     BlockStore, CapturedUtxo, ElementsChainSource, KeychainKind, SyncedTip, WalletId,
     WalletUtxoStore,
 };
-use asterism_elements::{ElementsNetwork, SyncError};
+use asterism::elements::{ElementsNetwork, SyncError};
 use elements::AssetId;
 
 use bitcoincore_rpc::{Auth, Client, RpcApi};
@@ -485,7 +485,7 @@ impl RpcChainSource {
 pub fn node_lwk_network(
     chain: &RpcChainSource,
     network: ElementsNetwork,
-) -> Result<asterism_elements::LwkNetwork, SyncError> {
+) -> Result<asterism::elements::LwkNetwork, SyncError> {
     Ok(match network {
         ElementsNetwork::ElementsRegtest => {
             let policy = chain.policy_asset()?;
@@ -607,7 +607,7 @@ mod tests {
     }
 
     /// The Postgres stores must satisfy the same contracts the in-memory fakes
-    /// do (mirrors `asterism_elements::sync::tests`). Runs under a blocking
+    /// do (mirrors `asterism::elements::sync::tests`). Runs under a blocking
     /// task because the sync trait methods `block_on` internally.
     #[tokio::test]
     async fn pg_stores_honor_contracts() {

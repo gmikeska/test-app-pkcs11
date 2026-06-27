@@ -27,15 +27,15 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use asterism_core::federation::Federation;
-use asterism_core::network::{ElementsNetworkId, NetworkType};
-use asterism_core::signer::Signer;
+use asterism::core::federation::Federation;
+use asterism::core::network::{ElementsNetworkId, NetworkType};
+use asterism::core::signer::Signer;
 
-use asterism_elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
-use asterism_elements::pset::ElementsSigningCoordinator;
-use asterism_elements::sync::{BlockScanEngine, ElementsChainSource, WalletId, WalletUtxoStore};
-use asterism_elements::testkit::SoftwareSigner;
-use asterism_elements::{ElementsNetwork, ElementsWalletHandle, ElementsWollet, build_spend_pset};
+use asterism::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
+use asterism::elements::pset::ElementsSigningCoordinator;
+use asterism::elements::sync::{BlockScanEngine, ElementsChainSource, WalletId, WalletUtxoStore};
+use asterism::elements::testkit::SoftwareSigner;
+use asterism::elements::{ElementsNetwork, ElementsWalletHandle, ElementsWollet, build_spend_pset};
 
 use test_app_pkcs11::elements_sync::{PgBlockStore, PgWalletUtxoStore, RpcChainSource};
 
@@ -152,7 +152,7 @@ async fn elements_receive_and_send_e2e() {
     // --- fund the wollet's external address #0 from the node ----------------
     let node = node_wallet(&env);
     let deposit_addr = wollet
-        .address(asterism_elements::sync::KeychainKind::External, 0)
+        .address(asterism::elements::sync::KeychainKind::External, 0)
         .unwrap();
     let mine_addr: String = node.call("getnewaddress", &[]).unwrap();
     let _txid: String = node
@@ -235,7 +235,7 @@ async fn elements_receive_and_send_e2e() {
             .list_unspent(wallet_id)
             .map_err(de)?
             .iter()
-            .map(asterism_elements::CapturedUtxo::value)
+            .map(asterism::elements::CapturedUtxo::value)
             .collect())
     })
     .await

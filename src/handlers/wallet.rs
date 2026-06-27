@@ -286,7 +286,7 @@ pub async fn receive(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
 ) -> Result<Response, AppError> {
-    use asterism_core::federated_wallet::FederatedWallet as _;
+    use asterism::core::federated_wallet::FederatedWallet as _;
 
     let uw = state.wallet_manager.load_or_init(user.id).await?;
     uw.sync().await?;
@@ -606,11 +606,11 @@ pub async fn federation(
 // ---------------------------------------------------------------------------
 
 fn build_signer_views(
-    federation: &asterism_core::Federation<crate::wallet::NetworkPatchedSigner>,
-    all_signers: &[asterism_pkcs11::Pkcs11Signer],
+    federation: &asterism::core::Federation<crate::wallet::NetworkPatchedSigner>,
+    all_signers: &[asterism::pkcs11::Pkcs11Signer],
     state: &AppState,
 ) -> Vec<SignerView> {
-    use asterism_core::signer::Signer;
+    use asterism::core::signer::Signer;
     federation
         .signers()
         .iter()

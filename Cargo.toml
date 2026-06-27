@@ -7,13 +7,12 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-# Asterism — Federation/Signer/SigningCoordinator + Pkcs11Signer.
-asterism-core = { path = "../asterism-core", features = ["elements"] }
-asterism-pkcs11 = { path = "../asterism-pkcs11", features = ["elements"] }
-asterism-elements = { path = "../asterism-elements" }
-# Dev-only HSM helpers (DevBackend, init_dev_token). The `setup_dev_federation`
-# helper is bypassed on purpose — see src/hsm.rs for the regtest-aware path.
-asterism-dev-signer = { path = "../asterism-dev-signer" }
+# Asterism — consumed through the `asterism` facade. `pkcs11` +
+# `elements` reproduce the old `asterism-pkcs11 { features = ["elements"] }`
+# wiring (HSM signing over Bitcoin + Elements); `dev-signer` adds the dev-only
+# HSM helpers (DevBackend, init_dev_token) and implies `pkcs11`. The
+# `setup_dev_federation` helper is bypassed on purpose — see src/hsm.rs.
+asterism = { path = "../asterism", features = ["pkcs11", "elements", "dev-signer"] }
 
 bitcoin = "0.32"
 miniscript = "12"
@@ -81,9 +80,11 @@ axum-extra = { version = "0.12.6", features = ["form"] }
 toml = "0.8"
 
 [dev-dependencies]
-# Enables `asterism_elements::testkit::SoftwareSigner` for the Elements
-# end-to-end integration test (node + Postgres backed).
-asterism-elements = { path = "../asterism-elements", features = ["test-utils"] }
+# Enables `asterism::elements::testkit::SoftwareSigner` for the Elements
+# end-to-end integration test (node + Postgres backed). Cargo unions this with
+# the normal `asterism` dep, so the test build gets pkcs11 + elements +
+# dev-signer + test-utils.
+asterism = { path = "../asterism", features = ["test-utils"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
