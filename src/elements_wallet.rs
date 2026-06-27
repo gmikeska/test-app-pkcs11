@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use asterism::config::hex_encode;
 use asterism::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
 use asterism::elements::signer::ElementsSigner;
 use asterism::elements::sync::{ElementsChainSource, KeychainKind, WalletId, WalletUtxoStore};
@@ -956,14 +957,8 @@ fn derive_master_blinding_key(user_id: Uuid, account_idx: i32) -> [u8; 32] {
     key
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
+// `hex_encode` now lives in `asterism::config` (imported above) — deduplicated
+// in extraction phase E5b.
 
 /// Parse a 64-char hex string into a 32-byte SLIP-77 master blinding key.
 fn parse_mbk_hex(s: &str) -> Option<[u8; 32]> {

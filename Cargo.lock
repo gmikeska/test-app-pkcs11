@@ -178,6 +178,7 @@ dependencies = [
  "asterism-elements",
  "asterism-pkcs11",
  "asterism-xpub",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
