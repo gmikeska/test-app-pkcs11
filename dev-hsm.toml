@@ -10,19 +10,19 @@
 # if you intend to fund these wallets in any way.
 
 [[slots]]
-label = "emvault-pkcs11-app-1"
+label = "asterism-pkcs11-app-1"
 mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 
 [[slots]]
-label = "emvault-pkcs11-app-2"
+label = "asterism-pkcs11-app-2"
 mnemonic = "legal winner thank year wave sausage worth useful legal winner thank yellow"
 
 [[slots]]
-label = "emvault-pkcs11-app-3"
+label = "asterism-pkcs11-app-3"
 mnemonic = "letter advice cage absurd amount doctor acoustic avoid letter advice cage above"
 
 [[slots]]
-label = "emvault-pkcs11-app-4"
+label = "asterism-pkcs11-app-4"
 mnemonic = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong"
 
 # --- Automated-testing HSMs (5–15) -------------------------------------------
@@ -31,45 +31,45 @@ mnemonic = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong"
 # All mnemonics below are valid BIP-39 (checksum-verified).
 
 [[slots]]
-label = "emvault-pkcs11-app-5"
+label = "asterism-pkcs11-app-5"
 mnemonic = "brief enable dove rail churn pupil apology tiny hunt atom curtain tobacco uncover original jealous repeat almost cross scene forget outside hockey system hope"
 
 [[slots]]
-label = "emvault-pkcs11-app-6"
+label = "asterism-pkcs11-app-6"
 mnemonic = "caution amazing universe purpose brown pyramid actor uniform flee pipe hold desk jump lyrics soul rain join design toilet salt lemon holiday mushroom notice"
 
 [[slots]]
-label = "emvault-pkcs11-app-7"
+label = "asterism-pkcs11-app-7"
 mnemonic = "elevator sugar warrior peace gossip pride piece thing skin salmon middle rich purse add size toddler float replace crunch excuse walnut muffin finger alone"
 
 [[slots]]
-label = "emvault-pkcs11-app-8"
+label = "asterism-pkcs11-app-8"
 mnemonic = "limb fog diamond organ test proud media medal panel never salute example drip clip fun project churn envelope afraid kitten diamond post about wide"
 
 [[slots]]
-label = "emvault-pkcs11-app-9"
+label = "asterism-pkcs11-app-9"
 mnemonic = "road carpet dismiss pony pair poet champion point floor correct trash master ill weapon chaos put sketch dress shiver eyebrow milk rail matter wink"
 
 [[slots]]
-label = "emvault-pkcs11-app-10"
+label = "asterism-pkcs11-app-10"
 mnemonic = "dumb boost shrug laugh hawk fabric ripple lumber know expire large bridge enrich bench flee image rent decorate bonus list witness nose safe faculty"
 
 [[slots]]
-label = "emvault-pkcs11-app-11"
+label = "asterism-pkcs11-app-11"
 mnemonic = "relax famous calm cost sustain refuse ring broom short comic ladder fuel what fix noble comfort dish penalty deny grab tone enlist verify monster"
 
 [[slots]]
-label = "emvault-pkcs11-app-12"
+label = "asterism-pkcs11-app-12"
 mnemonic = "recipe lady crunch civil throw toe zebra claim skill birth nut response enable morning fresh believe shuffle want swing rude earth tilt surface casino"
 
 [[slots]]
-label = "emvault-pkcs11-app-13"
+label = "asterism-pkcs11-app-13"
 mnemonic = "pull also basket toddler future galaxy target south knock finish left alert harsh solve window quote thought word utility oven neither drama service clever"
 
 [[slots]]
-label = "emvault-pkcs11-app-14"
+label = "asterism-pkcs11-app-14"
 mnemonic = "argue wrap already woman citizen spice news body gloom fiction labor hockey jeans truly drink supply alter firm nasty cluster ladder slice hub raven"
 
 [[slots]]
-label = "emvault-pkcs11-app-15"
+label = "asterism-pkcs11-app-15"
 mnemonic = "carry connect infant actor grab kiss defy despair liar ritual century insect believe game snake engage donate ivory demand lumber this frame walk wagon"
