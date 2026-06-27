@@ -17,14 +17,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use asterism::core::chain_sync::{self, ChainSyncError, InitWalletError};
 use asterism::core::descriptor::{KeyMode, to_multipath_string};
+use asterism::core::error::PsbtError;
 use asterism::core::federated_wallet::FederatedWallet as FederatedWalletTrait;
 use asterism::core::network::NetworkType;
-use asterism::core::error::PsbtError;
 use asterism::core::psbt as core_psbt;
 use asterism::core::psbt::{SigningCoordinator, UnsignedPsbt};
 use asterism::core::signer::{Signer, SignerId};
-use asterism::core::chain_sync::{self, ChainSyncError, InitWalletError};
 use asterism::core::{BtcFederatedWallet, Federation, FederationWallet};
 use asterism::pkcs11::Pkcs11Signer;
 // `Emitter`/`NO_EXPECTED_MEMPOOL_TXS` remain for the best-effort version-wallet
@@ -551,9 +551,12 @@ impl WalletManager {
         // (E3b). Core leaves the staged changeset intact on the fresh path and
         // returns an empty aggregate, matching this app's prior behavior
         // exactly (signers are registered just below, then persisted).
-        let loaded =
-            chain_sync::init_or_load_wallet(self.network, row.descriptor.clone(), row.bdk_changeset.clone())
-                .map_err(|e| WalletError::from_init_wallet(wallet_id, e))?;
+        let loaded = chain_sync::init_or_load_wallet(
+            self.network,
+            row.descriptor.clone(),
+            row.bdk_changeset.clone(),
+        )
+        .map_err(|e| WalletError::from_init_wallet(wallet_id, e))?;
         let (mut wallet, initial_changeset) = (loaded.wallet, loaded.changeset);
 
         // Register all Pkcs11Signers on both keychains.
@@ -1341,16 +1344,11 @@ impl UserWallet {
         // mutex so concurrent requests for the same user serialize.
         let (raw_tx, txid, fee_sat, recipient_sat, delta, tip) = {
             let mut wallet = self.inner.lock().await;
-            let psbt = core_psbt::build_spend(
-                &mut wallet,
-                recipient_spk.clone(),
-                amount,
-                fee_rate,
-            )
-            .map_err(|e| match e {
-                PsbtError::BuildFailed(s) => WalletError::BuildTx(s),
-                other => WalletError::BuildTx(other.to_string()),
-            })?;
+            let psbt = core_psbt::build_spend(&mut wallet, recipient_spk.clone(), amount, fee_rate)
+                .map_err(|e| match e {
+                    PsbtError::BuildFailed(s) => WalletError::BuildTx(s),
+                    other => WalletError::BuildTx(other.to_string()),
+                })?;
 
             let unsigned = UnsignedPsbt::new(psbt)?;
             let mut coord = SigningCoordinator::new(&self.federation, unsigned);

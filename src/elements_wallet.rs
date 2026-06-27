@@ -28,11 +28,11 @@ use uuid::Uuid;
 
 use crate::config::AppConfig;
 use crate::db;
-use asterism::elements::rpc::{ElementsBalances, ElementsRpc, ElementsRpcError};
 use crate::elements_sync::{PgWalletUtxoStore, RpcChainSource, node_lwk_network};
 use crate::hsm::{HsmError, HsmFleet, SignerSet};
 use crate::models::ElementsWalletRow;
 use crate::wallet::NetworkPatchedSigner;
+use asterism::elements::rpc::{ElementsBalances, ElementsRpc, ElementsRpcError};
 
 #[allow(dead_code)]
 pub const REVEAL_COUNT: u32 = 20;
