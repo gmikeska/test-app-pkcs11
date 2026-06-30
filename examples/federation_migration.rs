@@ -35,9 +35,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bitcoin::Amount;
 use emvault::core::descriptor::KeyMode;
 use emvault::core::signer::Signer;
-use bitcoin::Amount;
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 

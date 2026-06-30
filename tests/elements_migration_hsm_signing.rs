@@ -38,6 +38,10 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use bitcoin::Network;
+use bitcoin::bip32::DerivationPath;
+use elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
+use elements::{AssetId, OutPoint, Script, TxOut, TxOutSecrets, TxOutWitness};
 use emvault::core::signer::Signer;
 use emvault::dev_signer::DevBackend;
 use emvault::elements::descriptor::{CtDescriptorBuilder, CtKeyMode};
@@ -48,10 +52,6 @@ use emvault::elements::{
     captured_from_output, finalize_p2wsh_pset,
 };
 use emvault::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
-use bitcoin::Network;
-use bitcoin::bip32::DerivationPath;
-use elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
-use elements::{AssetId, OutPoint, Script, TxOut, TxOutSecrets, TxOutWitness};
 
 const LBTC_SAT: u64 = 100_000_000;
 

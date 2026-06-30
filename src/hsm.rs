@@ -31,11 +31,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bitcoin::Network;
+use bitcoin::bip32::DerivationPath;
 use emvault::dev_signer::{DevBackend, DevConfig, init_dev_token};
 use emvault::pkcs11::config::SlotIdentifier;
 use emvault::pkcs11::{Pkcs11Config, Pkcs11Error, Pkcs11Session, Pkcs11Signer};
-use bitcoin::Network;
-use bitcoin::bip32::DerivationPath;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 

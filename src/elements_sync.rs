@@ -26,12 +26,12 @@
 
 use std::str::FromStr;
 
+use elements::AssetId;
 use emvault::elements::sync::{
     BlockStore, CapturedUtxo, ElementsChainSource, KeychainKind, SyncedTip, WalletId,
     WalletUtxoStore,
 };
 use emvault::elements::{ElementsNetwork, SyncError};
-use elements::AssetId;
 
 use bitcoincore_rpc::{Auth, Client, RpcApi};
 use elements::encode::{deserialize, serialize, serialize_hex};

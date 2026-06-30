@@ -36,9 +36,6 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use emvault::core::descriptor::{KeyMode, to_multipath_string};
-use emvault::core::federation::Federation;
-use emvault::core::network::NetworkType;
 use bdk_wallet::bitcoin::bip32::DerivationPath as BtcDerivationPath;
 use bdk_wallet::bitcoin::hashes::Hash;
 use bdk_wallet::bitcoin::{
@@ -48,6 +45,9 @@ use bdk_wallet::bitcoin::{
 use bdk_wallet::miniscript::psbt::PsbtExt;
 use bdk_wallet::signer::SignerOrdering;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet};
+use emvault::core::descriptor::{KeyMode, to_multipath_string};
+use emvault::core::federation::Federation;
+use emvault::core::network::NetworkType;
 
 use emvault::dev_signer::DevBackend;
 use emvault::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
