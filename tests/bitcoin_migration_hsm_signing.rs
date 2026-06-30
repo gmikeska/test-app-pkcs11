@@ -33,18 +33,19 @@
 #![allow(clippy::too_many_lines, clippy::similar_names)]
 
 use std::path::PathBuf;
+use emvault::core::bdk_wallet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use bdk_wallet::bitcoin::bip32::DerivationPath as BtcDerivationPath;
-use bdk_wallet::bitcoin::hashes::Hash;
-use bdk_wallet::bitcoin::{
+use emvault::core::bdk_wallet::bitcoin::bip32::DerivationPath as BtcDerivationPath;
+use emvault::core::bdk_wallet::bitcoin::hashes::Hash;
+use emvault::core::bdk_wallet::bitcoin::{
     self, Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
     TxOut, Txid, Weight, Witness, absolute::LockTime, transaction::Version,
 };
-use bdk_wallet::miniscript::psbt::PsbtExt;
-use bdk_wallet::signer::SignerOrdering;
-use bdk_wallet::{KeychainKind, SignOptions, Wallet};
+use emvault::core::bdk_wallet::miniscript::psbt::PsbtExt;
+use emvault::core::bdk_wallet::signer::SignerOrdering;
+use emvault::core::bdk_wallet::{KeychainKind, SignOptions, Wallet};
 use emvault::core::descriptor::{KeyMode, to_multipath_string};
 use emvault::core::federation::Federation;
 use emvault::core::network::NetworkType;

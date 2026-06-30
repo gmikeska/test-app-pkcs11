@@ -15,18 +15,13 @@ publish = false
 # `setup_dev_federation` helper is bypassed on purpose — see src/hsm.rs.
 emvault = { version = "0.1", features = ["pkcs11", "elements", "dev-signer"] }
 
-bitcoin = "0.32"
-miniscript = "12"
-elements = { version = "0.25", features = ["serde"] }
-elements-miniscript = { version = "0.4", features = ["serde"] }
+# Chain + Elements stacks are NOT pinned here — their types cross the EmVault
+# API, so we consume them through the ecosystem's canonical re-exports:
+#   Bitcoin:  emvault::core::{bitcoin, miniscript, bdk_wallet,
+#                             bdk_bitcoind_rpc, bitcoincore_rpc}
+#   Elements: emvault::elements::{elements, elements_miniscript, lwk_wollet}
+# Single source of truth, no version drift between the app and the library.
 base64 = "0.22"
-
-# BDK — per-user wallet (address derivation, UTXO/tx tracking, descriptor
-# persistence via ChangeSet). Bitcoin Core RPC sync via the bdk_bitcoind_rpc
-# Emitter against the local regtest node.
-bdk_wallet = { version = "3.1", features = ["std"] }
-bdk_bitcoind_rpc = "0.22"
-bitcoincore-rpc = "0.19"
 
 # Server-side QR rendering for the address detail page.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
@@ -99,3 +94,12 @@ doc_markdown = "allow"
 # A list-item continuation indented to align with prose reads better than
 # rewriting the source for clippy.
 doc_overindented_list_items = "allow"
+
+# ── Construction-site override ───────────────────────────────────────────────
+# The chain-stack re-exports (e.g. emvault::core::{bdk_wallet, bdk_bitcoind_rpc,
+# bitcoincore_rpc}) are not in the published 0.1.1 yet, so build the apps against
+# the local ecosystem tree. Patching the `emvault` facade cascades to the local
+# emvault-core/-xpub/-elements via its path deps. Remove once those land on
+# crates.io and the version bump is published.
+[patch.crates-io]
+emvault = { path = "../emvault" }

@@ -881,8 +881,6 @@ dependencies = [
 [[package]]
 name = "emvault"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cc4103742bce8ef58f965c877fa8e5239053077fe39054ff3e151a9f646f4bf"
 dependencies = [
  "emvault-core",
  "emvault-dev-signer",
@@ -895,8 +893,6 @@ dependencies = [
 [[package]]
 name = "emvault-core"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7c2952926c29f37c760b51a9912d11eebb50789cc9c1e3cd1f3fa3b683b3f2c"
 dependencies = [
  "bdk_bitcoind_rpc",
  "bdk_wallet",
@@ -915,8 +911,6 @@ dependencies = [
 [[package]]
 name = "emvault-dev-signer"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af176a05ba6bd622306685d3cd6a707b7cbd606b0521d14f5f95394965db8335"
 dependencies = [
  "bitcoin",
  "cryptoki",
@@ -933,8 +927,6 @@ dependencies = [
 [[package]]
 name = "emvault-elements"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "247d7bc52c5582c0e0f1e8d7b6e3ac7bd004701ae361bb68940206f129b6e8f0"
 dependencies = [
  "bitcoin",
  "bitcoincore-rpc",
@@ -951,8 +943,6 @@ dependencies = [
 [[package]]
 name = "emvault-pkcs11"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "deaa4113562a78d69b9b7f513a5124467aafe84ac0675895d1572411bc4a564e"
 dependencies = [
  "bdk_wallet",
  "bitcoin",
@@ -971,8 +961,6 @@ dependencies = [
 [[package]]
 name = "emvault-xpub"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db3132a3454d90eb67eb5c991e317792367930da19cb7c744b08e9b72b1d466a"
 dependencies = [
  "bip39",
  "bitcoin",
@@ -2858,16 +2846,9 @@ dependencies = [
  "axum",
  "axum-extra",
  "base64 0.22.1",
- "bdk_bitcoind_rpc",
- "bdk_wallet",
- "bitcoin",
- "bitcoincore-rpc",
  "chrono",
  "dotenvy",
- "elements 0.25.3",
- "elements-miniscript",
  "emvault",
- "miniscript",
  "password-hash",
  "qrcode",
  "rand_core",

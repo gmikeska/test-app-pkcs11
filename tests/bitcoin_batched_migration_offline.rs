@@ -31,13 +31,13 @@
 //! `apply_unconfirmed_txs` + `get_psbt_input`), so this gate covers the precise
 //! lines reworked in Phase B (`federation_migration.rs:2322-2377`).
 
-use bdk_wallet::bitcoin::hashes::Hash;
-use bdk_wallet::bitcoin::{
+use emvault::core::bdk_wallet::bitcoin::hashes::Hash;
+use emvault::core::bdk_wallet::bitcoin::{
     self, Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
     TxOut, Txid, Weight, Witness, absolute::LockTime, bip32::Xpriv, transaction::Version,
 };
-use bdk_wallet::miniscript::psbt::PsbtExt;
-use bdk_wallet::{KeychainKind, SignOptions, Wallet};
+use emvault::core::bdk_wallet::miniscript::psbt::PsbtExt;
+use emvault::core::bdk_wallet::{KeychainKind, SignOptions, Wallet};
 
 const NETWORK: Network = Network::Regtest;
 /// 2-of-3 P2WSH satisfaction weight estimate (mirrors the executor's chained

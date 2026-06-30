@@ -44,22 +44,23 @@
 )]
 
 use std::path::PathBuf;
+use emvault::core::bdk_wallet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use bdk_wallet::bitcoin::bip32::DerivationPath as BtcDerivationPath;
-use bdk_wallet::bitcoin::consensus::Encodable;
-use bdk_wallet::bitcoin::{
+use emvault::core::bdk_wallet::bitcoin::bip32::DerivationPath as BtcDerivationPath;
+use emvault::core::bdk_wallet::bitcoin::consensus::Encodable;
+use emvault::core::bdk_wallet::bitcoin::{
     self, Address, Amount, FeeRate, Network, OutPoint, Transaction, TxOut, Weight,
 };
-use bdk_wallet::miniscript::psbt::PsbtExt;
-use bdk_wallet::signer::SignerOrdering;
-use bdk_wallet::{KeychainKind, SignOptions, Wallet};
+use emvault::core::bdk_wallet::miniscript::psbt::PsbtExt;
+use emvault::core::bdk_wallet::signer::SignerOrdering;
+use emvault::core::bdk_wallet::{KeychainKind, SignOptions, Wallet};
 use emvault::core::descriptor::{KeyMode, to_multipath_string};
 use emvault::core::federation::Federation;
 use emvault::core::network::NetworkType;
 
-use bitcoincore_rpc::{Auth, Client, RpcApi};
+use emvault::core::bitcoincore_rpc::{Auth, Client, RpcApi};
 use emvault::dev_signer::DevBackend;
 use emvault::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
 use serde_json::json;

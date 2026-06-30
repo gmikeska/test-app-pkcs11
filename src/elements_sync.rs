@@ -26,17 +26,17 @@
 
 use std::str::FromStr;
 
-use elements::AssetId;
+use emvault::elements::elements::AssetId;
 use emvault::elements::sync::{
     BlockStore, CapturedUtxo, ElementsChainSource, KeychainKind, SyncedTip, WalletId,
     WalletUtxoStore,
 };
 use emvault::elements::{ElementsNetwork, SyncError};
 
-use bitcoincore_rpc::{Auth, Client, RpcApi};
-use elements::encode::{deserialize, serialize, serialize_hex};
-use elements::hex::FromHex;
-use elements::{Block, BlockHash, OutPoint, Transaction, TxOut, TxOutSecrets, Txid};
+use emvault::core::bitcoincore_rpc::{Auth, Client, RpcApi};
+use emvault::elements::elements::encode::{deserialize, serialize, serialize_hex};
+use emvault::elements::elements::hex::FromHex;
+use emvault::elements::elements::{Block, BlockHash, OutPoint, Transaction, TxOut, TxOutSecrets, Txid};
 use serde_json::json;
 use sqlx::PgPool;
 use tokio::runtime::Handle;
@@ -536,8 +536,8 @@ impl ElementsChainSource for RpcChainSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
-    use elements::{AssetId, Script, TxOutWitness};
+    use emvault::elements::elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
+    use emvault::elements::elements::{AssetId, Script, TxOutWitness};
 
     /// Connect to the test database, or return `None` to skip when no DB is
     /// configured (keeps `cargo test` green in node-less/db-less envs).

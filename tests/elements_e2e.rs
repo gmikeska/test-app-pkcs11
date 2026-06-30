@@ -21,8 +21,9 @@
 )]
 
 use std::str::FromStr;
+use emvault::elements::elements;
 
-use bitcoincore_rpc::{Auth, Client, RpcApi};
+use emvault::core::bitcoincore_rpc::{Auth, Client, RpcApi};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;

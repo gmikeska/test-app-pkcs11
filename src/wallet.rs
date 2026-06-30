@@ -29,15 +29,15 @@ use emvault::core::{BtcFederatedWallet, Federation, FederationWallet};
 use emvault::pkcs11::Pkcs11Signer;
 // `Emitter`/`NO_EXPECTED_MEMPOOL_TXS` remain for the best-effort version-wallet
 // fan-out sync below; the primary wallet sync uses `chain_sync::emitter_sync`.
-use bdk_bitcoind_rpc::{Emitter, NO_EXPECTED_MEMPOOL_TXS};
-use bdk_wallet::chain::{ChainPosition, Merge};
-use bdk_wallet::signer::SignerOrdering;
-use bdk_wallet::{AddressInfo, ChangeSet, KeychainKind, SignOptions, Wallet};
-use bitcoin::address::NetworkUnchecked;
-use bitcoin::bip32::{DerivationPath, Fingerprint};
-use bitcoin::consensus::Encodable;
-use bitcoin::{Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Txid, Weight};
-use bitcoincore_rpc::{Auth, Client as RpcClient, RpcApi};
+use emvault::core::bdk_bitcoind_rpc::{Emitter, NO_EXPECTED_MEMPOOL_TXS};
+use emvault::core::bdk_wallet::chain::{ChainPosition, Merge};
+use emvault::core::bdk_wallet::signer::SignerOrdering;
+use emvault::core::bdk_wallet::{self, AddressInfo, ChangeSet, KeychainKind, SignOptions, Wallet};
+use emvault::core::bitcoin::address::NetworkUnchecked;
+use emvault::core::bitcoin::bip32::{DerivationPath, Fingerprint};
+use emvault::core::bitcoin::consensus::Encodable;
+use emvault::core::bitcoin::{self, Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Txid, Weight};
+use emvault::core::bitcoincore_rpc::{self, Auth, Client as RpcClient, RpcApi};
 use sqlx::PgPool;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;

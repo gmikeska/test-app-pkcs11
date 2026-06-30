@@ -44,15 +44,16 @@
 )]
 
 use std::path::PathBuf;
+use emvault::elements::elements;
 use std::str::FromStr;
 
-use bitcoincore_rpc::{Auth, Client, RpcApi};
+use emvault::core::bitcoincore_rpc::{Auth, Client, RpcApi};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use bitcoin::Network;
-use bitcoin::bip32::DerivationPath;
+use emvault::core::bitcoin::Network;
+use emvault::core::bitcoin::bip32::DerivationPath;
 use emvault::core::signer::Signer;
 use emvault::dev_signer::DevBackend;
 use emvault::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};

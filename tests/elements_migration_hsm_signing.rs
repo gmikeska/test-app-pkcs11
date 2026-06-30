@@ -36,12 +36,13 @@
 )]
 
 use std::path::PathBuf;
+use emvault::elements::elements;
 use std::str::FromStr;
 
-use bitcoin::Network;
-use bitcoin::bip32::DerivationPath;
-use elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
-use elements::{AssetId, OutPoint, Script, TxOut, TxOutSecrets, TxOutWitness};
+use emvault::core::bitcoin::Network;
+use emvault::core::bitcoin::bip32::DerivationPath;
+use emvault::elements::elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
+use emvault::elements::elements::{AssetId, OutPoint, Script, TxOut, TxOutSecrets, TxOutWitness};
 use emvault::core::signer::Signer;
 use emvault::dev_signer::DevBackend;
 use emvault::elements::descriptor::{CtDescriptorBuilder, CtKeyMode};

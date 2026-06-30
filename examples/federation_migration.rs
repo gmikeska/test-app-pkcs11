@@ -31,11 +31,16 @@
 )]
 
 use std::io::{self, BufRead, Write};
+use emvault::core::bitcoin;
+use emvault::core::bdk_wallet;
+use emvault::core::bitcoincore_rpc;
+use emvault::core::miniscript;
+use emvault::elements::elements;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin::Amount;
+use emvault::core::bitcoin::Amount;
 use emvault::core::descriptor::KeyMode;
 use emvault::core::signer::Signer;
 use serde::Deserialize;
@@ -2152,7 +2157,7 @@ async fn main() {
         // txid). Synthetic entries represent the chained fee-account change
         // from the preceding broadcast.
         let has_synthetic_fee_input = {
-            use bitcoin::hashes::Hash;
+            use emvault::core::bitcoin::hashes::Hash;
             sweep_tx
                 .source_utxos
                 .iter()
@@ -2163,7 +2168,7 @@ async fn main() {
             .source_utxos
             .iter()
             .filter(|op| {
-                use bitcoin::hashes::Hash;
+                use emvault::core::bitcoin::hashes::Hash;
                 op.txid != bitcoin::Txid::from_byte_array([0u8; 32])
             })
             .collect();

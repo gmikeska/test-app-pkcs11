@@ -37,7 +37,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin::Amount;
+use emvault::core::bitcoin::Amount;
 use sqlx::postgres::PgPoolOptions;
 
 use test_app_pkcs11::config::AppConfig;

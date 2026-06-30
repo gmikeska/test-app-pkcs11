@@ -46,13 +46,13 @@
     clippy::similar_names
 )]
 
-use bdk_wallet::bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
-use bdk_wallet::bitcoin::{
+use emvault::core::bdk_wallet::bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
+use emvault::core::bdk_wallet::bitcoin::{
     Address, Amount, FeeRate, Network, OutPoint, Transaction, TxOut, Weight, bip32::Xpriv,
 };
-use bdk_wallet::miniscript::psbt::PsbtExt;
-use bdk_wallet::{KeychainKind, SignOptions, Wallet, bitcoin};
-use bitcoincore_rpc::{Auth, Client, RpcApi};
+use emvault::core::bdk_wallet::miniscript::psbt::PsbtExt;
+use emvault::core::bdk_wallet::{KeychainKind, SignOptions, Wallet, bitcoin};
+use emvault::core::bitcoincore_rpc::{Auth, Client, RpcApi};
 use serde_json::{Value, json};
 
 const NETWORK: Network = Network::Regtest;
