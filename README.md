@@ -21,20 +21,24 @@ Both Bitcoin **and** Elements/Liquid are wired up: each user gets a
 parallel client-side Elements wallet, and the app supports federation
 migration (HSM rotation + fund sweep) on both chains.
 
-## Feature guide
+## Crate integration guide
 
-For an exhaustive, developer-oriented walkthrough of **every** feature —
-the HSM federation model, the Bitcoin and Elements wallet surfaces,
-federation versioning and migration, the scalable block-scan ingestion
-service, the CLI example tools, the full configuration surface, and a
-"where do I start?" map of key functions and routes — see
-**[`FEATURES.md`](FEATURES.md)**.
+For a developer-oriented walkthrough of **how this app consumes the EmVault
+crates** — the HSM `Pkcs11Signer`, server-side m-of-n signing via
+`SigningCoordinator`, federation construction + versioning, the
+`core::migration` sweep engine, and the Elements wallet + the `sync` traits
+this app **implements** — see **[`FEATURES.md`](FEATURES.md)**.
 
-`FEATURES.md` is written as an AI/human developer-ergonomics reference:
-every capability is cross-linked to the source symbol that implements it
-(`src/file.rs::symbol`) so you can learn the app quickly and jump
-straight to the code. This README is the quick-start; `FEATURES.md` is
-the deep reference.
+`FEATURES.md` is the **reference integration** for
+[`emvault-pkcs11`](https://github.com/gmikeska/emvault-pkcs11) +
+[`emvault-core`](https://github.com/gmikeska/emvault-core) +
+[`emvault-elements`](https://github.com/gmikeska/emvault-elements): for each
+library capability it shows the exact API the app calls and where
+(`src/file.rs::symbol` ↔ `emvault::…::symbol`), so AI/human developers can learn
+*how to integrate the crates* — including the key contrast with `test-app-xpub`
+(autonomous HSM signing vs. browser-mediated external signing). It covers the
+app↔crate boundary, not the UI, routes, or DB schema. This README is the
+quick-start; `FEATURES.md` is the deep integration reference.
 
 ## Prerequisites
 
