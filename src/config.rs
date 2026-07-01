@@ -14,9 +14,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use emvault::config::{hex_decode, optional, require};
 use emvault::core::bitcoin::Network;
 use emvault::core::bitcoin::bip32::{ChildNumber, DerivationPath};
-use emvault::config::{hex_decode, optional, require};
 use emvault::elements::ElementsNetwork;
 
 // Re-exported so `crate::config::ConfigError` keeps resolving across the app

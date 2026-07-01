@@ -12,9 +12,9 @@
 //! history + the migration example still reference it); no daemon wallet is
 //! created or queried.
 
-use std::collections::HashMap;
 use emvault::core::bitcoin;
 use emvault::elements::elements;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 

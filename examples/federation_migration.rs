@@ -30,12 +30,12 @@
     clippy::too_many_lines
 )]
 
-use std::io::{self, BufRead, Write};
-use emvault::core::bitcoin;
 use emvault::core::bdk_wallet;
+use emvault::core::bitcoin;
 use emvault::core::bitcoincore_rpc;
 use emvault::core::miniscript;
 use emvault::elements::elements;
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

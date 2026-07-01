@@ -18,8 +18,8 @@
     clippy::format_collect
 )]
 
-use std::str::FromStr;
 use emvault::elements::elements;
+use std::str::FromStr;
 
 use emvault::core::bitcoincore_rpc::{Auth, Client, RpcApi};
 use serde_json::json;

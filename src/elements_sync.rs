@@ -36,7 +36,9 @@ use emvault::elements::{ElementsNetwork, SyncError};
 use emvault::core::bitcoincore_rpc::{Auth, Client, RpcApi};
 use emvault::elements::elements::encode::{deserialize, serialize, serialize_hex};
 use emvault::elements::elements::hex::FromHex;
-use emvault::elements::elements::{Block, BlockHash, OutPoint, Transaction, TxOut, TxOutSecrets, Txid};
+use emvault::elements::elements::{
+    Block, BlockHash, OutPoint, Transaction, TxOut, TxOutSecrets, Txid,
+};
 use serde_json::json;
 use sqlx::PgPool;
 use tokio::runtime::Handle;
@@ -536,7 +538,9 @@ impl ElementsChainSource for RpcChainSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use emvault::elements::elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
+    use emvault::elements::elements::confidential::{
+        Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor,
+    };
     use emvault::elements::elements::{AssetId, Script, TxOutWitness};
 
     /// Connect to the test database, or return `None` to skip when no DB is

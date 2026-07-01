@@ -4,8 +4,8 @@
 //!   fee, optional label, broadcast time, and raw hex for one of the
 //!   logged-in user's broadcasts.
 
-use std::sync::Arc;
 use emvault::core::bitcoin;
+use std::sync::Arc;
 
 use askama::Template;
 use askama_web::WebTemplate;

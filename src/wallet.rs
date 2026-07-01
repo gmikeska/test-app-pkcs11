@@ -36,7 +36,9 @@ use emvault::core::bdk_wallet::{self, AddressInfo, ChangeSet, KeychainKind, Sign
 use emvault::core::bitcoin::address::NetworkUnchecked;
 use emvault::core::bitcoin::bip32::{DerivationPath, Fingerprint};
 use emvault::core::bitcoin::consensus::Encodable;
-use emvault::core::bitcoin::{self, Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Txid, Weight};
+use emvault::core::bitcoin::{
+    self, Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Txid, Weight,
+};
 use emvault::core::bitcoincore_rpc::{self, Auth, Client as RpcClient, RpcApi};
 use sqlx::PgPool;
 use tokio::sync::Mutex as AsyncMutex;

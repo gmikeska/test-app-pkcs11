@@ -6,8 +6,8 @@
 //! - `POST /elements/wallet/send`                  — build PSET → sign → broadcast.
 //! - `GET  /elements/wallet/addresses/:address`     — per-address QR + receipts.
 
-use std::sync::Arc;
 use emvault::core::bitcoin;
+use std::sync::Arc;
 
 use askama::Template;
 use askama_web::WebTemplate;

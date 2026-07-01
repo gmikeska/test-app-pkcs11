@@ -43,8 +43,8 @@
     clippy::cast_precision_loss
 )]
 
-use std::path::PathBuf;
 use emvault::core::bdk_wallet;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 

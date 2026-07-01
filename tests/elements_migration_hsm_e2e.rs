@@ -43,8 +43,8 @@
     clippy::doc_markdown
 )]
 
-use std::path::PathBuf;
 use emvault::elements::elements;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use emvault::core::bitcoincore_rpc::{Auth, Client, RpcApi};

@@ -1,7 +1,7 @@
 //! Elements transaction-detail handler.
 
-use std::sync::Arc;
 use emvault::core::bitcoin;
+use std::sync::Arc;
 
 use askama::Template;
 use askama_web::WebTemplate;

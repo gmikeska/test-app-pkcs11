@@ -32,8 +32,8 @@
 
 #![allow(clippy::too_many_lines, clippy::similar_names)]
 
-use std::path::PathBuf;
 use emvault::core::bdk_wallet;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
