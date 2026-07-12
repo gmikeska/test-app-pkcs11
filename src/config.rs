@@ -58,6 +58,10 @@ pub struct AppConfig {
     pub bitcoin_rpc_password: String,
     /// Name passed to Bitcoin Core's `loadwallet` when needed.
     pub bitcoin_wallet_name: String,
+    /// Optional Esplora HTTP base URL (e.g. `https://blockstream.info/signet/api`).
+    /// When set, chain sync/broadcast use the nodeless Esplora backend instead
+    /// of Bitcoin Core RPC.
+    pub esplora_url: Option<String>,
     /// Path to `libemvault_dev_hsm.so` (or, in production, the vendor
     /// PKCS#11 library).
     pub pkcs11_library_path: PathBuf,
@@ -150,6 +154,7 @@ impl AppConfig {
         let bitcoin_rpc_password = require("BITCOIN_RPC_PASSWORD")?;
         let bitcoin_wallet_name =
             optional("BITCOIN_WALLET_NAME").unwrap_or_else(|| "emvault-pkcs11".to_string());
+        let esplora_url = optional("APP_ESPLORA_URL");
 
         let pkcs11_library_path = PathBuf::from(require("PKCS11_LIB")?);
 
@@ -247,6 +252,7 @@ impl AppConfig {
             bitcoin_rpc_user,
             bitcoin_rpc_password,
             bitcoin_wallet_name,
+            esplora_url,
             pkcs11_library_path,
             hsm_tokens,
             fed_threshold,

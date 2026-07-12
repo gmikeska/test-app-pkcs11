@@ -13,7 +13,7 @@ publish = false
 # wiring (HSM signing over Bitcoin + Elements); `dev-signer` adds the dev-only
 # HSM helpers (DevBackend, init_dev_token) and implies `pkcs11`. The
 # `setup_dev_federation` helper is bypassed on purpose — see src/hsm.rs.
-emvault = { version = "0.1", features = ["pkcs11", "elements", "dev-signer"] }
+emvault = { version = "0.2", features = ["pkcs11", "elements", "dev-signer", "esplora"] }
 
 # Chain + Elements stacks are NOT pinned here — their types cross the EmVault
 # API, so we consume them through the ecosystem's canonical re-exports:
@@ -80,7 +80,7 @@ toml = "0.8"
 # end-to-end integration test (node + Postgres backed). Cargo unions this with
 # the normal `emvault` dep, so the test build gets pkcs11 + elements +
 # dev-signer + test-utils.
-emvault = { version = "0.1", features = ["test-utils"] }
+emvault = { version = "0.2", features = ["test-utils"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -101,5 +101,6 @@ doc_overindented_list_items = "allow"
 # the local ecosystem tree. Patching the `emvault` facade cascades to the local
 # emvault-core/-xpub/-elements via its path deps. Remove once those land on
 # crates.io and the version bump is published.
-[patch.crates-io]
+[patch.crates-io]   # dev: local emvault (with `esplora` feature) + local esplora-rs (D8)
 emvault = { path = "../emvault" }
+esplora-rs = { path = "../../esplora-rs" }

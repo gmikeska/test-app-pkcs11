@@ -20,6 +20,7 @@ use std::sync::Arc;
 use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
 use emvault::core::descriptor::{KeyMode, to_multipath_string};
 use emvault::core::error::PsbtError;
+use emvault::core::esplora_sync::{EsploraBackend, EsploraSyncError, esplora_sync};
 use emvault::core::federated_wallet::FederatedWallet as FederatedWalletTrait;
 use emvault::core::network::NetworkType;
 use emvault::core::psbt as core_psbt;
@@ -131,6 +132,14 @@ pub enum WalletError {
     #[error("failed to construct bitcoind RPC client: {0}")]
     RpcClientInit(bitcoincore_rpc::Error),
 
+    /// Couldn't construct the Esplora backend from `APP_ESPLORA_URL`.
+    #[error("failed to construct esplora backend: {0}")]
+    EsploraInit(#[source] EsploraSyncError),
+
+    /// Chain sync via the Esplora backend failed.
+    #[error("esplora sync error: {0}")]
+    EsploraSync(#[source] EsploraSyncError),
+
     /// JSON-encoding the merged BDK changeset failed.
     #[error("failed to JSON-encode wallet changeset: {0}")]
     EncodeChangeSet(#[source] serde_json::Error),
@@ -221,6 +230,9 @@ impl WalletError {
 pub struct WalletManager {
     pool: PgPool,
     rpc: Arc<RpcClient>,
+    /// When set (`APP_ESPLORA_URL`), sync uses the nodeless Esplora backend
+    /// instead of Bitcoin Core RPC.
+    esplora: Option<Arc<EsploraBackend>>,
     network: Network,
     bip48_coin_index: u32,
     fed_threshold: u32,
@@ -243,9 +255,17 @@ impl WalletManager {
         );
         let rpc =
             RpcClient::new(&config.bitcoin_rpc_url, auth).map_err(WalletError::RpcClientInit)?;
+        let esplora = match config.esplora_url.as_deref() {
+            Some(url) => Some(Arc::new(
+                EsploraBackend::new_public(url, config.network)
+                    .map_err(WalletError::EsploraInit)?,
+            )),
+            None => None,
+        };
         Ok(Self {
             pool,
             rpc: Arc::new(rpc),
+            esplora,
             network: config.network,
             bip48_coin_index: config.bip48_coin_index,
             fed_threshold: config.fed_threshold,
@@ -598,6 +618,7 @@ impl WalletManager {
             aggregate: AsyncMutex::new(initial_changeset),
             pool: self.pool.clone(),
             rpc: self.rpc.clone(),
+            esplora: self.esplora.clone(),
         })
     }
 }
@@ -695,6 +716,7 @@ pub struct UserWallet {
     aggregate: AsyncMutex<ChangeSet>,
     pool: PgPool,
     rpc: Arc<RpcClient>,
+    esplora: Option<Arc<EsploraBackend>>,
 }
 
 #[allow(dead_code)]
@@ -762,6 +784,9 @@ impl UserWallet {
     /// # Errors
     /// See [`WalletError`]. RPC and DB errors propagate.
     pub async fn sync(&self) -> Result<SyncSummary, WalletError> {
+        if let Some(backend) = self.esplora.clone() {
+            return self.sync_esplora(&backend).await;
+        }
         // Sync each federation-version wallet independently so each builds
         // its own checkpoint chain and discovers UTXOs at its descriptor's
         // addresses.
@@ -785,6 +810,59 @@ impl UserWallet {
             // persistence (changeset merge + DB write) stays here.
             let result = chain_sync::emitter_sync(&mut wallet, &*self.rpc)
                 .map_err(WalletError::from_chain_sync)?;
+            drop(wallet);
+            (
+                SyncSummary {
+                    tip_height: result.tip_height,
+                    new_blocks: result.blocks_synced,
+                    new_mempool_txs: result.new_mempool_txs,
+                },
+                result.changeset,
+            )
+        };
+
+        if let Some(delta) = delta {
+            let mut agg = self.aggregate.lock().await;
+            agg.merge(delta);
+            let json = serde_json::to_value(&*agg).map_err(WalletError::EncodeChangeSet)?;
+            drop(agg);
+            db::update_wallet_changeset(
+                &self.pool,
+                self.wallet_id,
+                &json,
+                i32::try_from(summary.tip_height).unwrap_or(i32::MAX),
+            )
+            .await?;
+        } else {
+            db::update_wallet_tip_only(
+                &self.pool,
+                self.wallet_id,
+                i32::try_from(summary.tip_height).unwrap_or(i32::MAX),
+            )
+            .await?;
+        }
+
+        Ok(summary)
+    }
+
+    /// Chain sync via the nodeless Esplora backend (used when `APP_ESPLORA_URL`
+    /// is set). Mirrors [`Self::sync`] but drives `esplora_sync` instead of the
+    /// bitcoind `Emitter`; persistence is identical.
+    ///
+    /// # Errors
+    /// See [`WalletError`]. Esplora and DB errors propagate.
+    async fn sync_esplora(&self, backend: &EsploraBackend) -> Result<SyncSummary, WalletError> {
+        // Best-effort per-version-wallet scan (mirrors the RPC fan-out above).
+        for vw_mutex in &self.version_wallets {
+            let mut vw = vw_mutex.lock().await;
+            let _ = esplora_sync(&mut vw, backend).await;
+        }
+
+        let (summary, delta) = {
+            let mut wallet = self.inner.lock().await;
+            let result = esplora_sync(&mut wallet, backend)
+                .await
+                .map_err(WalletError::EsploraSync)?;
             drop(wallet);
             (
                 SyncSummary {
