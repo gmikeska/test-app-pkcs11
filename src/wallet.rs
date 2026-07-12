@@ -21,7 +21,7 @@ use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
 use emvault::core::descriptor::{KeyMode, to_multipath_string};
 use emvault::core::error::PsbtError;
 use emvault::core::esplora_sync::{
-    EsploraBackend, EsploraSyncError, esplora_broadcast, esplora_sync,
+    EsploraBackend, EsploraSyncError, esplora_broadcast, esplora_sync, esplora_waterfalls_sync,
 };
 use emvault::core::federated_wallet::FederatedWallet as FederatedWalletTrait;
 use emvault::core::network::NetworkType;
@@ -235,6 +235,9 @@ pub struct WalletManager {
     /// When set (`APP_ESPLORA_URL`), sync uses the nodeless Esplora backend
     /// instead of Bitcoin Core RPC.
     esplora: Option<Arc<EsploraBackend>>,
+    /// When `true`, the Esplora backend syncs via QuickSync/Waterfalls
+    /// (descriptor scan) rather than the address-based gap scan.
+    waterfalls: bool,
     network: Network,
     bip48_coin_index: u32,
     fed_threshold: u32,
@@ -258,9 +261,16 @@ impl WalletManager {
         let rpc =
             RpcClient::new(&config.bitcoin_rpc_url, auth).map_err(WalletError::RpcClientInit)?;
         // `chain_backend` selects the active backend; both node + Esplora config
-        // may be present. Build the Esplora client only when it's selected
+        // may be present. Build the Esplora client for either nodeless mode
         // (config validation guarantees `esplora_url` is set in that case).
-        let esplora = if matches!(config.chain_backend, crate::config::ChainBackend::Esplora) {
+        let waterfalls = matches!(
+            config.chain_backend,
+            crate::config::ChainBackend::Waterfalls
+        );
+        let esplora = if matches!(
+            config.chain_backend,
+            crate::config::ChainBackend::Esplora | crate::config::ChainBackend::Waterfalls
+        ) {
             let url = config.esplora_url.as_deref().unwrap_or_default();
             // Authenticated *enterprise* Esplora when OAuth creds are present
             // (`ESPLORA_CLIENT_ID` + `ESPLORA_CLIENT_SECRET`), else the public
@@ -279,10 +289,21 @@ impl WalletManager {
         } else {
             None
         };
+        if esplora.is_some() {
+            tracing::info!(
+                mode = if waterfalls {
+                    "waterfalls"
+                } else {
+                    "address-scan"
+                },
+                "esplora sync mode"
+            );
+        }
         Ok(Self {
             pool,
             rpc: Arc::new(rpc),
             esplora,
+            waterfalls,
             network: config.network,
             bip48_coin_index: config.bip48_coin_index,
             fed_threshold: config.fed_threshold,
@@ -636,6 +657,7 @@ impl WalletManager {
             pool: self.pool.clone(),
             rpc: self.rpc.clone(),
             esplora: self.esplora.clone(),
+            waterfalls: self.waterfalls,
         })
     }
 }
@@ -734,6 +756,8 @@ pub struct UserWallet {
     pool: PgPool,
     rpc: Arc<RpcClient>,
     esplora: Option<Arc<EsploraBackend>>,
+    /// When `true`, the Esplora backend syncs via QuickSync/Waterfalls.
+    waterfalls: bool,
 }
 
 #[allow(dead_code)]
@@ -863,8 +887,10 @@ impl UserWallet {
     }
 
     /// Chain sync via the nodeless Esplora backend (used when `APP_ESPLORA_URL`
-    /// is set). Mirrors [`Self::sync`] but drives `esplora_sync` instead of the
-    /// bitcoind `Emitter`; persistence is identical.
+    /// is set). Mirrors [`Self::sync`] but drives the Esplora sync — either the
+    /// address-based `esplora_sync` or, when `waterfalls` is set, the descriptor
+    /// scan `esplora_waterfalls_sync` — instead of the bitcoind `Emitter`;
+    /// persistence is identical.
     ///
     /// # Errors
     /// See [`WalletError`]. Esplora and DB errors propagate.
@@ -872,14 +898,21 @@ impl UserWallet {
         // Best-effort per-version-wallet scan (mirrors the RPC fan-out above).
         for vw_mutex in &self.version_wallets {
             let mut vw = vw_mutex.lock().await;
-            let _ = esplora_sync(&mut vw, backend).await;
+            let _ = if self.waterfalls {
+                esplora_waterfalls_sync(&mut vw, backend).await
+            } else {
+                esplora_sync(&mut vw, backend).await
+            };
         }
 
         let (summary, delta) = {
             let mut wallet = self.inner.lock().await;
-            let result = esplora_sync(&mut wallet, backend)
-                .await
-                .map_err(WalletError::EsploraSync)?;
+            let result = if self.waterfalls {
+                esplora_waterfalls_sync(&mut wallet, backend).await
+            } else {
+                esplora_sync(&mut wallet, backend).await
+            }
+            .map_err(WalletError::EsploraSync)?;
             drop(wallet);
             (
                 SyncSummary {

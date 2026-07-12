@@ -95,8 +95,11 @@ pub enum ChainBackend {
     /// Bitcoin Core JSON-RPC (default).
     #[default]
     Rpc,
-    /// Nodeless Blockstream Esplora HTTP API.
+    /// Nodeless Blockstream Esplora HTTP API (address-based gap scan).
     Esplora,
+    /// Nodeless Blockstream `QuickSync` / Waterfalls (descriptor scan — one
+    /// query per keychain). Uses the same `esplora_url` + creds as `Esplora`.
+    Waterfalls,
 }
 
 impl AppConfig {
@@ -171,14 +174,20 @@ impl AppConfig {
         let chain_backend = match optional("APP_CHAIN_BACKEND").as_deref() {
             None | Some("" | "rpc" | "bitcoind" | "core") => ChainBackend::Rpc,
             Some("esplora") => ChainBackend::Esplora,
+            Some("waterfalls" | "quicksync") => ChainBackend::Waterfalls,
             Some(other) => {
                 return Err(ConfigError::Parse {
                     var: "APP_CHAIN_BACKEND",
-                    reason: format!("expected `rpc` or `esplora`, got `{other}`"),
+                    reason: format!("expected `rpc`, `esplora`, or `waterfalls`, got `{other}`"),
                 });
             }
         };
-        if chain_backend == ChainBackend::Esplora && esplora_url.is_none() {
+        // Both nodeless backends need the Esplora base URL.
+        if matches!(
+            chain_backend,
+            ChainBackend::Esplora | ChainBackend::Waterfalls
+        ) && esplora_url.is_none()
+        {
             return Err(ConfigError::Missing {
                 var: "APP_ESPLORA_URL",
             });
