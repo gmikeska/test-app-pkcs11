@@ -20,7 +20,9 @@ use std::sync::Arc;
 use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
 use emvault::core::descriptor::{KeyMode, to_multipath_string};
 use emvault::core::error::PsbtError;
-use emvault::core::esplora_sync::{EsploraBackend, EsploraSyncError, esplora_sync};
+use emvault::core::esplora_sync::{
+    EsploraBackend, EsploraSyncError, esplora_broadcast, esplora_sync,
+};
 use emvault::core::federated_wallet::FederatedWallet as FederatedWalletTrait;
 use emvault::core::network::NetworkType;
 use emvault::core::psbt as core_psbt;
@@ -255,12 +257,27 @@ impl WalletManager {
         );
         let rpc =
             RpcClient::new(&config.bitcoin_rpc_url, auth).map_err(WalletError::RpcClientInit)?;
-        let esplora = match config.esplora_url.as_deref() {
-            Some(url) => Some(Arc::new(
+        // `chain_backend` selects the active backend; both node + Esplora config
+        // may be present. Build the Esplora client only when it's selected
+        // (config validation guarantees `esplora_url` is set in that case).
+        let esplora = if matches!(config.chain_backend, crate::config::ChainBackend::Esplora) {
+            let url = config.esplora_url.as_deref().unwrap_or_default();
+            // Authenticated *enterprise* Esplora when OAuth creds are present
+            // (`ESPLORA_CLIENT_ID` + `ESPLORA_CLIENT_SECRET`), else the public
+            // (unauthenticated) endpoint. `new_enterprise` reads those env vars.
+            let backend = if std::env::var("ESPLORA_CLIENT_ID").is_ok()
+                && std::env::var("ESPLORA_CLIENT_SECRET").is_ok()
+            {
+                tracing::info!(%url, "esplora backend: enterprise (authenticated)");
+                EsploraBackend::new_enterprise(url, config.network)
+            } else {
+                tracing::info!(%url, "esplora backend: public (unauthenticated)");
                 EsploraBackend::new_public(url, config.network)
-                    .map_err(WalletError::EsploraInit)?,
-            )),
-            None => None,
+            }
+            .map_err(WalletError::EsploraInit)?;
+            Some(Arc::new(backend))
+        } else {
+            None
         };
         Ok(Self {
             pool,
@@ -1187,6 +1204,30 @@ impl UserWallet {
     ///
     /// Uses BDK's `drain_to` so the entire balance minus the mining fee
     /// lands in a single output at the destination address.
+    /// Broadcast a signed transaction via the active chain backend — Esplora
+    /// (nodeless) when configured, otherwise Bitcoin Core `sendrawtransaction`.
+    /// Returns the network-accepted txid.
+    ///
+    /// # Errors
+    /// [`WalletError::BroadcastRejected`] if the tx can't be decoded or the
+    /// backend rejects it.
+    async fn broadcast_signed(&self, raw_tx: &[u8]) -> Result<Txid, WalletError> {
+        if let Some(backend) = &self.esplora {
+            let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(raw_tx)
+                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?;
+            esplora_broadcast(backend, &tx)
+                .await
+                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))
+        } else {
+            let raw = raw_tx.to_vec();
+            let rpc = self.rpc.clone();
+            tokio::task::spawn_blocking(move || rpc.send_raw_transaction(&raw[..]))
+                .await
+                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?
+                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))
+        }
+    }
+
     pub async fn sweep_to(
         &self,
         recipient: &Address,
@@ -1269,13 +1310,7 @@ impl UserWallet {
             .await?;
         }
 
-        let raw_clone = raw_tx.clone();
-        let rpc = self.rpc.clone();
-        let txid_after_broadcast =
-            tokio::task::spawn_blocking(move || rpc.send_raw_transaction(&raw_clone[..]))
-                .await
-                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?
-                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?;
+        let txid_after_broadcast = self.broadcast_signed(&raw_tx).await?;
         debug_assert_eq!(txid_after_broadcast, txid);
 
         let recipient_str = recipient.to_string();
@@ -1504,13 +1539,7 @@ impl UserWallet {
         // that's fine — the next build will reuse the same internal
         // index because BDK's index doesn't advance on broadcast
         // failure (the spend never landed in our tx graph).
-        let raw_clone = raw_tx.clone();
-        let rpc = self.rpc.clone();
-        let txid_after_broadcast =
-            tokio::task::spawn_blocking(move || rpc.send_raw_transaction(&raw_clone[..]))
-                .await
-                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?
-                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?;
+        let txid_after_broadcast = self.broadcast_signed(&raw_tx).await?;
         debug_assert_eq!(txid_after_broadcast, txid);
 
         let recipient_str = recipient.to_string();
