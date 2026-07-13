@@ -40,11 +40,12 @@ use emvault::core::bitcoin::{
     self, Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Txid, Weight,
 };
 use emvault::core::bitcoincore_rpc::{self, Auth, Client as RpcClient, RpcApi};
+use emvault::core::esplora::{EsploraBackend, EsploraSyncError, SyncMode};
 use sqlx::PgPool;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, ChainBackend};
 use crate::db;
 use crate::hsm::{HsmError, HsmFleet};
 use crate::models::WalletRow;
@@ -122,6 +123,10 @@ pub enum WalletError {
     /// `sendrawtransaction` rejected the broadcast.
     #[error("bitcoind rejected broadcast: {0}")]
     BroadcastRejected(String),
+
+    /// Nodeless Esplora/Waterfalls backend error (sync or broadcast).
+    #[error("esplora backend error: {0}")]
+    Esplora(#[from] EsploraSyncError),
 
     /// Bitcoin Core RPC error.
     #[error("bitcoind RPC error: {0}")]
@@ -226,6 +231,9 @@ pub struct WalletManager {
     fed_threshold: u32,
     fed_signer_indices: Vec<usize>,
     hsm: Arc<HsmFleet>,
+    /// Nodeless chain backend, when `APP_CHAIN_BACKEND` selects an Esplora mode.
+    /// `None` = Bitcoin Core RPC (the default emitter path).
+    esplora: Option<Arc<EsploraBackend>>,
     cache: AsyncMutex<HashMap<Uuid, Arc<UserWallet>>>,
 }
 
@@ -243,6 +251,24 @@ impl WalletManager {
         );
         let rpc =
             RpcClient::new(&config.bitcoin_rpc_url, auth).map_err(WalletError::RpcClientInit)?;
+
+        // Nodeless backend selection. `connect` auto-detects public vs enterprise
+        // from the ESPLORA_CLIENT_* env vars; the mode is carried on the backend.
+        let esplora = match config.chain_backend {
+            ChainBackend::Rpc => None,
+            ChainBackend::Esplora | ChainBackend::Waterfalls => {
+                let mode = if config.chain_backend == ChainBackend::Waterfalls {
+                    SyncMode::Waterfalls
+                } else {
+                    SyncMode::Address
+                };
+                let url = config.esplora_url.as_deref().unwrap_or_default();
+                Some(Arc::new(
+                    EsploraBackend::connect(url, config.network)?.with_mode(mode),
+                ))
+            }
+        };
+
         Ok(Self {
             pool,
             rpc: Arc::new(rpc),
@@ -251,6 +277,7 @@ impl WalletManager {
             fed_threshold: config.fed_threshold,
             fed_signer_indices: config.fed_signer_indices.clone(),
             hsm,
+            esplora,
             cache: AsyncMutex::new(HashMap::new()),
         })
     }
@@ -598,6 +625,7 @@ impl WalletManager {
             aggregate: AsyncMutex::new(initial_changeset),
             pool: self.pool.clone(),
             rpc: self.rpc.clone(),
+            esplora: self.esplora.clone(),
         })
     }
 }
@@ -695,6 +723,8 @@ pub struct UserWallet {
     aggregate: AsyncMutex<ChangeSet>,
     pool: PgPool,
     rpc: Arc<RpcClient>,
+    /// Shared nodeless backend (cloned from the manager); `None` = RPC path.
+    esplora: Option<Arc<EsploraBackend>>,
 }
 
 #[allow(dead_code)]
@@ -762,6 +792,12 @@ impl UserWallet {
     /// # Errors
     /// See [`WalletError`]. RPC and DB errors propagate.
     pub async fn sync(&self) -> Result<SyncSummary, WalletError> {
+        // Nodeless path: sync every version wallet + the primary through the
+        // Esplora/Waterfalls backend instead of driving the RPC emitter.
+        if let Some(backend) = self.esplora.as_deref() {
+            return self.sync_esplora(backend).await;
+        }
+
         // Sync each federation-version wallet independently so each builds
         // its own checkpoint chain and discovers UTXOs at its descriptor's
         // addresses.
@@ -796,6 +832,47 @@ impl UserWallet {
             )
         };
 
+        self.persist_sync(&summary, delta).await?;
+        Ok(summary)
+    }
+
+    /// Nodeless sync: run every version wallet + the primary through the shared
+    /// [`EsploraBackend`] (`Address` or `Waterfalls` mode), then persist exactly
+    /// like the RPC path. The backend guarantees the sync futures stay `Send`,
+    /// so this is safe to call from the axum handlers.
+    async fn sync_esplora(&self, backend: &EsploraBackend) -> Result<SyncSummary, WalletError> {
+        // Best-effort per-version-wallet sync (mirrors the RPC fan-out); their
+        // UTXO discovery feeds the migration/versioning views.
+        for vw_mutex in &self.version_wallets {
+            let mut vw = vw_mutex.lock().await;
+            backend.sync(&mut vw).await?;
+        }
+
+        let (summary, delta) = {
+            let mut wallet = self.inner.lock().await;
+            let result = backend.sync(&mut wallet).await?;
+            drop(wallet);
+            (
+                SyncSummary {
+                    tip_height: result.tip_height,
+                    new_blocks: result.blocks_synced,
+                    new_mempool_txs: result.new_mempool_txs,
+                },
+                result.changeset,
+            )
+        };
+
+        self.persist_sync(&summary, delta).await?;
+        Ok(summary)
+    }
+
+    /// Merge a sync's staged changeset into the aggregate and write it (plus the
+    /// new tip) to the DB — shared by the RPC and Esplora sync paths.
+    async fn persist_sync(
+        &self,
+        summary: &SyncSummary,
+        delta: Option<ChangeSet>,
+    ) -> Result<(), WalletError> {
         if let Some(delta) = delta {
             let mut agg = self.aggregate.lock().await;
             agg.merge(delta);
@@ -816,8 +893,23 @@ impl UserWallet {
             )
             .await?;
         }
+        Ok(())
+    }
 
-        Ok(summary)
+    /// Broadcast raw transaction bytes through the active backend: the Esplora
+    /// backend when nodeless, otherwise bitcoind `sendrawtransaction`.
+    async fn broadcast_raw(&self, raw_tx: &[u8]) -> Result<Txid, WalletError> {
+        if let Some(backend) = self.esplora.as_deref() {
+            let tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(raw_tx)
+                .map_err(|e| WalletError::ExtractTx(e.to_string()))?;
+            return Ok(backend.broadcast(&tx).await?);
+        }
+        let raw_clone = raw_tx.to_vec();
+        let rpc = self.rpc.clone();
+        tokio::task::spawn_blocking(move || rpc.send_raw_transaction(&raw_clone[..]))
+            .await
+            .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?
+            .map_err(|e| WalletError::BroadcastRejected(e.to_string()))
     }
 
     /// Reveal external-keychain addresses `0..target_count` (idempotent),
@@ -1191,13 +1283,7 @@ impl UserWallet {
             .await?;
         }
 
-        let raw_clone = raw_tx.clone();
-        let rpc = self.rpc.clone();
-        let txid_after_broadcast =
-            tokio::task::spawn_blocking(move || rpc.send_raw_transaction(&raw_clone[..]))
-                .await
-                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?
-                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?;
+        let txid_after_broadcast = self.broadcast_raw(&raw_tx).await?;
         debug_assert_eq!(txid_after_broadcast, txid);
 
         let recipient_str = recipient.to_string();
@@ -1426,13 +1512,7 @@ impl UserWallet {
         // that's fine — the next build will reuse the same internal
         // index because BDK's index doesn't advance on broadcast
         // failure (the spend never landed in our tx graph).
-        let raw_clone = raw_tx.clone();
-        let rpc = self.rpc.clone();
-        let txid_after_broadcast =
-            tokio::task::spawn_blocking(move || rpc.send_raw_transaction(&raw_clone[..]))
-                .await
-                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?
-                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?;
+        let txid_after_broadcast = self.broadcast_raw(&raw_tx).await?;
         debug_assert_eq!(txid_after_broadcast, txid);
 
         let recipient_str = recipient.to_string();

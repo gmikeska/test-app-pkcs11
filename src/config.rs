@@ -35,6 +35,37 @@ pub struct HsmTokenConfig {
     pub so_pin: String,
 }
 
+/// Which chain backend the app syncs and broadcasts through.
+///
+/// Selected by `APP_CHAIN_BACKEND` (default `rpc`). The two Esplora modes share
+/// one `APP_ESPLORA_URL`; they differ only in scan strategy (`Waterfalls` needs
+/// an enterprise/QuickSync endpoint).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChainBackend {
+    /// Bitcoin Core JSON-RPC (`bdk_bitcoind_rpc::Emitter`).
+    #[default]
+    Rpc,
+    /// Nodeless Esplora, address-based scan.
+    Esplora,
+    /// Nodeless Esplora, Waterfalls/QuickSync descriptor scan.
+    Waterfalls,
+}
+
+impl FromStr for ChainBackend {
+    type Err = ConfigError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "rpc" => Ok(Self::Rpc),
+            "esplora" => Ok(Self::Esplora),
+            "waterfalls" => Ok(Self::Waterfalls),
+            other => Err(ConfigError::Parse {
+                var: "APP_CHAIN_BACKEND",
+                reason: format!("expected rpc|esplora|waterfalls, got `{other}`"),
+            }),
+        }
+    }
+}
+
 /// Top-level configuration.
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -58,6 +89,11 @@ pub struct AppConfig {
     pub bitcoin_rpc_password: String,
     /// Name passed to Bitcoin Core's `loadwallet` when needed.
     pub bitcoin_wallet_name: String,
+    /// Which chain backend to sync/broadcast through (`APP_CHAIN_BACKEND`).
+    pub chain_backend: ChainBackend,
+    /// Esplora base URL (`APP_ESPLORA_URL`), required when `chain_backend` is an
+    /// Esplora mode; ignored for `Rpc`.
+    pub esplora_url: Option<String>,
     /// Path to `libemvault_dev_hsm.so` (or, in production, the vendor
     /// PKCS#11 library).
     pub pkcs11_library_path: PathBuf,
@@ -150,6 +186,21 @@ impl AppConfig {
         let bitcoin_rpc_password = require("BITCOIN_RPC_PASSWORD")?;
         let bitcoin_wallet_name =
             optional("BITCOIN_WALLET_NAME").unwrap_or_else(|| "emvault-pkcs11".to_string());
+
+        let chain_backend = match optional("APP_CHAIN_BACKEND") {
+            Some(s) => ChainBackend::from_str(&s)?,
+            None => ChainBackend::default(),
+        };
+        let esplora_url = optional("APP_ESPLORA_URL");
+        if matches!(
+            chain_backend,
+            ChainBackend::Esplora | ChainBackend::Waterfalls
+        ) && esplora_url.as_deref().unwrap_or("").trim().is_empty()
+        {
+            return Err(ConfigError::Missing {
+                var: "APP_ESPLORA_URL",
+            });
+        }
 
         let pkcs11_library_path = PathBuf::from(require("PKCS11_LIB")?);
 
@@ -247,6 +298,8 @@ impl AppConfig {
             bitcoin_rpc_user,
             bitcoin_rpc_password,
             bitcoin_wallet_name,
+            chain_backend,
+            esplora_url,
             pkcs11_library_path,
             hsm_tokens,
             fed_threshold,
