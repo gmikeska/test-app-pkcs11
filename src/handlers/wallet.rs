@@ -371,7 +371,9 @@ pub async fn send_get(
     AuthUser(user): AuthUser,
 ) -> Result<Response, AppError> {
     let uw = state.wallet_manager.load_or_init(user.id).await?;
-    uw.sync().await?;
+    // No sync here: the Send *form* renders instantly off the shared cached
+    // wallet (Receive/dashboard keep it fresh). The actual send in `send_post`
+    // still syncs before building the tx, so spends use current UTXOs.
     let balance = uw.balance().await;
     let tip_height = uw.tip_height().await;
 
@@ -547,7 +549,8 @@ pub async fn federation(
     AuthUser(user): AuthUser,
 ) -> Result<Response, AppError> {
     let uw = state.wallet_manager.load_or_init(user.id).await?;
-    uw.sync().await?;
+    // No sync here: the Federation view renders instantly off the shared cached
+    // wallet; Receive/dashboard keep the balance fresh.
     let balance = uw.balance().await;
     let tip_height = uw.tip_height().await;
     let descriptor = lookup_descriptor(&state, user.id).await?;
