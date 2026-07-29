@@ -9,7 +9,7 @@
 //! ## Per-signer derivation
 //!
 //! Each customer's BIP-48 federation lives on the same set of tokens, but
-//! at a different *EmVault label*: `signer-{uuid}`. The first time
+//! at a different *`EmVault` label*: `signer-{uuid}`. The first time
 //! [`HsmFleet::signers_for`] is called for a signer ID, the fleet opens
 //! authenticated sessions and either:
 //!

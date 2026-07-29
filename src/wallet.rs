@@ -17,19 +17,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
-use emvault::core::descriptor::{KeyMode, to_multipath_string};
-use emvault::core::error::PsbtError;
-use emvault::core::federated_wallet::FederatedWallet as FederatedWalletTrait;
-use emvault::core::network::NetworkType;
-use emvault::core::psbt as core_psbt;
-use emvault::core::psbt::{SigningCoordinator, UnsignedPsbt};
-use emvault::core::signer::{Signer, SignerId};
-use emvault::core::{BtcFederatedWallet, Federation, FederationWallet};
-use emvault::pkcs11::Pkcs11Signer;
-// `Emitter`/`NO_EXPECTED_MEMPOOL_TXS` remain for the best-effort version-wallet
-// fan-out sync below; the primary wallet sync uses `chain_sync::emitter_sync`.
-use emvault::core::bdk_bitcoind_rpc::{Emitter, NO_EXPECTED_MEMPOOL_TXS};
 use emvault::core::bdk_wallet::chain::{ChainPosition, Merge};
 use emvault::core::bdk_wallet::signer::SignerOrdering;
 use emvault::core::bdk_wallet::{self, AddressInfo, ChangeSet, KeychainKind, SignOptions, Wallet};
@@ -40,7 +27,17 @@ use emvault::core::bitcoin::{
     self, Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Txid, Weight,
 };
 use emvault::core::bitcoincore_rpc::{self, Auth, Client as RpcClient, RpcApi};
+use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
+use emvault::core::descriptor::{KeyMode, to_multipath_string};
+use emvault::core::error::PsbtError;
 use emvault::core::esplora::{EsploraBackend, EsploraSyncError, SyncMode};
+use emvault::core::federated_wallet::FederatedWallet as FederatedWalletTrait;
+use emvault::core::network::NetworkType;
+use emvault::core::psbt as core_psbt;
+use emvault::core::psbt::{SigningCoordinator, UnsignedPsbt};
+use emvault::core::signer::{Signer, SignerId};
+use emvault::core::{BtcFederatedWallet, Federation, FederationWallet};
+use emvault::pkcs11::Pkcs11Signer;
 use sqlx::PgPool;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
@@ -168,6 +165,11 @@ pub enum WalletError {
         source: bdk_wallet::chain::local_chain::ApplyHeaderError,
     },
 
+    /// A reorg-below-tip was detected but rebuilding the wallet's graph from its
+    /// descriptors failed (the RPC backend's rebuild-on-reorg recovery path).
+    #[error("failed to rebuild wallet after reorg: {0}")]
+    RebuildAfterReorg(String),
+
     /// Underlying HSM error (signer derivation, PKCS#11 calls).
     #[error("HSM error: {0}")]
     Hsm(#[from] HsmError),
@@ -203,6 +205,7 @@ impl WalletError {
         match err {
             ChainSyncError::Rpc(source) => Self::Rpc(source),
             ChainSyncError::ApplyBlock { height, source } => Self::ApplyBlock { height, source },
+            ChainSyncError::Rebuild(msg) => Self::RebuildAfterReorg(msg),
         }
     }
 
@@ -704,6 +707,13 @@ pub struct SyncSummary {
     pub new_blocks: u32,
     /// Number of mempool transactions ingested in this pass.
     pub new_mempool_txs: u32,
+    /// `true` when this pass detected a reorg below the persisted tip and the
+    /// backend rebuilt the wallet's tx graph from scratch (so the aggregate was
+    /// **replaced**, not merged).
+    pub reorg_rebuilt: bool,
+    /// Number of optimistically-`complete` migrations that were reverted to
+    /// `pending` this pass because their sweep txid was reorged out.
+    pub migrations_reverted: u32,
 }
 
 /// Per-user wallet handle.
@@ -798,24 +808,21 @@ impl UserWallet {
             return self.sync_esplora(backend).await;
         }
 
-        // Sync each federation-version wallet independently so each builds
-        // its own checkpoint chain and discovers UTXOs at its descriptor's
-        // addresses.
+        // Sync each federation-version wallet independently so each builds its
+        // own checkpoint chain and discovers UTXOs at its descriptor's addresses.
+        // Route through `chain_sync::emitter_sync` (not a raw emitter loop) so a
+        // reorg-below-tip is rebuilt rather than silently swallowed. Track whether
+        // *any* wallet rebuilt (the reconcile gate — a migration sweep lives in a
+        // version wallet, so a version-only reorg must still arm detection).
+        let mut any_reorg = false;
         for vw_mutex in &self.version_wallets {
             let mut vw = vw_mutex.lock().await;
-            let cp = vw.latest_checkpoint();
-            let start = cp.height();
-            let mut emitter = Emitter::new(&*self.rpc, cp, start, NO_EXPECTED_MEMPOOL_TXS);
-            while let Some(block_event) = emitter.next_block()? {
-                let height = block_event.block_height();
-                let connected_to = block_event.connected_to();
-                let _ = vw.apply_block_connected_to(&block_event.block, height, connected_to);
-            }
-            let mempool = emitter.mempool()?;
-            vw.apply_unconfirmed_txs(mempool.update);
+            let result = chain_sync::emitter_sync(&mut vw, &*self.rpc)
+                .map_err(WalletError::from_chain_sync)?;
+            any_reorg |= result.reorg_rebuilt;
         }
 
-        let (summary, delta) = {
+        let (mut summary, delta) = {
             let mut wallet = self.inner.lock().await;
             // Pure-BDK emitter drive lives in `emvault::core::chain_sync` (E3b);
             // persistence (changeset merge + DB write) stays here.
@@ -827,12 +834,16 @@ impl UserWallet {
                     tip_height: result.tip_height,
                     new_blocks: result.blocks_synced,
                     new_mempool_txs: result.new_mempool_txs,
+                    reorg_rebuilt: result.reorg_rebuilt,
+                    migrations_reverted: 0,
                 },
                 result.changeset,
             )
         };
+        any_reorg |= summary.reorg_rebuilt;
 
         self.persist_sync(&summary, delta).await?;
+        summary.migrations_reverted = self.reconcile_reverted_migrations(any_reorg).await?;
         Ok(summary)
     }
 
@@ -841,14 +852,21 @@ impl UserWallet {
     /// like the RPC path. The backend guarantees the sync futures stay `Send`,
     /// so this is safe to call from the axum handlers.
     async fn sync_esplora(&self, backend: &EsploraBackend) -> Result<SyncSummary, WalletError> {
-        // Best-effort per-version-wallet sync (mirrors the RPC fan-out); their
-        // UTXO discovery feeds the migration/versioning views.
+        // Keep the per-version wallets' revealed spks in step with `inner` so the
+        // revealed-only esplora sync actually scans the deposit addresses (see
+        // `reveal_version_wallets_to_inner`).
+        self.reveal_version_wallets_to_inner().await;
+        // Per-version-wallet sync (mirrors the RPC fan-out); their UTXO discovery
+        // feeds the migration/versioning views. Track reorg rebuilds to arm the
+        // reconcile gate (a migration sweep lives in a version wallet).
+        let mut any_reorg = false;
         for vw_mutex in &self.version_wallets {
             let mut vw = vw_mutex.lock().await;
-            backend.sync(&mut vw).await?;
+            let result = backend.sync(&mut vw).await?;
+            any_reorg |= result.reorg_rebuilt;
         }
 
-        let (summary, delta) = {
+        let (mut summary, delta) = {
             let mut wallet = self.inner.lock().await;
             let result = backend.sync(&mut wallet).await?;
             drop(wallet);
@@ -857,12 +875,16 @@ impl UserWallet {
                     tip_height: result.tip_height,
                     new_blocks: result.blocks_synced,
                     new_mempool_txs: result.new_mempool_txs,
+                    reorg_rebuilt: result.reorg_rebuilt,
+                    migrations_reverted: 0,
                 },
                 result.changeset,
             )
         };
+        any_reorg |= summary.reorg_rebuilt;
 
         self.persist_sync(&summary, delta).await?;
+        summary.migrations_reverted = self.reconcile_reverted_migrations(any_reorg).await?;
         Ok(summary)
     }
 
@@ -875,7 +897,14 @@ impl UserWallet {
     ) -> Result<(), WalletError> {
         if let Some(delta) = delta {
             let mut agg = self.aggregate.lock().await;
-            agg.merge(delta);
+            if summary.reorg_rebuilt {
+                // Replace-not-merge: the backend staged a complete rebuilt
+                // changeset. Merging would re-introduce the reorged-out phantom
+                // UTXO — the exact bug the rebuild exists to fix (plan §4.4).
+                *agg = delta;
+            } else {
+                agg.merge(delta);
+            }
             let json = serde_json::to_value(&*agg).map_err(WalletError::EncodeChangeSet)?;
             drop(agg);
             db::update_wallet_changeset(
@@ -894,6 +923,101 @@ impl UserWallet {
             .await?;
         }
         Ok(())
+    }
+
+    /// Reveal each version wallet's external keychain up to `inner`'s last-revealed
+    /// index, so a revealed-only nodeless sync (esplora) scans the same addresses
+    /// deposits were handed out on.
+    ///
+    /// The version wallets are rebuilt fresh (0 revealed) on every load and address
+    /// reveals only ever happen on `inner`; without this they'd scan nothing and
+    /// the reconcile presence check (which reads the version wallets) would miss a
+    /// sweep. The bitcoind-RPC emitter gets this for free via full-block scan +
+    /// gap-limit lookahead. No-op until `inner` has revealed.
+    async fn reveal_version_wallets_to_inner(&self) {
+        let reveal_to = {
+            let inner = self.inner.lock().await;
+            inner.derivation_index(KeychainKind::External)
+        };
+        let Some(idx) = reveal_to else { return };
+        for vw_mutex in &self.version_wallets {
+            let mut vw = vw_mutex.lock().await;
+            let _revealed = vw.reveal_addresses_to(KeychainKind::External, idx).count();
+        }
+    }
+
+    /// Revert any optimistically-`complete` migration whose sweep tx was reorged
+    /// out. **Detection is wallet ground-truth** (plan invariant §0.2 / P0): after
+    /// a reorg rebuild, is the recorded sweep txid still present — confirmed *or*
+    /// unconfirmed-in-mempool — anywhere in the rebuilt tx graph? A sweep that is
+    /// **absent entirely** was permanently evicted → revert its predecessor
+    /// version `complete → pending` (`migration_sweep_txid → NULL`) via the
+    /// guarded, idempotent [`db::reconcile_migration`]. Returns the number
+    /// reverted. Backend-agnostic: the same predicate holds for RPC and Esplora,
+    /// so there is no backend-specific branching and **no dependence on the
+    /// backend's `evicted_txids` set**.
+    ///
+    /// D5: a sweep that was reorged out but immediately **re-queued into the
+    /// mempool** still counts as *present* (canonical-unconfirmed) and is **not**
+    /// reverted — we don't re-open a migration whose sweep is about to re-confirm.
+    ///
+    /// `reorg_rebuilt` is a coarse **hint/gate only**, never the predicate: only a
+    /// from-scratch rebuild can drop a previously-confirmed sweep, and gating on it
+    /// also prevents a false revert while a freshly-loaded version wallet (rebuilt
+    /// at 0 revealed — see [`Self::reveal_version_wallets_to_inner`]) has not yet
+    /// re-scanned the sweep back in.
+    async fn reconcile_reverted_migrations(&self, reorg_rebuilt: bool) -> Result<u32, WalletError> {
+        if !reorg_rebuilt {
+            return Ok(0);
+        }
+        let versions = db::list_federation_versions_for_wallet(&self.pool, self.wallet_id).await?;
+        // Candidate sweeps: every `complete` version that recorded a sweep txid.
+        let candidates: Vec<(Uuid, Txid, String)> = versions
+            .iter()
+            .filter(|v| v.migration_status == "complete")
+            .filter_map(|v| {
+                let s = v.migration_sweep_txid.as_deref()?;
+                let txid = s.parse::<Txid>().ok()?;
+                Some((v.id, txid, s.to_string()))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let wanted: HashSet<Txid> = candidates.iter().map(|(_, txid, _)| *txid).collect();
+        let present = self.txids_present_in_graph(&wanted).await;
+        let mut reverted = 0u32;
+        for (id, txid, txid_str) in &candidates {
+            if !present.contains(txid) && db::reconcile_migration(&self.pool, *id, txid_str).await?
+            {
+                reverted = reverted.saturating_add(1);
+            }
+        }
+        Ok(reverted)
+    }
+
+    /// Ground-truth presence check: of `wanted`, which txids appear (confirmed or
+    /// unconfirmed) in the canonical view of any version wallet or `inner`? A
+    /// migration sweep spends an old-version UTXO and pays a new-version address,
+    /// so it can surface in any of these graphs; a txid absent from **all** of
+    /// them was evicted from the chain (and, after a rebuild, from mempool too).
+    async fn txids_present_in_graph(&self, wanted: &HashSet<Txid>) -> HashSet<Txid> {
+        let mut present = HashSet::new();
+        for vw_mutex in &self.version_wallets {
+            let vw = vw_mutex.lock().await;
+            for wtx in vw.transactions() {
+                if wanted.contains(&wtx.tx_node.txid) {
+                    present.insert(wtx.tx_node.txid);
+                }
+            }
+        }
+        let inner = self.inner.lock().await;
+        for wtx in inner.transactions() {
+            if wanted.contains(&wtx.tx_node.txid) {
+                present.insert(wtx.tx_node.txid);
+            }
+        }
+        present
     }
 
     /// Broadcast raw transaction bytes through the active backend: the Esplora

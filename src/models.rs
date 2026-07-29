@@ -102,5 +102,9 @@ pub struct FederationVersionRow {
     pub wallet_handle: String,
     pub blinding_key: Option<String>,
     pub migration_status: String,
+    /// The migration sweep txid recorded when this version was flipped to
+    /// `complete`; `NULL` otherwise, and cleared back to `NULL` when a reorg
+    /// reverts the version to `pending`. Drives reorg-reconciliation detection.
+    pub migration_sweep_txid: Option<String>,
     pub created_at: DateTime<Utc>,
 }

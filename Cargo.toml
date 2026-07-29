@@ -15,7 +15,11 @@ publish = false
 # `setup_dev_federation` helper is bypassed on purpose — see src/hsm.rs.
 # `esplora` adds the nodeless Esplora/Waterfalls chain backend
 # (`emvault::core::esplora`), selected at runtime via `APP_CHAIN_BACKEND`.
-emvault = { version = "0.3", features = ["pkcs11", "elements", "dev-signer", "esplora"] }
+# TEMPORARY (reorg-reconciliation 0.6.0 work): bumped 0.3 -> 0.5 so the local
+# `[patch.crates-io]` backend tree (which carries `evicted_txids` + `reorg_rebuilt`
+# + rebuild-on-reorg) is consumed. Greg lands the single emvault 0.6.0 republish
+# (D6); at that point set this to "0.6" and drop the patch below.
+emvault = { version = "0.5", features = ["pkcs11", "elements", "dev-signer", "esplora"] }
 
 # Chain + Elements stacks are NOT pinned here — their types cross the EmVault
 # API, so we consume them through the ecosystem's canonical re-exports:
@@ -82,7 +86,7 @@ toml = "0.8"
 # end-to-end integration test (node + Postgres backed). Cargo unions this with
 # the normal `emvault` dep, so the test build gets pkcs11 + elements +
 # dev-signer + test-utils.
-emvault = { version = "0.3", features = ["test-utils"] }
+emvault = { version = "0.5", features = ["test-utils"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

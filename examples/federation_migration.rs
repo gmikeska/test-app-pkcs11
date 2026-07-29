@@ -2146,6 +2146,12 @@ async fn main() {
     let mut fee_change_data: Option<(bitcoin::OutPoint, bitcoin::psbt::Input, bitcoin::Weight)> =
         None;
 
+    // Account index -> the txid of the sweep tx that moves that account's funds
+    // into the new federation (its customer output). Recorded on `federation_versions`
+    // at enact so reorg-reconciliation can match it against evicted txids (0008).
+    let mut account_sweep_txid: std::collections::HashMap<u32, String> =
+        std::collections::HashMap::new();
+
     for (tx_num, sweep_tx) in plan.sweep_transactions.iter().enumerate() {
         println!(
             "\n  Transaction {}/{}:",
@@ -2422,6 +2428,11 @@ async fn main() {
         let raw_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(raw.as_slice());
         for output in &sweep_tx.outputs {
             let out_acct = output.account_idx();
+            // Bind the customer-output tx to the account so enact can stamp it on
+            // the version row (reorg-reconciliation detection key).
+            if let emvault::core::SweepOutput::Customer { .. } = output {
+                account_sweep_txid.insert(out_acct, txid.to_string());
+            }
             let recipient = match output {
                 emvault::core::SweepOutput::Customer { address, .. } => address.to_string(),
                 emvault::core::SweepOutput::FeeChange { .. } => {
@@ -2463,9 +2474,17 @@ async fn main() {
                 }
             };
         let max_version = versions.iter().map(|v| v.version_index).max().unwrap_or(0);
+        let acct_key = u32::try_from(acct_idx).unwrap_or(0);
         for v in &versions {
             if v.version_index < max_version {
-                let _ = db::update_migration_status(&pool, v.id, "complete").await;
+                // Record the sweep txid alongside the status flip (0008) so a later
+                // reorg that evicts the sweep can be detected + reverted. Fall back
+                // to a bare status flip if no customer-output txid was captured.
+                if let Some(sweep_txid) = account_sweep_txid.get(&acct_key) {
+                    let _ = db::set_migration_complete(&pool, v.id, sweep_txid).await;
+                } else {
+                    let _ = db::update_migration_status(&pool, v.id, "complete").await;
+                }
             }
         }
     }

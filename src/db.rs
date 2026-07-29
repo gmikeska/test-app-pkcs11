@@ -454,7 +454,7 @@ pub async fn insert_federation_version(
          ON CONFLICT (wallet_id, version_index) WHERE wallet_id IS NOT NULL DO NOTHING \
          RETURNING id, wallet_id, elements_wallet_id, version_index, descriptor, \
                    threshold, signer_count, federation_snapshot, wallet_handle, \
-                   blinding_key, migration_status, created_at",
+                   blinding_key, migration_status, migration_sweep_txid, created_at",
     )
     .bind(spec.wallet_id)
     .bind(spec.elements_wallet_id)
@@ -476,7 +476,7 @@ pub async fn list_federation_versions_for_wallet(
     sqlx::query_as::<_, FederationVersionRow>(
         "SELECT id, wallet_id, elements_wallet_id, version_index, descriptor, \
                 threshold, signer_count, federation_snapshot, wallet_handle, \
-                blinding_key, migration_status, created_at \
+                blinding_key, migration_status, migration_sweep_txid, created_at \
          FROM federation_versions WHERE wallet_id = $1 \
          ORDER BY version_index ASC",
     )
@@ -492,7 +492,7 @@ pub async fn list_federation_versions_for_elements_wallet(
     sqlx::query_as::<_, FederationVersionRow>(
         "SELECT id, wallet_id, elements_wallet_id, version_index, descriptor, \
                 threshold, signer_count, federation_snapshot, wallet_handle, \
-                blinding_key, migration_status, created_at \
+                blinding_key, migration_status, migration_sweep_txid, created_at \
          FROM federation_versions WHERE elements_wallet_id = $1 \
          ORDER BY version_index ASC",
     )
@@ -537,6 +537,68 @@ pub async fn update_migration_status(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Flip a version to `complete` **and** record the migration sweep txid that
+/// moved its funds forward (migration `0008`). The recorded txid is the key
+/// reorg-reconciliation checks against wallet ground-truth (is this sweep still
+/// present in the rebuilt tx graph?) to decide whether the sweep was reorged
+/// out; see [`reconcile_migration`]. Called by the migration tool at the same
+/// point it previously only flipped the status.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn set_migration_complete(
+    pool: &PgPool,
+    version_id: Uuid,
+    sweep_txid: &str,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE federation_versions \
+         SET migration_status = 'complete', migration_sweep_txid = $1 \
+         WHERE id = $2",
+    )
+    .bind(sweep_txid)
+    .bind(version_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Revert an optimistically-completed migration whose sweep was reorged out:
+/// `migration_status: complete → pending` and `migration_sweep_txid: <txid> →
+/// NULL`, putting the predecessor version back into the re-sweepable state the
+/// migration tool looks for. `sweep_txid` is the version's own recorded sweep
+/// txid (the caller has already established, from wallet ground-truth, that it is
+/// no longer present on-chain).
+///
+/// Guarded on `migration_status = 'complete'` **and** a matching
+/// `migration_sweep_txid`, so it is a no-op (returns `Ok(false)`) after the first
+/// revert (idempotent) and can never fire on a healthy version or on a version
+/// whose sweep is a *different* txid. Returns `Ok(true)` iff it reverted a row.
+///
+/// Keyed by the version's primary `id`, so it serves both the Bitcoin and
+/// Elements paths (the `federation_versions` table is shared); no separate
+/// `_elements_` twin is needed.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn reconcile_migration(
+    pool: &PgPool,
+    version_id: Uuid,
+    sweep_txid: &str,
+) -> sqlx::Result<bool> {
+    let result = sqlx::query(
+        "UPDATE federation_versions \
+         SET migration_status = 'pending', migration_sweep_txid = NULL \
+         WHERE id = $1 AND migration_status = 'complete' \
+           AND migration_sweep_txid = $2",
+    )
+    .bind(version_id)
+    .bind(sweep_txid)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub async fn set_pending_migration_for_older_versions(
