@@ -78,8 +78,16 @@ account index.
 | GET        | `/wallet/receive`                     | balance card + 20 reveal addresses         |
 | GET        | `/wallet/send`                        | send form + recent broadcast transactions  |
 | POST       | `/wallet/send`                        | build, sign 3-of-3, broadcast              |
+| GET        | `/wallet/federation`                  | federation detail + migration (HSM rotation) controls |
 | GET        | `/wallet/addresses/{address}`         | QR + receipts for the user's address       |
 | GET        | `/wallet/transactions/{txid}`         | broadcast transaction detail               |
+| GET        | `/elements/wallet`                    | redirect to `/elements/wallet/receive`     |
+| GET        | `/elements/wallet/receive`            | Elements balance card + reveal addresses   |
+| GET        | `/elements/wallet/send`               | Elements send form                         |
+| POST       | `/elements/wallet/send`               | build, sign, broadcast (Elements/Liquid)   |
+| GET        | `/elements/wallet/federation`         | Elements federation detail + migration     |
+| GET        | `/elements/wallet/addresses/{address}`| Elements address detail                    |
+| GET        | `/elements/wallet/transactions/{txid}`| Elements transaction detail                |
 
 No JSON endpoints, no client-side JS, no `node_modules`. Everything is
 form posts and Askama renders.

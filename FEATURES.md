@@ -63,6 +63,7 @@ the coordinator dispatches to them (§5).
 | `core::psbt::{UnsignedPsbt, SigningCoordinator}` | Drive the m-of-n sign across registered signers | `wallet.rs::build_sign_and_broadcast` |
 | `core::psbt::build_spend` | Build the unsigned spend PSBT | `wallet.rs` |
 | `core::chain_sync::*` | Build/load + sync the BDK wallet | `wallet.rs` |
+| `core::chain_sync::SyncResult::reorg_rebuilt` | Reorg-below-tip signal that arms migration reconcile | `UserWallet::sync` → `reconcile_reverted_migrations` |
 | `core::{FederatedWallet, BtcFederatedWallet}` | Track funds across federation versions | `wallet.rs` |
 | `core::migration::{SweepAlgorithm, AccountForAccountSweep, AccountForAccountBatchedSweep, MigrationPlan, AccountUtxoSet, SweepOutput}` | The federation-migration sweep engine | `examples/federation_migration.rs` |
 | `elements::ElementsWollet` + `CtDescriptorBuilder` | Client-side confidential wallet + CT descriptor | `elements_wallet.rs` |
@@ -170,6 +171,21 @@ Same no-persistence model as xpub: the app owns the `bdk_wallet::Wallet` +
 
 ---
 
+**Reorg reconciliation.** A migration marked `complete` can lose its sweep to a
+reorg. The crate's `chain_sync::emitter_sync` recovers a reorg-below-tip by
+rebuilding the wallet graph from genesis and flags it via
+`SyncResult::reorg_rebuilt` (when set, the app **replaces** its persisted
+`ChangeSet` rather than merging). `UserWallet::sync` unions that flag across every
+version (`any_reorg`) and calls `reconcile_reverted_migrations`: for each
+completed version whose recorded `migration_sweep_txid` is **no longer present**
+in the rebuilt graph, the guarded, idempotent `db::reconcile_migration` reverts it
+`complete → pending` (funds preserved on the prior version). *Note:* the
+funds-preserving **re-sweep** re-completion (`test-app-xpub`'s Path B /
+`build_migration_resweep`, migration `0009`) is **not yet ported here** — this app
+does the revert half only.
+
+---
+
 ## 7. Federation migration — the `core::migration` sweep engine
 
 Where xpub uses `core::roster` for the arithmetic, the custodial app drives the
@@ -247,6 +263,7 @@ knobs.
 | Chain data | `chain_sync::*` | own the `Wallet` + `ChangeSet` + RPC |
 | Track versions | `core::FederatedWallet` | reconstruct from stored versions |
 | Plan a migration | `core::migration::SweepAlgorithm` | discover accounts, sign, broadcast |
+| Reconcile a reorg | `chain_sync::SyncResult::reorg_rebuilt` | `sync` → `reconcile_reverted_migrations` reverts `complete→pending` (no re-sweep yet) |
 | Liquid wallet + PSET | `elements::{ElementsWollet, build_*_pset, finalize_p2wsh_pset, ElementsSigner}` | orchestrate, persist txs |
 | Liquid chain scan | `elements::sync` (traits + `BlockScanEngine`) | **implement** the stores + chain source, run ingestion |
 | Persistence / moving funds | *(none — by design)* | Postgres + broadcast |
