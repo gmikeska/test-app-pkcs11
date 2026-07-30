@@ -109,3 +109,6 @@ doc_overindented_list_items = "allow"
 # crates.io and the version bump is published.
 [patch.crates-io]
 emvault = { path = "../emvault" }
+# esplora-rs 0.3.0 (unpublished) carries the waterfalls `TxSeen.v: -1` spend
+# sentinel fix; patched in until Greg publishes 0.3.0. Remove on publish.
+esplora-rs = { path = "../../esplora-rs" }
