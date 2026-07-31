@@ -147,6 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(handlers::auth::login_get).post(handlers::auth::login_post),
         )
         .route("/logout", post(handlers::auth::logout_post))
+        .route("/ws", get(handlers::ws::ws))
         .route("/wallet/receive", get(handlers::wallet::receive))
         .route(
             "/wallet/send",

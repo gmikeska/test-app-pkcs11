@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use emvault::elements::ElementsNetwork;
 use emvault::elements::ElementsWollet;
-use emvault::elements::nodeless::NodelessSync;
+use emvault::elements::nodeless::{NodelessSync, TokenProvider};
 use emvault::elements::sync::{BlockScanEngine, WalletId};
 use lwk_wollet_backend::BlockchainBackend;
 use sqlx::PgPool;
@@ -47,6 +47,7 @@ pub fn spawn(pool: PgPool, config: &AppConfig) -> JoinHandle<()> {
     let backend = config.elements_chain_backend;
     let electrum_url = config.elements_electrum_url.clone();
     let esplora_url = config.elements_esplora_url.clone();
+    let esplora_auth = config.elements_esplora_auth.clone();
 
     tokio::spawn(async move {
         loop {
@@ -58,6 +59,7 @@ pub fn spawn(pool: PgPool, config: &AppConfig) -> JoinHandle<()> {
                         backend,
                         electrum_url.clone(),
                         esplora_url.clone(),
+                        esplora_auth.clone(),
                         network,
                     )
                     .await
@@ -119,6 +121,7 @@ async fn run_once_nodeless(
     backend: ElementsChainBackend,
     electrum_url: Option<String>,
     esplora_url: Option<String>,
+    esplora_auth: Option<TokenProvider>,
     network: ElementsNetwork,
 ) -> Result<(), String> {
     let entries = load_wallet_versions(pool).await?;
@@ -149,12 +152,20 @@ async fn run_once_nodeless(
             }
             ElementsChainBackend::Esplora => {
                 let url = esplora_url.unwrap_or_default();
-                let client = NodelessSync::new_esplora(&url, lwk).map_err(|e| e.to_string())?;
+                let client = match esplora_auth {
+                    Some(token) => NodelessSync::new_esplora_authenticated(&url, lwk, token),
+                    None => NodelessSync::new_esplora(&url, lwk),
+                }
+                .map_err(|e| e.to_string())?;
                 Ok(drive_nodeless(client, by_wallet, &utxos, &checkpoints))
             }
             ElementsChainBackend::Waterfalls => {
                 let url = esplora_url.unwrap_or_default();
-                let client = NodelessSync::new_waterfalls(&url, lwk).map_err(|e| e.to_string())?;
+                let client = match esplora_auth {
+                    Some(token) => NodelessSync::new_waterfalls_authenticated(&url, lwk, token),
+                    None => NodelessSync::new_waterfalls(&url, lwk),
+                }
+                .map_err(|e| e.to_string())?;
                 Ok(drive_nodeless(client, by_wallet, &utxos, &checkpoints))
             }
             ElementsChainBackend::Rpc => Ok("rpc backend not handled here".to_string()),

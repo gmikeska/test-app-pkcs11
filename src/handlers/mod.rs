@@ -6,3 +6,4 @@ pub mod elements_wallet;
 pub mod home;
 pub mod transactions;
 pub mod wallet;
+pub mod ws;

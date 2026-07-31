@@ -18,6 +18,33 @@ use emvault::config::{hex_decode, optional, require};
 use emvault::core::bitcoin::Network;
 use emvault::core::bitcoin::bip32::{ChildNumber, DerivationPath};
 use emvault::elements::ElementsNetwork;
+use emvault::elements::nodeless::TokenProvider;
+
+/// Default Blockstream OAuth token endpoint for the enterprise Esplora plan.
+const BLOCKSTREAM_TOKEN_URL: &str =
+    "https://login.blockstream.com/realms/blockstream-public/protocol/openid-connect/token";
+
+/// Build a [`TokenProvider`] for the Elements Esplora/Waterfalls backends from
+/// the `ESPLORA_CLIENT_ID`/`ESPLORA_CLIENT_SECRET` variables — the same
+/// enterprise credentials the Bitcoin side already uses. Returns `None` when
+/// unset, so callers fall back to the unauthenticated public endpoint.
+/// `ESPLORA_TOKEN_URL` overrides the token endpoint (defaults to Blockstream).
+///
+/// Computed once at startup and carried on [`AppConfig::elements_esplora_auth`];
+/// call sites read the config field rather than the environment directly.
+fn elements_esplora_token_from_env() -> Option<TokenProvider> {
+    let nonempty = |s: String| Some(s).filter(|s| !s.trim().is_empty());
+    let client_id = optional("ESPLORA_CLIENT_ID").and_then(nonempty)?;
+    let client_secret = optional("ESPLORA_CLIENT_SECRET").and_then(nonempty)?;
+    let url = optional("ESPLORA_TOKEN_URL")
+        .and_then(nonempty)
+        .unwrap_or_else(|| BLOCKSTREAM_TOKEN_URL.to_string());
+    Some(TokenProvider::Blockstream {
+        url,
+        client_id,
+        client_secret,
+    })
+}
 
 // Re-exported so `crate::config::ConfigError` keeps resolving across the app
 // (used via `#[from]` in `WalletError` and `ElementsWalletError`).
@@ -49,6 +76,9 @@ pub enum ChainBackend {
     Esplora,
     /// Nodeless Esplora, Waterfalls/QuickSync descriptor scan.
     Waterfalls,
+    /// Descriptor-private Electrum backend (electrs/Fulcrum over
+    /// `emvault::core::electrum`), selected via `APP_ELECTRUM_URL`.
+    Electrum,
 }
 
 impl FromStr for ChainBackend {
@@ -58,9 +88,10 @@ impl FromStr for ChainBackend {
             "rpc" => Ok(Self::Rpc),
             "esplora" => Ok(Self::Esplora),
             "waterfalls" => Ok(Self::Waterfalls),
+            "electrum" => Ok(Self::Electrum),
             other => Err(ConfigError::Parse {
                 var: "APP_CHAIN_BACKEND",
-                reason: format!("expected rpc|esplora|waterfalls, got `{other}`"),
+                reason: format!("expected rpc|esplora|waterfalls|electrum, got `{other}`"),
             }),
         }
     }
@@ -130,6 +161,9 @@ pub struct AppConfig {
     /// Esplora base URL (`APP_ESPLORA_URL`), required when `chain_backend` is an
     /// Esplora mode; ignored for `Rpc`.
     pub esplora_url: Option<String>,
+    /// Electrum server URL (`APP_ELECTRUM_URL`, e.g. `tcp://127.0.0.1:60001` or
+    /// `ssl://host:50002`), required when `chain_backend` is `Electrum`.
+    pub electrum_url: Option<String>,
     /// Path to `libemvault_dev_hsm.so` (or, in production, the vendor
     /// PKCS#11 library).
     pub pkcs11_library_path: PathBuf,
@@ -163,6 +197,10 @@ pub struct AppConfig {
     /// e.g. `http://10.44.0.1:3102`), required when `elements_chain_backend` is
     /// `Esplora` or `Waterfalls`.
     pub elements_esplora_url: Option<String>,
+    /// Optional bearer-token auth for the Elements Esplora/Waterfalls backends
+    /// (e.g. Blockstream enterprise). `Some` when `ESPLORA_CLIENT_ID`/`_SECRET`
+    /// are set; `None` falls back to the unauthenticated public endpoint.
+    pub elements_esplora_auth: Option<TokenProvider>,
 }
 
 impl AppConfig {
@@ -246,6 +284,14 @@ impl AppConfig {
         {
             return Err(ConfigError::Missing {
                 var: "APP_ESPLORA_URL",
+            });
+        }
+        let electrum_url = optional("APP_ELECTRUM_URL");
+        if chain_backend == ChainBackend::Electrum
+            && electrum_url.as_deref().unwrap_or("").trim().is_empty()
+        {
+            return Err(ConfigError::Missing {
+                var: "APP_ELECTRUM_URL",
             });
         }
 
@@ -378,6 +424,7 @@ impl AppConfig {
             bitcoin_wallet_name,
             chain_backend,
             esplora_url,
+            electrum_url,
             pkcs11_library_path,
             hsm_tokens,
             fed_threshold,
@@ -389,6 +436,7 @@ impl AppConfig {
             elements_chain_backend,
             elements_electrum_url,
             elements_esplora_url,
+            elements_esplora_auth: elements_esplora_token_from_env(),
         })
     }
 

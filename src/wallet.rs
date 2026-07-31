@@ -29,6 +29,7 @@ use emvault::core::bitcoin::{
 use emvault::core::bitcoincore_rpc::{self, Auth, Client as RpcClient, RpcApi};
 use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
 use emvault::core::descriptor::{KeyMode, to_multipath_string};
+use emvault::core::electrum::{ElectrumBackend, ElectrumError, WatchPool};
 use emvault::core::error::PsbtError;
 use emvault::core::esplora::{EsploraBackend, EsploraSyncError, SyncMode};
 use emvault::core::federated_wallet::FederatedWallet as FederatedWalletTrait;
@@ -57,6 +58,9 @@ type SavedBip32Derivation = (
 /// Default reveal target: addresses 0..REVEAL_COUNT-1 are eagerly
 /// surfaced on every receive-tab render.
 pub const REVEAL_COUNT: u32 = 20;
+
+/// Number of shared electrs connections backing the session-watcher pool (P5).
+const WATCH_POOL_CONNS: usize = 2;
 
 // ---------------------------------------------------------------------------
 // Network-patched signer wrapper — extracted to `emvault-pkcs11`
@@ -124,6 +128,10 @@ pub enum WalletError {
     /// Nodeless Esplora/Waterfalls backend error (sync or broadcast).
     #[error("esplora backend error: {0}")]
     Esplora(#[from] EsploraSyncError),
+
+    /// Descriptor-private Electrum backend error (sync or broadcast).
+    #[error("electrum backend error: {0}")]
+    Electrum(#[from] ElectrumError),
 
     /// Bitcoin Core RPC error.
     #[error("bitcoind RPC error: {0}")]
@@ -237,6 +245,13 @@ pub struct WalletManager {
     /// Nodeless chain backend, when `APP_CHAIN_BACKEND` selects an Esplora mode.
     /// `None` = Bitcoin Core RPC (the default emitter path).
     esplora: Option<Arc<EsploraBackend>>,
+    /// Descriptor-private Electrum backend, when `APP_CHAIN_BACKEND=electrum`.
+    /// `None` unless the Electrum backend is selected.
+    electrum: Option<Arc<ElectrumBackend>>,
+    /// Shared electrs session-watcher pool (electrum only). The WS layer (P5)
+    /// subscribes each session's revealed scripts here for event-driven balance
+    /// pushes; ref-counted so an address shared by sessions subscribes once.
+    watch_pool: Option<Arc<WatchPool>>,
     cache: AsyncMutex<HashMap<Uuid, Arc<UserWallet>>>,
 }
 
@@ -258,7 +273,7 @@ impl WalletManager {
         // Nodeless backend selection. `connect` auto-detects public vs enterprise
         // from the ESPLORA_CLIENT_* env vars; the mode is carried on the backend.
         let esplora = match config.chain_backend {
-            ChainBackend::Rpc => None,
+            ChainBackend::Rpc | ChainBackend::Electrum => None,
             ChainBackend::Esplora | ChainBackend::Waterfalls => {
                 let mode = if config.chain_backend == ChainBackend::Waterfalls {
                     SyncMode::Waterfalls
@@ -272,6 +287,27 @@ impl WalletManager {
             }
         };
 
+        // Descriptor-private Electrum backend, selected by `APP_CHAIN_BACKEND=electrum`.
+        // `connect` opens the socket up-front (validated here); the URL is required
+        // by config validation when this backend is chosen.
+        let electrum = match config.chain_backend {
+            ChainBackend::Electrum => {
+                let url = config.electrum_url.as_deref().unwrap_or_default();
+                Some(Arc::new(ElectrumBackend::connect(url, config.network)?))
+            }
+            ChainBackend::Rpc | ChainBackend::Esplora | ChainBackend::Waterfalls => None,
+        };
+
+        // Session-watcher pool (electrum only): a small set of shared electrs
+        // connections that back every WS session's live-balance subscriptions.
+        let watch_pool = match config.chain_backend {
+            ChainBackend::Electrum => {
+                let url = config.electrum_url.as_deref().unwrap_or_default();
+                Some(Arc::new(WatchPool::connect(url, WATCH_POOL_CONNS)?))
+            }
+            ChainBackend::Rpc | ChainBackend::Esplora | ChainBackend::Waterfalls => None,
+        };
+
         Ok(Self {
             pool,
             rpc: Arc::new(rpc),
@@ -281,8 +317,17 @@ impl WalletManager {
             fed_signer_indices: config.fed_signer_indices.clone(),
             hsm,
             esplora,
+            electrum,
+            watch_pool,
             cache: AsyncMutex::new(HashMap::new()),
         })
+    }
+
+    /// Shared electrs session-watcher pool, when the Electrum backend is active.
+    /// The WS layer subscribes each session's revealed scripts here (P5).
+    #[must_use]
+    pub fn watch_pool(&self) -> Option<Arc<WatchPool>> {
+        self.watch_pool.clone()
     }
 
     /// Wallet network.
@@ -629,6 +674,7 @@ impl WalletManager {
             pool: self.pool.clone(),
             rpc: self.rpc.clone(),
             esplora: self.esplora.clone(),
+            electrum: self.electrum.clone(),
         })
     }
 }
@@ -735,6 +781,8 @@ pub struct UserWallet {
     rpc: Arc<RpcClient>,
     /// Shared nodeless backend (cloned from the manager); `None` = RPC path.
     esplora: Option<Arc<EsploraBackend>>,
+    /// Shared Electrum backend (cloned from the manager); `None` unless selected.
+    electrum: Option<Arc<ElectrumBackend>>,
 }
 
 #[allow(dead_code)]
@@ -806,6 +854,10 @@ impl UserWallet {
         // Esplora/Waterfalls backend instead of driving the RPC emitter.
         if let Some(backend) = self.esplora.as_deref() {
             return self.sync_esplora(backend).await;
+        }
+        // Descriptor-private path: sync through the Electrum backend.
+        if let Some(backend) = self.electrum.as_deref() {
+            return self.sync_electrum(backend).await;
         }
 
         // Sync each federation-version wallet independently so each builds its
@@ -888,8 +940,47 @@ impl UserWallet {
         Ok(summary)
     }
 
+    /// Descriptor-private sync: run every version wallet + the primary through
+    /// the shared [`ElectrumBackend`], then persist exactly like the RPC/Esplora
+    /// paths. `ElectrumBackend::sync` is revealed-only (the app is the sole
+    /// minter of addresses) and its futures are `Send`, so it's safe to call
+    /// from the axum handlers.
+    async fn sync_electrum(&self, backend: &ElectrumBackend) -> Result<SyncSummary, WalletError> {
+        // Keep the per-version wallets' revealed spks in step with `inner` so the
+        // revealed-only electrum sync actually scans the deposit addresses (see
+        // `reveal_version_wallets_to_inner`).
+        self.reveal_version_wallets_to_inner().await;
+        let mut any_reorg = false;
+        for vw_mutex in &self.version_wallets {
+            let mut vw = vw_mutex.lock().await;
+            let result = backend.sync(&mut vw).await?;
+            any_reorg |= result.reorg_rebuilt;
+        }
+
+        let (mut summary, delta) = {
+            let mut wallet = self.inner.lock().await;
+            let result = backend.sync(&mut wallet).await?;
+            drop(wallet);
+            (
+                SyncSummary {
+                    tip_height: result.tip_height,
+                    new_blocks: result.blocks_synced,
+                    new_mempool_txs: result.new_mempool_txs,
+                    reorg_rebuilt: result.reorg_rebuilt,
+                    migrations_reverted: 0,
+                },
+                result.changeset,
+            )
+        };
+        any_reorg |= summary.reorg_rebuilt;
+
+        self.persist_sync(&summary, delta).await?;
+        summary.migrations_reverted = self.reconcile_reverted_migrations(any_reorg).await?;
+        Ok(summary)
+    }
+
     /// Merge a sync's staged changeset into the aggregate and write it (plus the
-    /// new tip) to the DB — shared by the RPC and Esplora sync paths.
+    /// new tip) to the DB — shared by the RPC, Esplora, and Electrum sync paths.
     async fn persist_sync(
         &self,
         summary: &SyncSummary,
@@ -1020,9 +1111,14 @@ impl UserWallet {
         present
     }
 
-    /// Broadcast raw transaction bytes through the active backend: the Esplora
-    /// backend when nodeless, otherwise bitcoind `sendrawtransaction`.
+    /// Broadcast raw transaction bytes through the active backend: Electrum or
+    /// Esplora when one is selected, otherwise bitcoind `sendrawtransaction`.
     async fn broadcast_raw(&self, raw_tx: &[u8]) -> Result<Txid, WalletError> {
+        if let Some(backend) = self.electrum.as_deref() {
+            let tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(raw_tx)
+                .map_err(|e| WalletError::ExtractTx(e.to_string()))?;
+            return Ok(backend.broadcast(&tx).await?);
+        }
         if let Some(backend) = self.esplora.as_deref() {
             let tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(raw_tx)
                 .map_err(|e| WalletError::ExtractTx(e.to_string()))?;
@@ -1295,6 +1391,29 @@ impl UserWallet {
     /// Wallet's current local-chain tip height.
     pub async fn tip_height(&self) -> u32 {
         self.inner.lock().await.latest_checkpoint().height()
+    }
+
+    /// The external `scriptPubKey`s deposits are handed out on — the current
+    /// federation's addresses `0..=last_revealed` (the same set `reveal_addresses`
+    /// renders). The session-watcher subscribes these to electrs so a payment
+    /// triggers an event-driven balance push (P5). Empty until an address is
+    /// revealed.
+    pub async fn watched_scripts(&self) -> Vec<ScriptBuf> {
+        use emvault::core::federated_wallet::FederatedWallet as _;
+        let last = {
+            let inner = self.inner.lock().await;
+            inner.derivation_index(KeychainKind::External)
+        };
+        let Some(last) = last else { return Vec::new() };
+        let current = &self.federated_wallet.current().wallet;
+        (0..=last)
+            .map(|i| {
+                current
+                    .peek_address(KeychainKind::External, i)
+                    .address
+                    .script_pubkey()
+            })
+            .collect()
     }
 
     /// Snapshot the wallet's current balance.
