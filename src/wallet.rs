@@ -1440,6 +1440,44 @@ impl UserWallet {
         all
     }
 
+    /// Preview a Send-Max drain: the exact net amount a full-balance sweep to
+    /// `recipient` would deliver (balance − network fee), without signing or
+    /// broadcasting. Drives the Send page's **Max** button. Uses the same
+    /// `drain_wallet`/`drain_to` builder as [`Self::sweep_to`], so the previewed
+    /// amount matches the sweep that follows.
+    ///
+    /// # Errors
+    /// [`WalletError::BadFeeRate`] / [`WalletError::BuildTx`] as for a real send.
+    pub async fn compute_drain_amount(
+        &self,
+        recipient: &Address,
+        fee_rate_sat_vb: u64,
+    ) -> Result<Amount, WalletError> {
+        let fee_rate =
+            FeeRate::from_sat_per_vb(fee_rate_sat_vb).ok_or(WalletError::BadFeeRate {
+                sat_per_vb: fee_rate_sat_vb,
+            })?;
+        let recipient_spk = recipient.script_pubkey();
+        let mut wallet = self.inner.lock().await;
+        let mut builder = wallet.build_tx();
+        builder
+            .drain_wallet()
+            .drain_to(recipient_spk.clone())
+            .fee_rate(fee_rate);
+        let psbt = builder
+            .finish()
+            .map_err(|e| WalletError::BuildTx(e.to_string()))?;
+        // A drain has no change output — the single recipient output carries the
+        // whole net amount.
+        let amount = psbt
+            .unsigned_tx
+            .output
+            .iter()
+            .find(|o| o.script_pubkey == recipient_spk)
+            .map_or(Amount::ZERO, |o| o.value);
+        Ok(amount)
+    }
+
     /// Sweep all funds to `recipient`, deducting fees automatically.
     ///
     /// Uses BDK's `drain_to` so the entire balance minus the mining fee

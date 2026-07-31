@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use askama::Template;
 use askama_web::WebTemplate;
-use axum::Form;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
+use axum::{Form, Json};
 use qrcode::QrCode;
 use qrcode::render::svg;
 use serde::{Deserialize, Serialize};
@@ -352,6 +352,10 @@ pub struct SendForm {
     pub fee_rate_sat_vb: u64,
     #[serde(default)]
     pub label: Option<String>,
+    /// `"true"` when the **Max** button armed a full-balance drain; the amount
+    /// field is then ignored and the wallet is swept to the recipient.
+    #[serde(default)]
+    pub send_max: Option<String>,
 }
 
 pub async fn send_post(
@@ -366,15 +370,6 @@ pub async fn send_post(
     }
     let uw = state.elements_wallet_manager.load_or_init(user.id).await?;
 
-    let amount: f64 = form
-        .amount_btc
-        .trim()
-        .parse()
-        .map_err(|_| AppError::BadRequest(format!("invalid amount `{}`", form.amount_btc)))?;
-    if amount <= 0.0 {
-        return Err(AppError::BadRequest("amount must be positive".to_string()));
-    }
-
     let label = form
         .label
         .as_deref()
@@ -382,14 +377,27 @@ pub async fn send_post(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    let result = uw
-        .build_sign_and_broadcast(
+    // "Send Max" drains the whole balance to the recipient (fee out of the
+    // swept amount); otherwise send the requested amount.
+    let result = if matches!(form.send_max.as_deref(), Some("true")) {
+        uw.sweep_to(form.recipient_address.trim(), form.fee_rate_sat_vb, label)
+            .await?
+    } else {
+        let amount: f64 =
+            form.amount_btc.trim().parse().map_err(|_| {
+                AppError::BadRequest(format!("invalid amount `{}`", form.amount_btc))
+            })?;
+        if amount <= 0.0 {
+            return Err(AppError::BadRequest("amount must be positive".to_string()));
+        }
+        uw.build_sign_and_broadcast(
             form.recipient_address.trim(),
             amount,
             form.fee_rate_sat_vb,
             label,
         )
-        .await?;
+        .await?
+    };
 
     tracing::info!(
         user = %user.email,
@@ -400,6 +408,50 @@ pub async fn send_post(
     );
 
     Ok(Redirect::to(&format!("/elements/wallet/transactions/{}", result.txid)).into_response())
+}
+
+/// Query for [`max_spend`]: the destination + fee rate to price the drain at.
+#[derive(Debug, Deserialize)]
+pub struct MaxSpendQuery {
+    /// Recipient address the sweep would pay.
+    pub recipient_address: String,
+    /// Fee rate (sat/vB) used to size the drain.
+    pub fee_rate_sat_vb: u64,
+}
+
+/// JSON reply for [`max_spend`]: the net drainable amount.
+#[derive(Debug, Serialize)]
+pub struct MaxSpendResponse {
+    /// Net amount in satoshis (balance − fee).
+    pub max_sat: u64,
+    /// Same amount formatted as L-BTC with 8 decimals, for the amount field.
+    pub max_btc: String,
+}
+
+/// `GET /elements/wallet/max-spend?recipient_address=…&fee_rate_sat_vb=…`
+///
+/// Prices a full-balance sweep so the Elements Send page's **Max** button can
+/// prefill the exact net amount. Does not sign or broadcast.
+///
+/// # Errors
+/// Zero fee rate / bad address → `400`; wallet/DB errors via [`AppError`].
+pub async fn max_spend(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user): AuthUser,
+    Query(q): Query<MaxSpendQuery>,
+) -> Result<Json<MaxSpendResponse>, AppError> {
+    if q.fee_rate_sat_vb == 0 {
+        return Err(AppError::BadRequest(
+            "fee_rate_sat_vb must be at least 1".to_string(),
+        ));
+    }
+    let uw = state.elements_wallet_manager.load_or_init(user.id).await?;
+    let max_sat = uw
+        .compute_drain_amount(q.recipient_address.trim(), q.fee_rate_sat_vb)
+        .await?;
+    #[allow(clippy::cast_precision_loss)]
+    let max_btc = format!("{:.8}", max_sat as f64 / 100_000_000.0);
+    Ok(Json(MaxSpendResponse { max_sat, max_btc }))
 }
 
 pub async fn address_show(

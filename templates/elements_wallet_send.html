@@ -12,8 +12,12 @@
     </label>
     <label>
       <span>Amount (L-BTC)</span>
-      <input type="text" name="amount_btc" required autocomplete="off"
-             placeholder="0.0005" pattern="^\d+(\.\d{1,8})?$">
+      <div class="amount-row" style="display:flex; gap:.5rem; align-items:center;">
+        <input type="text" id="amount_btc" name="amount_btc" required autocomplete="off"
+               placeholder="0.0005" pattern="^\d+(\.\d{1,8})?$" style="flex:1;">
+        <button type="button" id="send_max_btn" style="padding:9px 14px; border-radius:6px; border:1px solid var(--border); background:var(--panel-2); color:inherit; font:inherit; cursor:pointer; white-space:nowrap;">Max</button>
+      </div>
+      <small class="muted">Enter a recipient + fee rate, then <strong>Max</strong> to fill the full balance (fee deducted).</small>
     </label>
     <label>
       <span>Fee rate (sat/vB)</span>
@@ -24,10 +28,50 @@
       <input type="text" name="label" autocomplete="off" maxlength="120"
              placeholder="e.g. sidechain peg-out">
     </label>
+    <input type="hidden" id="send_max" name="send_max" value="">
     <div class="action-row">
       <button type="submit" class="primary">Sign &amp; broadcast</button>
     </div>
   </form>
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      var form = document.querySelector('form.stack-form');
+      var btn = document.getElementById('send_max_btn');
+      var amt = document.getElementById('amount_btc');
+      var flag = document.getElementById('send_max');
+      if (!form || !btn || !amt || !flag) return;
+      var recip = form.querySelector('[name="recipient_address"]');
+      var fee = form.querySelector('[name="fee_rate_sat_vb"]');
+      // Manual amount edits revert to a normal (non-max) send.
+      amt.addEventListener('input', function () { flag.value = ''; });
+      // Changing recipient/fee while in max mode invalidates the filled amount.
+      function resetMax() { if (flag.value === 'true') { flag.value = ''; amt.value = ''; } }
+      if (recip) recip.addEventListener('input', resetMax);
+      if (fee) fee.addEventListener('input', resetMax);
+      btn.addEventListener('click', async function () {
+        var address = (recip && recip.value || '').trim();
+        var feeRate = (fee && fee.value || '').trim();
+        if (!address) { if (recip) recip.focus(); return; }
+        if (!feeRate) { if (fee) fee.focus(); return; }
+        var orig = btn.textContent;
+        btn.disabled = true; btn.textContent = '…';
+        try {
+          var url = '/elements/wallet/max-spend'
+                  + '?recipient_address=' + encodeURIComponent(address)
+                  + '&fee_rate_sat_vb=' + encodeURIComponent(feeRate);
+          var res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+          if (!res.ok) { alert('Could not compute max: ' + (await res.text())); return; }
+          var data = await res.json();
+          amt.value = data.max_btc;   // show the exact drain amount
+          flag.value = 'true';        // backend performs the exact drain
+        } catch (e) {
+          alert('Could not compute max: ' + e);
+        } finally {
+          btn.disabled = false; btn.textContent = orig;
+        }
+      });
+    });
+  </script>
 </section>
 
 <section class="card">

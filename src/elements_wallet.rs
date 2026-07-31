@@ -879,6 +879,72 @@ impl UserElementsWallet {
     }
 
     /// Sweep all captured UTXOs to `recipient` (drains the wallet).
+    /// Preview a Send-Max drain: the net amount (`total − fee`) a full-balance
+    /// sweep to `recipient` would deliver, without signing or broadcasting.
+    /// Drives the Elements Send page's **Max** button. Builds the same sweep
+    /// PSET as [`Self::sweep_to`] (the fee is fixed at build time), so the
+    /// previewed amount matches the sweep that follows.
+    ///
+    /// # Errors
+    /// [`ElementsWalletError::BuildPset`] / [`ElementsWalletError::BadAddress`]
+    /// as for a real sweep (including an empty balance).
+    pub async fn compute_drain_amount(
+        &self,
+        recipient: &str,
+        fee_rate_sat_vb: u64,
+    ) -> Result<u64, ElementsWalletError> {
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        let fee_rate_kvb = (fee_rate_sat_vb as f64 * 1000.0) as f32;
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        let desc = self.descriptor.clone();
+        let mbk = self.mbk;
+        let net = self.network;
+        let lwk = self.lwk_net;
+        let recipient_owned = recipient.to_string();
+
+        let amount_sat =
+            tokio::task::spawn_blocking(move || -> Result<u64, ElementsWalletError> {
+                let wollet = ElementsWollet::from_descriptor_str(&desc, mbk, net, lwk)
+                    .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+                let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
+                if utxos.is_empty() {
+                    return Err(ElementsWalletError::BuildPset("no balance to sweep".into()));
+                }
+                let total: u64 = utxos
+                    .iter()
+                    .map(emvault::elements::CapturedUtxo::value)
+                    .sum();
+                let recipient_addr =
+                    elements::Address::from_str(&recipient_owned).map_err(|e| {
+                        ElementsWalletError::BadAddress {
+                            addr: recipient_owned.clone(),
+                            reason: e.to_string(),
+                        }
+                    })?;
+                let blinded = emvault::elements::build_sweep_pset(
+                    &wollet,
+                    &utxos,
+                    &recipient_addr,
+                    fee_rate_kvb,
+                )
+                .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
+                let pset = blinded.into_pset();
+                // The fee output is the explicit, script-less output; everything
+                // else is swept to the recipient.
+                let fee_sat: u64 = pset
+                    .outputs()
+                    .iter()
+                    .find(|o| o.script_pubkey.is_empty())
+                    .and_then(|o| o.amount)
+                    .unwrap_or(0);
+                Ok(total.saturating_sub(fee_sat))
+            })
+            .await
+            .expect("spawn_blocking join")?;
+        Ok(amount_sat)
+    }
+
     pub async fn sweep_to(
         &self,
         recipient: &str,

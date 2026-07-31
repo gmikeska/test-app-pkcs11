@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use askama::Template;
 use askama_web::WebTemplate;
-use axum::Form;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
+use axum::{Form, Json};
 use emvault::core::bdk_wallet::{self, KeychainKind};
 use emvault::core::bitcoin::{self, Txid};
 use qrcode::QrCode;
@@ -413,6 +413,10 @@ pub struct SendForm {
     /// Optional label.
     #[serde(default)]
     pub label: Option<String>,
+    /// `"true"` when the **Max** button armed a full-balance drain; the amount
+    /// field is then ignored and the wallet is swept to the recipient.
+    #[serde(default)]
+    pub send_max: Option<String>,
 }
 
 /// `POST /wallet/send`
@@ -433,7 +437,6 @@ pub async fn send_post(
     uw.sync().await?;
 
     let address = uw.parse_address(form.recipient_address.trim())?;
-    let amount = parse_btc_amount(form.amount_btc.trim())?;
     let label = form
         .label
         .as_deref()
@@ -441,9 +444,15 @@ pub async fn send_post(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    let result = uw
-        .build_sign_and_broadcast(&address, amount, form.fee_rate_sat_vb, label)
-        .await?;
+    // "Send Max" drains the whole balance to the recipient (fee out of the
+    // swept amount); otherwise send the requested amount.
+    let result = if matches!(form.send_max.as_deref(), Some("true")) {
+        uw.sweep_to(&address, form.fee_rate_sat_vb, label).await?
+    } else {
+        let amount = parse_btc_amount(form.amount_btc.trim())?;
+        uw.build_sign_and_broadcast(&address, amount, form.fee_rate_sat_vb, label)
+            .await?
+    };
 
     tracing::info!(
         user = %user.email,
@@ -454,6 +463,51 @@ pub async fn send_post(
     );
 
     Ok(Redirect::to(&format!("/wallet/transactions/{}", result.txid)).into_response())
+}
+
+/// Query for [`max_spend`]: the destination + fee rate to price the drain at.
+#[derive(Debug, Deserialize)]
+pub struct MaxSpendQuery {
+    /// Recipient address the sweep would pay.
+    pub recipient_address: String,
+    /// Fee rate (sat/vB) used to size the drain.
+    pub fee_rate_sat_vb: u64,
+}
+
+/// JSON reply for [`max_spend`]: the net drainable amount.
+#[derive(Debug, Serialize)]
+pub struct MaxSpendResponse {
+    /// Net amount in satoshis (balance − fee).
+    pub max_sat: u64,
+    /// Same amount formatted as BTC with 8 decimals, for the amount field.
+    pub max_btc: String,
+}
+
+/// `GET /wallet/max-spend?recipient_address=…&fee_rate_sat_vb=…`
+///
+/// Prices a full-balance sweep so the Send page's **Max** button can prefill
+/// the exact net amount. Does not sign or broadcast.
+///
+/// # Errors
+/// Zero fee rate / bad address → `400`; wallet/DB errors via [`AppError`].
+pub async fn max_spend(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user): AuthUser,
+    Query(q): Query<MaxSpendQuery>,
+) -> Result<Json<MaxSpendResponse>, AppError> {
+    if q.fee_rate_sat_vb == 0 {
+        return Err(AppError::BadRequest(
+            "fee_rate_sat_vb must be at least 1".to_string(),
+        ));
+    }
+    let uw = state.wallet_manager.load_or_init(user.id).await?;
+    uw.sync().await?;
+    let address = uw.parse_address(q.recipient_address.trim())?;
+    let amount = uw.compute_drain_amount(&address, q.fee_rate_sat_vb).await?;
+    Ok(Json(MaxSpendResponse {
+        max_sat: amount.to_sat(),
+        max_btc: format!("{:.8}", amount.to_btc()),
+    }))
 }
 
 /// `GET /wallet/addresses/:address`
