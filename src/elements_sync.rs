@@ -27,6 +27,7 @@
 use std::str::FromStr;
 
 use emvault::elements::elements::AssetId;
+use emvault::elements::nodeless::CheckpointStore;
 use emvault::elements::sync::{
     BlockStore, CapturedUtxo, ElementsChainSource, KeychainKind, SyncedTip, WalletId,
     WalletUtxoStore,
@@ -210,6 +211,85 @@ impl BlockStore for PgBlockStore {
                 }
                 Ok::<_, sqlx::Error>(())
             })
+            .map_err(store_err)?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PgCheckpointStore (nodeless reorg detection)
+// ---------------------------------------------------------------------------
+
+/// Postgres-backed per-wallet [`CheckpointStore`] for the nodeless Elements
+/// chain backends (migration `0009`).
+pub struct PgCheckpointStore {
+    pool: PgPool,
+    rt: Handle,
+}
+
+impl PgCheckpointStore {
+    /// Construct from a pool. Must be called from within a Tokio runtime.
+    #[must_use]
+    pub fn new(pool: PgPool) -> Self {
+        Self {
+            pool,
+            rt: Handle::current(),
+        }
+    }
+}
+
+impl CheckpointStore for PgCheckpointStore {
+    fn load(&self, wallet: WalletId) -> Result<Vec<SyncedTip>, SyncError> {
+        let rows: Vec<(i64, String)> = self
+            .rt
+            .block_on(
+                sqlx::query_as(
+                    "SELECT height, block_hash FROM elements_chain_checkpoints \
+                     WHERE wallet_id = $1",
+                )
+                .bind(wid_to_uuid(wallet))
+                .fetch_all(&self.pool),
+            )
+            .map_err(store_err)?;
+        rows.into_iter()
+            .map(|(height, hash)| {
+                Ok(SyncedTip {
+                    height: height as u32,
+                    hash: BlockHash::from_str(&hash).map_err(enc_err)?,
+                })
+            })
+            .collect()
+    }
+
+    fn save(&self, wallet: WalletId, tip: SyncedTip) -> Result<(), SyncError> {
+        self.rt
+            .block_on(
+                sqlx::query(
+                    "INSERT INTO elements_chain_checkpoints (wallet_id, height, block_hash) \
+                     VALUES ($1, $2, $3) \
+                     ON CONFLICT (wallet_id, height) DO UPDATE SET \
+                       block_hash = EXCLUDED.block_hash, updated_at = now()",
+                )
+                .bind(wid_to_uuid(wallet))
+                .bind(i64::from(tip.height))
+                .bind(tip.hash.to_string())
+                .execute(&self.pool),
+            )
+            .map_err(store_err)?;
+        Ok(())
+    }
+
+    fn rollback_above(&self, wallet: WalletId, height: u32) -> Result<(), SyncError> {
+        self.rt
+            .block_on(
+                sqlx::query(
+                    "DELETE FROM elements_chain_checkpoints \
+                     WHERE wallet_id = $1 AND height > $2",
+                )
+                .bind(wid_to_uuid(wallet))
+                .bind(i64::from(height))
+                .execute(&self.pool),
+            )
             .map_err(store_err)?;
         Ok(())
     }

@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use emvault::config::hex_encode;
 use emvault::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
+use emvault::elements::nodeless::NodelessSync;
 use emvault::elements::signer::ElementsSigner;
 use emvault::elements::sync::{ElementsChainSource, KeychainKind, WalletId, WalletUtxoStore};
 use emvault::elements::{
@@ -29,7 +30,7 @@ use sqlx::PgPool;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, ElementsChainBackend};
 use crate::db;
 use crate::elements_sync::{PgWalletUtxoStore, RpcChainSource, node_lwk_network};
 use crate::hsm::{HsmError, HsmFleet, SignerSet};
@@ -81,6 +82,47 @@ pub enum ElementsWalletError {
     Config(#[from] crate::config::ConfigError),
 }
 
+/// Broadcast a finalized Elements transaction through the wallet's configured
+/// backend: a descriptor-private nodeless client (Electrum / Esplora /
+/// Waterfalls) or the elementsd JSON-RPC. Called from a blocking context.
+fn broadcast_via_backend(
+    backend: ElementsChainBackend,
+    electrum_url: Option<&str>,
+    esplora_url: Option<&str>,
+    lwk: LwkNetwork,
+    rpc: (&str, &str, &str),
+    tx: &elements::Transaction,
+) -> Result<elements::Txid, ElementsWalletError> {
+    let brx = |e: String| ElementsWalletError::BroadcastRejected(e);
+    match backend {
+        ElementsChainBackend::Electrum => {
+            let url = electrum_url.ok_or_else(|| brx("ELEMENTS_ELECTRUM_URL not set".into()))?;
+            NodelessSync::new_electrum(url)
+                .map_err(|e| brx(e.to_string()))?
+                .broadcast(tx)
+                .map_err(|e| brx(e.to_string()))
+        }
+        ElementsChainBackend::Esplora => {
+            let url = esplora_url.ok_or_else(|| brx("ELEMENTS_ESPLORA_URL not set".into()))?;
+            NodelessSync::new_esplora(url, lwk)
+                .map_err(|e| brx(e.to_string()))?
+                .broadcast(tx)
+                .map_err(|e| brx(e.to_string()))
+        }
+        ElementsChainBackend::Waterfalls => {
+            let url = esplora_url.ok_or_else(|| brx("ELEMENTS_ESPLORA_URL not set".into()))?;
+            NodelessSync::new_waterfalls(url, lwk)
+                .map_err(|e| brx(e.to_string()))?
+                .broadcast(tx)
+                .map_err(|e| brx(e.to_string()))
+        }
+        ElementsChainBackend::Rpc => {
+            let chain = RpcChainSource::new(rpc.0, rpc.1, rpc.2).map_err(pipeline_err)?;
+            chain.broadcast(tx).map_err(|e| brx(e.to_string()))
+        }
+    }
+}
+
 fn pipeline_err<E: std::fmt::Display>(e: E) -> ElementsWalletError {
     ElementsWalletError::Pipeline(e.to_string())
 }
@@ -96,6 +138,12 @@ pub struct ElementsWalletManager {
     rpc_user: String,
     rpc_pass: String,
     network: ElementsNetwork,
+    /// Which backend the Elements wallet syncs/broadcasts through.
+    elements_backend: ElementsChainBackend,
+    /// Electrum URL when `elements_backend` is `Electrum`.
+    electrum_url: Option<String>,
+    /// Esplora URL when `elements_backend` is `Esplora` / `Waterfalls`.
+    esplora_url: Option<String>,
     /// Cached concrete LWK network (node policy asset + genesis for regtest).
     lwk_net: AsyncMutex<Option<LwkNetwork>>,
     bip48_coin_index: u32,
@@ -120,6 +168,9 @@ impl ElementsWalletManager {
             rpc_user: config.elements_rpc_user.clone(),
             rpc_pass: config.elements_rpc_password.clone(),
             network: config.elements_network,
+            elements_backend: config.elements_chain_backend,
+            electrum_url: config.elements_electrum_url.clone(),
+            esplora_url: config.elements_esplora_url.clone(),
             lwk_net: AsyncMutex::new(None),
             bip48_coin_index: config.bip48_coin_index,
             fed_threshold: config.fed_threshold,
@@ -335,6 +386,9 @@ impl ElementsWalletManager {
             rpc_url: self.rpc_url.clone(),
             rpc_user: self.rpc_user.clone(),
             rpc_pass: self.rpc_pass.clone(),
+            elements_backend: self.elements_backend,
+            electrum_url: self.electrum_url.clone(),
+            esplora_url: self.esplora_url.clone(),
         })
     }
 }
@@ -393,6 +447,9 @@ pub struct UserElementsWallet {
     rpc_url: String,
     rpc_user: String,
     rpc_pass: String,
+    elements_backend: ElementsChainBackend,
+    electrum_url: Option<String>,
+    esplora_url: Option<String>,
 }
 
 impl UserElementsWallet {
@@ -719,6 +776,9 @@ impl UserElementsWallet {
         let lwk = self.lwk_net;
         let signers: Vec<_> = self.signers.iter().cloned().collect();
         let recipient_owned = recipient.to_string();
+        let elements_backend = self.elements_backend;
+        let electrum_url = self.electrum_url.clone();
+        let esplora_url = self.esplora_url.clone();
 
         let (txid, fee_sat, raw_hex) = tokio::task::spawn_blocking(
             move || -> Result<(String, i64, String), ElementsWalletError> {
@@ -765,10 +825,14 @@ impl UserElementsWallet {
                     .unwrap_or(0);
 
                 let raw_hex = elements::encode::serialize_hex(&tx);
-                let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
-                let txid = chain
-                    .broadcast(&tx)
-                    .map_err(|e| ElementsWalletError::BroadcastRejected(e.to_string()))?;
+                let txid = broadcast_via_backend(
+                    elements_backend,
+                    electrum_url.as_deref(),
+                    esplora_url.as_deref(),
+                    lwk,
+                    (&url, &user, &pass),
+                    &tx,
+                )?;
                 Ok((txid.to_string(), fee_sat, raw_hex))
             },
         )
@@ -818,6 +882,9 @@ impl UserElementsWallet {
         let lwk = self.lwk_net;
         let signers: Vec<_> = self.signers.iter().cloned().collect();
         let recipient_owned = recipient.to_string();
+        let elements_backend = self.elements_backend;
+        let electrum_url = self.electrum_url.clone();
+        let esplora_url = self.esplora_url.clone();
 
         let (txid, amount_sat, fee_sat, raw_hex) = tokio::task::spawn_blocking(
             move || -> Result<(String, i64, i64, String), ElementsWalletError> {
@@ -867,10 +934,14 @@ impl UserElementsWallet {
                 let amount_sat = i64::try_from(total).unwrap_or(0) - fee_sat;
 
                 let raw_hex = elements::encode::serialize_hex(&tx);
-                let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
-                let txid = chain
-                    .broadcast(&tx)
-                    .map_err(|e| ElementsWalletError::BroadcastRejected(e.to_string()))?;
+                let txid = broadcast_via_backend(
+                    elements_backend,
+                    electrum_url.as_deref(),
+                    esplora_url.as_deref(),
+                    lwk,
+                    (&url, &user, &pass),
+                    &tx,
+                )?;
                 Ok((txid.to_string(), amount_sat, fee_sat, raw_hex))
             },
         )

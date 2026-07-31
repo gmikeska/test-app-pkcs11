@@ -66,6 +66,42 @@ impl FromStr for ChainBackend {
     }
 }
 
+/// Which backend the **Elements/Liquid** wallet syncs and broadcasts through.
+///
+/// Selected by `ELEMENTS_CHAIN_BACKEND` (default `rpc`). This app is the
+/// full-coverage nodeless proving ground: all of Electrum, plain Esplora, and
+/// the Esplora Waterfalls descriptor endpoint, plus the elementsd block-scan.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ElementsChainBackend {
+    /// elementsd JSON-RPC block-scan (`emvault::elements::sync::BlockScanEngine`).
+    #[default]
+    Rpc,
+    /// Descriptor-private Electrum backend (`emvault::elements::nodeless`),
+    /// via `ELEMENTS_ELECTRUM_URL`.
+    Electrum,
+    /// Nodeless Esplora address-scan (`emvault::elements::nodeless`), via
+    /// `ELEMENTS_ESPLORA_URL`.
+    Esplora,
+    /// Nodeless Esplora Waterfalls descriptor scan, via `ELEMENTS_ESPLORA_URL`.
+    Waterfalls,
+}
+
+impl FromStr for ElementsChainBackend {
+    type Err = ConfigError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "rpc" => Ok(Self::Rpc),
+            "electrum" => Ok(Self::Electrum),
+            "esplora" => Ok(Self::Esplora),
+            "waterfalls" => Ok(Self::Waterfalls),
+            other => Err(ConfigError::Parse {
+                var: "ELEMENTS_CHAIN_BACKEND",
+                reason: format!("expected rpc|electrum|esplora|waterfalls, got `{other}`"),
+            }),
+        }
+    }
+}
+
 /// Top-level configuration.
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -116,6 +152,17 @@ pub struct AppConfig {
     pub elements_rpc_password: String,
     /// Elements network (liquid / liquidtestnet / elementsregtest).
     pub elements_network: ElementsNetwork,
+    /// Which backend the Elements wallet syncs/broadcasts through
+    /// (`ELEMENTS_CHAIN_BACKEND`, default `rpc`).
+    pub elements_chain_backend: ElementsChainBackend,
+    /// Electrum server URL for the Elements backend (`ELEMENTS_ELECTRUM_URL`,
+    /// e.g. `tcp://10.44.0.1:60101`), required when `elements_chain_backend` is
+    /// `Electrum`.
+    pub elements_electrum_url: Option<String>,
+    /// Esplora base URL for the Elements backend (`ELEMENTS_ESPLORA_URL`,
+    /// e.g. `http://10.44.0.1:3102`), required when `elements_chain_backend` is
+    /// `Esplora` or `Waterfalls`.
+    pub elements_esplora_url: Option<String>,
 }
 
 impl AppConfig {
@@ -288,6 +335,37 @@ impl AppConfig {
             }
         };
 
+        let elements_chain_backend = match optional("ELEMENTS_CHAIN_BACKEND") {
+            Some(s) => ElementsChainBackend::from_str(&s)?,
+            None => ElementsChainBackend::default(),
+        };
+        let elements_electrum_url = optional("ELEMENTS_ELECTRUM_URL");
+        if elements_chain_backend == ElementsChainBackend::Electrum
+            && elements_electrum_url
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+        {
+            return Err(ConfigError::Missing {
+                var: "ELEMENTS_ELECTRUM_URL",
+            });
+        }
+        let elements_esplora_url = optional("ELEMENTS_ESPLORA_URL");
+        if matches!(
+            elements_chain_backend,
+            ElementsChainBackend::Esplora | ElementsChainBackend::Waterfalls
+        ) && elements_esplora_url
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            return Err(ConfigError::Missing {
+                var: "ELEMENTS_ESPLORA_URL",
+            });
+        }
+
         Ok(Self {
             bind: SocketAddr::new(host_ip, port),
             session_secret,
@@ -308,6 +386,9 @@ impl AppConfig {
             elements_rpc_user,
             elements_rpc_password,
             elements_network,
+            elements_chain_backend,
+            elements_electrum_url,
+            elements_esplora_url,
         })
     }
 
