@@ -386,7 +386,51 @@ impl ElementsWalletManager {
             .ok();
         }
 
-        let mbk = derive_master_blinding_key(user_id, row.account_idx);
+        let base_mbk = derive_master_blinding_key(user_id, row.account_idx);
+
+        // Rebind to the CURRENT federation, like the Bitcoin path (Anomaly #1).
+        // The migration tool records a new Elements federation version but never
+        // updates `elements_wallets.descriptor`, so a naive load pins the wallet
+        // (used for balance + Send) to the OLD federation while the swept funds
+        // live at the new-federation addresses — leaving migrated Liquid
+        // unspendable ("script pubkey didn't match the descriptor"). When the
+        // latest stored version's descriptor differs from the row, adopt it (and
+        // its blinding key, in case it was rotated) and re-persist the row.
+        let (descriptor, mbk, drifted) = match versions.last() {
+            Some(latest) if latest.descriptor != row.descriptor => {
+                let cur_mbk = latest
+                    .blinding_key
+                    .as_deref()
+                    .and_then(parse_mbk_hex)
+                    .unwrap_or(base_mbk);
+                (latest.descriptor.clone(), cur_mbk, true)
+            }
+            _ => (row.descriptor.clone(), base_mbk, false),
+        };
+        if drifted {
+            let blinding_hex = versions
+                .last()
+                .and_then(|v| v.blinding_key.clone())
+                .unwrap_or_else(|| row.master_blinding_key.clone());
+            if let Err(e) = db::update_elements_wallet_descriptor(
+                &self.pool,
+                row.id,
+                &descriptor,
+                &blinding_hex,
+            )
+            .await
+            {
+                tracing::warn!(wallet_id = %row.id, error = %e, "failed to persist Elements descriptor self-heal");
+            }
+            tracing::warn!(
+                wallet_id = %row.id,
+                account_idx = row.account_idx,
+                old_descriptor = %row.descriptor,
+                new_descriptor = %descriptor,
+                "self-healed post-migration Elements descriptor drift: rebound to \
+                 current federation so swept funds are spendable"
+            );
+        }
 
         Ok(UserElementsWallet {
             user_id,
@@ -394,7 +438,7 @@ impl ElementsWalletManager {
             account_idx: row.account_idx,
             network: self.network,
             lwk_net,
-            descriptor: row.descriptor,
+            descriptor,
             mbk,
             daemon_wallet_name: row.daemon_wallet_name,
             signers: signers_arc,

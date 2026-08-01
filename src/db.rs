@@ -387,6 +387,35 @@ pub async fn update_elements_wallet_tip(
     Ok(())
 }
 
+/// Rebind an Elements wallet row to a new descriptor + master blinding key.
+///
+/// Self-heals post-migration descriptor drift: the migration tool records a new
+/// Elements federation version but never updates `elements_wallets.descriptor`,
+/// so the wallet used for balance + Send stays pinned to the OLD federation and
+/// the swept funds (at new-federation addresses) are unspendable. This rewrites
+/// the row to the current federation's descriptor + blinding key.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn update_elements_wallet_descriptor(
+    pool: &PgPool,
+    wallet_id: Uuid,
+    descriptor: &str,
+    master_blinding_key: &str,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE elements_wallets \
+         SET descriptor = $1, master_blinding_key = $2 \
+         WHERE id = $3",
+    )
+    .bind(descriptor)
+    .bind(master_blinding_key)
+    .bind(wallet_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // elements_transactions
 // ---------------------------------------------------------------------------
