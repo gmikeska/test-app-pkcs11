@@ -34,6 +34,10 @@ use emvault::core::bdk_wallet;
 use emvault::core::bitcoin;
 use emvault::core::miniscript;
 use emvault::elements::elements;
+use emvault::elements::migration::{
+    ElementsAccountForAccountBatchedSweep, ElementsAccountForAccountSweep, ElementsAccountUtxoSet,
+    ElementsMigrationPlan, ElementsSweepAlgorithm, ElementsSweepOutput,
+};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -672,132 +676,6 @@ struct ElementsExecAccount {
     utxos: Vec<emvault::elements::CapturedUtxo>,
     signers: test_app_pkcs11::hsm::SignerSet,
     dest: elements::Address,
-    balance_sat: u64,
-}
-
-// =========================================================================
-// Batched migration planner (Elements)
-//
-// `emvault::core::migration::AccountForAccountBatchedSweep` is bitcoin-typed,
-// so — as with the account-for-account split — we reimplement the simple amount
-// math inline for Elements. Produces the ordered transaction shape; the
-// executor maps each tx's customer accounts to their UTXOs / wollets / dests
-// and threads the fee-account change (decision (b): change stays at the fee
-// account's old-fed address until the final tx).
-// =========================================================================
-
-/// A funded account, reduced to the fields the planner needs.
-#[derive(Debug, Clone)]
-struct BatchAcct {
-    account_idx: i32,
-    balance_sat: u64,
-    utxo_count: usize,
-}
-
-/// One planned batched-migration transaction.
-#[derive(Debug, PartialEq, Eq)]
-struct BatchTxPlan {
-    /// Customers paid in this tx (each receives its full balance): `(idx, sat)`.
-    customers: Vec<(i32, u64)>,
-    /// Estimated mining fee for this tx (paid by the fee account via drain).
-    fee_sat: u64,
-    /// The final fee-account migration tx (drains to the new federation; no
-    /// customer recipients).
-    is_fee_final: bool,
-}
-
-/// The full ordered batched plan plus the cumulative fee estimate.
-#[derive(Debug)]
-struct BatchPlan {
-    txs: Vec<BatchTxPlan>,
-    total_fee_sat: u64,
-}
-
-/// Planning fee estimate for an Elements P2WSH multisig tx, matching the
-/// heuristic used by `display_elements_sweep_plan`.
-fn estimate_elements_fee_sat(inputs: usize, outputs: usize, fee_rate_sat_per_vb: u64) -> u64 {
-    (inputs as u64 * 1100 + outputs as u64 * 1500 + 200) * fee_rate_sat_per_vb / 10
-}
-
-/// Build the ordered batched plan: one tx per large account, all small accounts
-/// bundled into one tx, and the fee account migrating last. Fees are estimated
-/// and pre-checked against the fee account's balance.
-///
-/// Mirrors `AccountForAccountBatchedSweep::plan`'s ordering and fee accounting.
-fn plan_elements_batched(
-    accounts: &[BatchAcct],
-    fee_account_idx: u32,
-    small_threshold_sat: u64,
-    fee_rate_sat_per_vb: u64,
-) -> Result<BatchPlan, String> {
-    let funded: Vec<&BatchAcct> = accounts.iter().filter(|a| a.utxo_count > 0).collect();
-    if funded.is_empty() {
-        return Err("no funded accounts to migrate".to_string());
-    }
-
-    let fee = funded
-        .iter()
-        .find(|a| a.account_idx == fee_account_idx as i32)
-        .ok_or_else(|| {
-            format!("fee account index {fee_account_idx} not found among funded accounts")
-        })?;
-    let fee_balance = fee.balance_sat;
-    let fee_utxo_count = fee.utxo_count;
-
-    let (large, small): (Vec<&BatchAcct>, Vec<&BatchAcct>) = funded
-        .iter()
-        .filter(|a| a.account_idx != fee_account_idx as i32)
-        .partition(|a| a.balance_sat >= small_threshold_sat);
-
-    // Pre-flight: estimate the cumulative fee across every planned tx.
-    let mut total_fee = 0u64;
-    for a in &large {
-        total_fee += estimate_elements_fee_sat(a.utxo_count + 1, 2, fee_rate_sat_per_vb);
-    }
-    if !small.is_empty() {
-        let small_inputs: usize = small.iter().map(|a| a.utxo_count).sum::<usize>() + 1;
-        total_fee += estimate_elements_fee_sat(small_inputs, small.len() + 1, fee_rate_sat_per_vb);
-    }
-    let fee_final_fee = estimate_elements_fee_sat(fee_utxo_count, 1, fee_rate_sat_per_vb);
-    total_fee += fee_final_fee;
-
-    if fee_balance < total_fee {
-        return Err(format!(
-            "fee account {fee_account_idx} has insufficient balance to pay migration fees: \
-             available {fee_balance} sat, required ~{total_fee} sat"
-        ));
-    }
-
-    let mut txs = Vec::new();
-    for a in &large {
-        txs.push(BatchTxPlan {
-            customers: vec![(a.account_idx, a.balance_sat)],
-            fee_sat: estimate_elements_fee_sat(a.utxo_count + 1, 2, fee_rate_sat_per_vb),
-            is_fee_final: false,
-        });
-    }
-    if !small.is_empty() {
-        let small_inputs: usize = small.iter().map(|a| a.utxo_count).sum::<usize>() + 1;
-        txs.push(BatchTxPlan {
-            customers: small
-                .iter()
-                .map(|a| (a.account_idx, a.balance_sat))
-                .collect(),
-            fee_sat: estimate_elements_fee_sat(small_inputs, small.len() + 1, fee_rate_sat_per_vb),
-            is_fee_final: false,
-        });
-    }
-    // Fee account migrates last (drains its remaining balance to the new fed).
-    txs.push(BatchTxPlan {
-        customers: Vec::new(),
-        fee_sat: fee_final_fee,
-        is_fee_final: true,
-    });
-
-    Ok(BatchPlan {
-        txs,
-        total_fee_sat: total_fee,
-    })
 }
 
 /// Elements parallel of [`display_elements_sweep_plan`] for the **batched**
@@ -824,45 +702,103 @@ fn display_elements_batched_plan(
         return;
     };
 
-    let baccts: Vec<BatchAcct> = accounts
+    // Preview only: build synthetic account UTXO sets (right count + summed
+    // value per account) and run the crate's batched planner to show the tx
+    // topology. Real UTXOs/addresses are assembled at execution time.
+    let account_sets: Vec<ElementsAccountUtxoSet> = accounts
         .iter()
         .filter(|a| a.balance_btc > 0.0)
-        .map(|a| BatchAcct {
-            account_idx: a.account_idx,
-            balance_sat: (a.balance_btc * 100_000_000.0).round() as u64,
-            utxo_count: a.utxo_count,
+        .map(|a| {
+            let balance_sat = (a.balance_btc * 100_000_000.0).round() as u64;
+            ElementsAccountUtxoSet {
+                account_idx: u32::try_from(a.account_idx).unwrap_or(0),
+                utxos: synthetic_utxos(balance_sat, a.utxo_count.max(1)),
+                destination_address: preview_dest_address(),
+            }
         })
         .collect();
 
-    match plan_elements_batched(&baccts, fee_idx, small_threshold_sat, fee_rate_sat_per_vb) {
+    match ElementsAccountForAccountBatchedSweep::new(fee_idx, small_threshold_sat)
+        .plan(&account_sets, fee_rate_sat_per_vb)
+    {
         Ok(plan) => {
-            let total = plan.txs.len();
-            for (i, tx) in plan.txs.iter().enumerate() {
+            let total = plan.sweep_transactions.len();
+            for (i, tx) in plan.sweep_transactions.iter().enumerate() {
+                let customers: Vec<u32> = tx
+                    .outputs
+                    .iter()
+                    .filter_map(|o| match o {
+                        ElementsSweepOutput::Customer { account_idx, .. } => Some(*account_idx),
+                        ElementsSweepOutput::FeeChange { .. } => None,
+                    })
+                    .collect();
                 let label = if tx.is_fee_final {
                     format!("Fee account {fee_idx} → new federation")
-                } else if tx.customers.len() == 1 {
-                    format!("Account {}", tx.customers[0].0)
+                } else if customers.len() == 1 {
+                    format!("Account {}", customers[0])
                 } else {
-                    format!("{} small accounts (bundled)", tx.customers.len())
+                    format!("{} small accounts (bundled)", customers.len())
                 };
-                println!(
-                    "  Transaction {}/{}:  {label:<34} │  fee: ~{} sat",
-                    i + 1,
-                    total,
-                    tx.fee_sat
-                );
+                println!("  Transaction {}/{}:  {label}", i + 1, total);
             }
             println!();
             println!("  Transactions:        {total}");
             println!(
                 "  Estimated total fee: ~{} sat (paid by account {fee_idx})",
-                plan.total_fee_sat
+                plan.total_fees_sat
             );
         }
         Err(e) => {
             println!("  Cannot plan batched migration: {e}");
         }
     }
+}
+
+/// Synthetic captured UTXOs (right count, summed to `total_sat`) for planning
+/// previews — the crate planner reads only per-UTXO value + count.
+fn synthetic_utxos(total_sat: u64, count: usize) -> Vec<emvault::elements::CapturedUtxo> {
+    use emvault::elements::CapturedUtxo;
+    use emvault::elements::sync::{KeychainKind, WalletId};
+    let count = count.max(1);
+    let each = total_sat / count as u64;
+    let mut rem = total_sat - each * count as u64;
+    (0..count)
+        .map(|i| {
+            let mut v = each;
+            if rem > 0 {
+                v += 1;
+                rem -= 1;
+            }
+            let mut outpoint = elements::OutPoint::null();
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                outpoint.vout = i as u32;
+            }
+            CapturedUtxo {
+                wallet_id: WalletId::from_bytes([0u8; 16]),
+                outpoint,
+                txout: elements::TxOut::default(),
+                secrets: elements::TxOutSecrets::new(
+                    elements::AssetId::default(),
+                    elements::confidential::AssetBlindingFactor::zero(),
+                    v,
+                    elements::confidential::ValueBlindingFactor::zero(),
+                ),
+                chain: KeychainKind::External,
+                #[allow(clippy::cast_possible_truncation)]
+                wildcard_index: i as u32,
+                height: 1,
+                is_spent: false,
+            }
+        })
+        .collect()
+}
+
+/// A throwaway confidential address for planning previews (never broadcast).
+fn preview_dest_address() -> elements::Address {
+    "el1qq2v5lthcntj42w2z7uc3wx6zkxd0d37edzrwev6f6qyurcz6wqnxafp2j3zpesa7pqnq7fw7dyeujznz7xm7v05ms47sd6kxw2veyjhqrkwdx3ppmr90"
+        .parse()
+        .expect("valid ct address")
 }
 
 async fn run_elements_migration(
@@ -1176,10 +1112,6 @@ async fn run_elements_migration(
         if utxos.is_empty() {
             continue;
         }
-        let balance_sat: u64 = utxos
-            .iter()
-            .map(emvault::elements::CapturedUtxo::value)
-            .sum();
         let (desc, mbk, _) = new_feds.get(&acct_idx).cloned().expect("resolved above");
         let dest = match ElementsWollet::from_descriptor_str(&desc, mbk, net, lwk_net)
             .and_then(|w| w.address(KeychainKind::External, 0))
@@ -1198,35 +1130,41 @@ async fn run_elements_migration(
             utxos,
             signers: wallet.signer_set(),
             dest,
-            balance_sat,
         });
     }
 
-    // Plan the batched transaction sequence up-front (pure amount math; no
-    // node). `None` for the single-tx account-for-account strategy.
-    let batch_plan = if batched {
-        let baccts: Vec<BatchAcct> = exec_accounts
-            .iter()
-            .map(|a| BatchAcct {
-                account_idx: a.account_idx,
-                balance_sat: a.balance_sat,
-                utxo_count: a.utxos.len(),
-            })
-            .collect();
-        match plan_elements_batched(
-            &baccts,
-            fee_idx as u32,
-            cfg.migration.small_account_threshold,
-            cfg.migration.fee_rate_sat_per_vb,
-        ) {
-            Ok(p) => Some(p),
+    // Plan the sweep up-front via the `emvault-elements` crate's sweep
+    // algorithms — the same layer the Bitcoin path uses (`emvault::core`), now
+    // with the Elements-typed twin. `account-for-account` → single tx;
+    // `account-for-account-batched` → one tx per large account + a small bundle,
+    // fee account last. Pure amount math (no node).
+    let fee_idx_u32 = u32::try_from(fee_idx).unwrap_or(0);
+    let account_sets: Vec<ElementsAccountUtxoSet> = exec_accounts
+        .iter()
+        .map(|a| ElementsAccountUtxoSet {
+            account_idx: u32::try_from(a.account_idx).unwrap_or(0),
+            utxos: a.utxos.clone(),
+            destination_address: a.dest.clone(),
+        })
+        .collect();
+    let plan: ElementsMigrationPlan = {
+        let result = if batched {
+            ElementsAccountForAccountBatchedSweep::new(
+                fee_idx_u32,
+                cfg.migration.small_account_threshold,
+            )
+            .plan(&account_sets, cfg.migration.fee_rate_sat_per_vb)
+        } else {
+            ElementsAccountForAccountSweep::new(fee_idx_u32)
+                .plan(&account_sets, cfg.migration.fee_rate_sat_per_vb)
+        };
+        match result {
+            Ok(p) => p,
             Err(e) => {
-                eprintln!("error: batched migration planning failed: {e}");
+                eprintln!("error: Elements migration planning failed: {e}");
                 std::process::exit(1);
             }
         }
-    } else {
-        None
     };
 
     let rpc = (
@@ -1314,7 +1252,7 @@ async fn run_elements_migration(
 
         let mut results: Vec<TxResult> = Vec::new();
 
-        if let Some(plan) = batch_plan {
+        if batched {
             // --- batched: chained confidential fee-change (decision (b)) ----
             // Intermediate fee change stays at the fee account's OLD-fed
             // address (old-fed-signed); the fee account crosses to the new
@@ -1337,7 +1275,23 @@ async fn run_elements_migration(
             let mut chained: Option<emvault::elements::CapturedUtxo> = None;
             let mut fee_seed_used = false;
 
-            for txp in &plan.txs {
+            for txp in &plan.sweep_transactions {
+                // Customer (account_idx, amount) pairs for this tx, taken from
+                // the crate plan's outputs (the fee-change output is resolved by
+                // the executor per `is_fee_final`, below).
+                let customers: Vec<(i32, u64)> = txp
+                    .outputs
+                    .iter()
+                    .filter_map(|o| match o {
+                        ElementsSweepOutput::Customer {
+                            account_idx,
+                            amount_sat,
+                            ..
+                        } => Some((i32::try_from(*account_idx).unwrap_or(0), *amount_sat)),
+                        ElementsSweepOutput::FeeChange { .. } => None,
+                    })
+                    .collect();
+
                 let mut inputs: Vec<(emvault::elements::CapturedUtxo, &ElementsWollet)> =
                     Vec::new();
                 let mut recipients: Vec<(elements::Address, u64)> = Vec::new();
@@ -1345,7 +1299,7 @@ async fn run_elements_migration(
                 let mut owner: std::collections::HashMap<elements::OutPoint, i32> =
                     std::collections::HashMap::new();
 
-                for (cidx, amt) in &txp.customers {
+                for (cidx, amt) in &customers {
                     let a = exec_accounts
                         .iter()
                         .find(|a| a.account_idx == *cidx)
@@ -1430,13 +1384,31 @@ async fn run_elements_migration(
             }
         } else {
             // --- account-for-account: single fee-account-pays transaction ---
-            let mut inputs: Vec<(emvault::elements::CapturedUtxo, &ElementsWollet)> = Vec::new();
+            // Customer recipients come from the crate plan's single sweep tx;
+            // the inputs / owner map / fee destination are joined in from the
+            // executor's per-account UTXOs + wollets.
+            let sweep = plan
+                .sweep_transactions
+                .first()
+                .ok_or("account-for-account plan produced no transaction")?;
             let mut customers: Vec<(elements::Address, u64)> = Vec::new();
             let mut report: Vec<(i32, u64)> = Vec::new();
+            for o in &sweep.outputs {
+                if let ElementsSweepOutput::Customer {
+                    account_idx,
+                    address,
+                    amount_sat,
+                } = o
+                {
+                    customers.push((address.clone(), *amount_sat));
+                    report.push((i32::try_from(*account_idx).unwrap_or(0), *amount_sat));
+                }
+            }
+
+            let mut inputs: Vec<(emvault::elements::CapturedUtxo, &ElementsWollet)> = Vec::new();
             let mut owner: std::collections::HashMap<elements::OutPoint, i32> =
                 std::collections::HashMap::new();
             let mut fee_dest: Option<elements::Address> = None;
-            let mut fee_acct: Option<i32> = None;
             for a in &exec_accounts {
                 let w = wollet_of(a.account_idx);
                 for u in &a.utxos {
@@ -1445,14 +1417,10 @@ async fn run_elements_migration(
                 }
                 if a.is_fee {
                     fee_dest = Some(a.dest.clone());
-                    fee_acct = Some(a.account_idx);
-                } else {
-                    customers.push((a.dest.clone(), a.balance_sat));
-                    report.push((a.account_idx, a.balance_sat));
                 }
             }
             let fee_dest = fee_dest.ok_or("fee account has no UTXOs to pay the migration fee")?;
-            let fee_wollet = wollet_of(fee_acct.expect("fee account present"));
+            let fee_wollet = wollet_of(fee_idx);
 
             let blinded =
                 build_migration_pset(fee_wollet, &inputs, &customers, &fee_dest, fee_rate_kvb)
@@ -2591,118 +2559,4 @@ async fn main() {
     println!("    Accounts migrated: {}", user_wallets.len());
     println!();
     println!("  Restart the web app to pick up the new federation.");
-}
-
-#[cfg(test)]
-mod batch_planner_tests {
-    use super::{BatchAcct, plan_elements_batched};
-
-    fn acct(account_idx: i32, balance_sat: u64, utxo_count: usize) -> BatchAcct {
-        BatchAcct {
-            account_idx,
-            balance_sat,
-            utxo_count,
-        }
-    }
-
-    const RATE: u64 = 1; // sat/vB
-
-    #[test]
-    fn splits_by_threshold() {
-        // fee(0) large, 1 & 2 large, 3 & 4 small.
-        let accounts = vec![
-            acct(0, 1_000_000, 1),
-            acct(1, 200_000, 1),
-            acct(2, 150_000, 1),
-            acct(3, 50_000, 1),
-            acct(4, 30_000, 1),
-        ];
-        let plan = plan_elements_batched(&accounts, 0, 100_000, RATE).unwrap();
-        // 2 large individual + 1 small bundle + 1 fee-final = 4
-        assert_eq!(plan.txs.len(), 4);
-        assert!(plan.txs.last().unwrap().is_fee_final);
-        assert!(plan.txs.last().unwrap().customers.is_empty());
-        // small bundle carries both small customers
-        let bundle = &plan.txs[2];
-        assert_eq!(bundle.customers.len(), 2);
-    }
-
-    #[test]
-    fn all_large() {
-        let accounts = vec![
-            acct(0, 1_000_000, 1),
-            acct(1, 200_000, 1),
-            acct(2, 150_000, 1),
-        ];
-        let plan = plan_elements_batched(&accounts, 0, 10_000, RATE).unwrap();
-        // 2 large + 0 bundle + 1 fee = 3
-        assert_eq!(plan.txs.len(), 3);
-    }
-
-    #[test]
-    fn all_small() {
-        let accounts = vec![
-            acct(0, 5_000_000, 1),
-            acct(1, 50_000, 1),
-            acct(2, 30_000, 1),
-            acct(3, 20_000, 1),
-        ];
-        let plan = plan_elements_batched(&accounts, 0, 1_000_000, RATE).unwrap();
-        // 0 large + 1 bundle + 1 fee = 2
-        assert_eq!(plan.txs.len(), 2);
-        assert_eq!(plan.txs[0].customers.len(), 3);
-    }
-
-    #[test]
-    fn only_fee_account_funded() {
-        let accounts = vec![acct(0, 1_000_000, 2)];
-        let plan = plan_elements_batched(&accounts, 0, 100_000, RATE).unwrap();
-        // Just the fee-final tx.
-        assert_eq!(plan.txs.len(), 1);
-        assert!(plan.txs[0].is_fee_final);
-    }
-
-    #[test]
-    fn customers_get_full_balance() {
-        let accounts = vec![acct(0, 1_000_000, 1), acct(1, 200_000, 1)];
-        let plan = plan_elements_batched(&accounts, 0, 10_000, RATE).unwrap();
-        assert_eq!(plan.txs[0].customers, vec![(1, 200_000)]);
-    }
-
-    #[test]
-    fn total_fee_is_sum_of_tx_fees() {
-        let accounts = vec![
-            acct(0, 1_000_000, 1),
-            acct(1, 200_000, 1),
-            acct(2, 50_000, 1),
-        ];
-        let plan = plan_elements_batched(&accounts, 0, 100_000, RATE).unwrap();
-        let summed: u64 = plan.txs.iter().map(|t| t.fee_sat).sum();
-        assert_eq!(summed, plan.total_fee_sat);
-    }
-
-    #[test]
-    fn rejects_insufficient_fee_balance() {
-        let accounts = vec![
-            acct(0, 100, 1), // fee account far too small
-            acct(1, 200_000, 1),
-            acct(2, 300_000, 1),
-        ];
-        let err = plan_elements_batched(&accounts, 0, 100_000, RATE).unwrap_err();
-        assert!(err.contains("insufficient"), "got: {err}");
-    }
-
-    #[test]
-    fn rejects_no_funded_accounts() {
-        let accounts = vec![acct(0, 0, 0), acct(1, 0, 0)];
-        let err = plan_elements_batched(&accounts, 0, 100_000, RATE).unwrap_err();
-        assert!(err.contains("no funded"), "got: {err}");
-    }
-
-    #[test]
-    fn rejects_missing_fee_account() {
-        let accounts = vec![acct(1, 200_000, 1), acct(2, 300_000, 1)];
-        let err = plan_elements_batched(&accounts, 99, 100_000, RATE).unwrap_err();
-        assert!(err.contains("not found"), "got: {err}");
-    }
 }
