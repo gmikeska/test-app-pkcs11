@@ -1482,6 +1482,17 @@ async fn run_elements_migration(
     match result {
         Ok(txs) => {
             let total = txs.len();
+            // Map each customer account to the txid of the sweep that carried
+            // its output, so the version-completion stamp below records a real
+            // sweep txid (the reorg-reconciliation detection key) — mirroring
+            // the Bitcoin path.
+            let mut account_sweep_txid: std::collections::HashMap<i32, String> =
+                std::collections::HashMap::new();
+            for (txid, outputs, _is_fee_final) in &txs {
+                for (acct, _sat) in outputs {
+                    account_sweep_txid.insert(*acct, txid.clone());
+                }
+            }
             for (i, (txid, outputs, is_fee_final)) in txs.iter().enumerate() {
                 println!("\n  Transaction {}/{}:", i + 1, total);
                 println!("    Broadcast: txid {txid}");
@@ -1493,6 +1504,45 @@ async fn run_elements_migration(
                         .map(|(acct, sat)| format!("account {acct}: {sat} sat"))
                         .collect();
                     println!("    Outputs: {}", summary.join(", "));
+                }
+            }
+
+            // Mark old Elements federation versions as migrated for all
+            // accounts, recording the sweep txid alongside the status flip so a
+            // later reorg that evicts the sweep can be detected + reverted.
+            // The Bitcoin path does this (STEP 2 tail); the Elements path did
+            // not, leaving every v0 row `pending` with a NULL sweep txid —
+            // making a completed migration look incomplete/re-runnable.
+            for wallet in &user_wallets {
+                let acct_idx = wallet.account_idx();
+                let versions = match db::list_federation_versions_for_elements_wallet(
+                    pool,
+                    wallet.wallet_id(),
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to list Elements versions for account \
+                                 {acct_idx}: {e}"
+                        );
+                        continue;
+                    }
+                };
+                let max_version = versions.iter().map(|v| v.version_index).max().unwrap_or(0);
+                for v in &versions {
+                    if v.version_index < max_version {
+                        // Fall back to a bare status flip when no customer-output
+                        // txid was captured for this account (e.g. the fee
+                        // account, which crosses as fee-change, not a customer
+                        // output) — matching the Bitcoin path.
+                        if let Some(sweep_txid) = account_sweep_txid.get(&acct_idx) {
+                            let _ = db::set_migration_complete(pool, v.id, sweep_txid).await;
+                        } else {
+                            let _ = db::update_migration_status(pool, v.id, "complete").await;
+                        }
+                    }
                 }
             }
         }
