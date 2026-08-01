@@ -181,6 +181,35 @@ pub async fn update_wallet_changeset(
     Ok(())
 }
 
+/// Rebind a wallet row to a new descriptor and reset its BDK changeset + tip.
+///
+/// Used to self-heal post-migration descriptor drift: the migration tool
+/// records a new federation version but never updates `wallets.descriptor`,
+/// so the app's spendable `inner` wallet stays pinned to the OLD federation.
+/// This rewrites the row to the current federation's descriptor with a fresh
+/// (revealed-but-unscanned) changeset; the next sync repopulates it from chain.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn update_wallet_descriptor_and_changeset(
+    pool: &PgPool,
+    wallet_id: Uuid,
+    descriptor: &str,
+    changeset: &JsonValue,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE wallets \
+         SET descriptor = $1, bdk_changeset = $2, chain_tip_height = 0 \
+         WHERE id = $3",
+    )
+    .bind(descriptor)
+    .bind(changeset)
+    .bind(wallet_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Update only the cached chain tip.
 ///
 /// # Errors

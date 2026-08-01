@@ -592,6 +592,56 @@ impl WalletManager {
         .map_err(|e| WalletError::CreateWallet(e.to_string()))
     }
 
+    /// Rebuild `inner` on the current federation after a migration left the
+    /// stored `wallets.descriptor` pointing at the OLD federation.
+    ///
+    /// The migration tool records a new federation version and sweeps funds to
+    /// it, but never updates `wallets.descriptor` — so a naive load pins the
+    /// spendable `inner` wallet to the old federation and the swept UTXOs (at
+    /// current-federation addresses) are unspendable. This builds a fresh BDK
+    /// wallet on `current_desc`, reveals external addresses up to the old
+    /// wallet's last-issued index (so the revealed-only nodeless sync rescans
+    /// the sweep output at current-federation external index 0 and every
+    /// previously-issued index), and re-persists the corrected row.
+    async fn rebind_inner_to_current_federation(
+        &self,
+        row: &WalletRow,
+        current_desc: &str,
+        account_idx: i32,
+    ) -> Result<(Wallet, ChangeSet), WalletError> {
+        let reveal_to = {
+            let old = chain_sync::init_or_load_wallet(
+                self.network,
+                row.descriptor.clone(),
+                row.bdk_changeset.clone(),
+            )
+            .map_err(|e| WalletError::from_init_wallet(row.id, e))?;
+            old.wallet
+                .derivation_index(KeychainKind::External)
+                .unwrap_or(0)
+        };
+        let mut fresh = Wallet::create_from_two_path_descriptor(current_desc.to_owned())
+            .network(self.network)
+            .create_wallet_no_persist()
+            .map_err(|e| WalletError::CreateWallet(e.to_string()))?;
+        let _ = fresh
+            .reveal_addresses_to(KeychainKind::External, reveal_to)
+            .count();
+        let changeset = fresh.take_staged().unwrap_or_default();
+        let json = serde_json::to_value(&changeset).map_err(WalletError::EncodeChangeSet)?;
+        db::update_wallet_descriptor_and_changeset(&self.pool, row.id, current_desc, &json).await?;
+        tracing::warn!(
+            wallet_id = %row.id,
+            account_idx,
+            old_descriptor = %row.descriptor,
+            new_descriptor = %current_desc,
+            revealed_to = reveal_to,
+            "self-healed post-migration descriptor drift: rebound inner wallet \
+             to current federation so swept UTXOs are spendable"
+        );
+        Ok((fresh, changeset))
+    }
+
     async fn build_user_wallet(
         &self,
         user_id: Uuid,
@@ -624,17 +674,38 @@ impl WalletManager {
             )?
         };
 
+        // `inner` — the wallet that holds the spendable balance, signs, and is
+        // drained by Send / Send-Max — must track the CURRENT federation.
+        // `wallets.descriptor` is written once at creation and is NEVER updated
+        // by the migration tool, so after a migration it still names the OLD
+        // federation while `federation` above was reconstructed from the latest
+        // stored version (the current one). Building `inner` from the stale row
+        // descriptor leaves the swept post-migration UTXOs — which live at
+        // current-federation addresses — invisible and unspendable, even though
+        // `balance()` (summed over the version wallets) still shows them.
+        // Self-heal that drift here so a migrated wallet can actually spend.
+        let current_desc = to_multipath_string(
+            federation
+                .try_descriptor()
+                .expect("Bitcoin federation has a descriptor"),
+        );
+
         // Init-or-load BDK construction lives in `emvault::core::chain_sync`
         // (E3b). Core leaves the staged changeset intact on the fresh path and
         // returns an empty aggregate, matching this app's prior behavior
         // exactly (signers are registered just below, then persisted).
-        let loaded = chain_sync::init_or_load_wallet(
-            self.network,
-            row.descriptor.clone(),
-            row.bdk_changeset.clone(),
-        )
-        .map_err(|e| WalletError::from_init_wallet(wallet_id, e))?;
-        let (mut wallet, initial_changeset) = (loaded.wallet, loaded.changeset);
+        let (mut wallet, initial_changeset) = if current_desc == row.descriptor {
+            let loaded = chain_sync::init_or_load_wallet(
+                self.network,
+                row.descriptor.clone(),
+                row.bdk_changeset.clone(),
+            )
+            .map_err(|e| WalletError::from_init_wallet(wallet_id, e))?;
+            (loaded.wallet, loaded.changeset)
+        } else {
+            self.rebind_inner_to_current_federation(&row, &current_desc, account_idx)
+                .await?
+        };
 
         // Register all Pkcs11Signers on both keychains.
         for s in signers_arc.iter() {
