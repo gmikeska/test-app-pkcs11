@@ -1113,7 +1113,15 @@ impl UserWallet {
 
     /// Broadcast raw transaction bytes through the active backend: Electrum or
     /// Esplora when one is selected, otherwise bitcoind `sendrawtransaction`.
-    async fn broadcast_raw(&self, raw_tx: &[u8]) -> Result<Txid, WalletError> {
+    /// Broadcast a raw transaction through the wallet's configured chain
+    /// backend (Electrum → Esplora → Bitcoin Core RPC). Public so the
+    /// federation-migration tool broadcasts sweeps the same way normal sends
+    /// do, instead of hardcoding Bitcoin Core RPC (which breaks nodeless
+    /// Electrum/Esplora deployments).
+    ///
+    /// # Errors
+    /// [`WalletError::BroadcastRejected`] / backend errors on failure.
+    pub async fn broadcast_raw(&self, raw_tx: &[u8]) -> Result<Txid, WalletError> {
         if let Some(backend) = self.electrum.as_deref() {
             let tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(raw_tx)
                 .map_err(|e| WalletError::ExtractTx(e.to_string()))?;

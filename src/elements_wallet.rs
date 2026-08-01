@@ -85,7 +85,14 @@ pub enum ElementsWalletError {
 /// Broadcast a finalized Elements transaction through the wallet's configured
 /// backend: a descriptor-private nodeless client (Electrum / Esplora /
 /// Waterfalls) or the elementsd JSON-RPC. Called from a blocking context.
-fn broadcast_via_backend(
+///
+/// Public so the federation-migration tool broadcasts sweeps through the same
+/// backend as normal sends, instead of hardcoding elementsd JSON-RPC (which
+/// breaks nodeless Electrum/Esplora/Waterfalls deployments).
+///
+/// # Errors
+/// Backend/broadcast errors propagate as [`ElementsWalletError`].
+pub fn broadcast_via_backend(
     backend: ElementsChainBackend,
     electrum_url: Option<&str>,
     esplora_url: Option<&str>,

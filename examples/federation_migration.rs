@@ -32,7 +32,6 @@
 
 use emvault::core::bdk_wallet;
 use emvault::core::bitcoin;
-use emvault::core::bitcoincore_rpc;
 use emvault::core::miniscript;
 use emvault::elements::elements;
 use std::io::{self, BufRead, Write};
@@ -1235,14 +1234,20 @@ async fn run_elements_migration(
         app_config.elements_rpc_user.clone(),
         app_config.elements_rpc_password.clone(),
     );
+    // Elements chain backend (Electrum / Esplora / Waterfalls / Rpc) so the
+    // migration broadcasts through the configured backend, not hardcoded RPC.
+    let el_backend = app_config.elements_chain_backend;
+    let el_electrum_url = app_config.elements_electrum_url.clone();
+    let el_esplora_url = app_config.elements_esplora_url.clone();
+    let el_esplora_auth = app_config.elements_esplora_auth.clone();
     #[allow(clippy::cast_precision_loss)]
     let fee_rate_kvb = (cfg.migration.fee_rate_sat_per_vb as f64 * 1000.0) as f32;
 
     type TxResult = (String, Vec<(i32, u64)>, bool);
     let result = tokio::task::spawn_blocking(move || -> Result<Vec<TxResult>, String> {
         use emvault::elements::signer::ElementsSigner;
-        use emvault::elements::sync::{ElementsChainSource, KeychainKind};
-        use test_app_pkcs11::elements_sync::RpcChainSource;
+        use emvault::elements::sync::KeychainKind;
+        use test_app_pkcs11::elements_wallet::broadcast_via_backend;
 
         // Build each account's old (input-owning) wollet.
         let mut wollets: Vec<(i32, ElementsWollet)> = Vec::new();
@@ -1259,7 +1264,8 @@ async fn run_elements_migration(
                 .1
         };
 
-        let chain = RpcChainSource::new(&rpc.0, &rpc.1, &rpc.2).map_err(|e| e.to_string())?;
+        // Each sweep is broadcast via `broadcast_via_backend` (Electrum /
+        // Esplora / Waterfalls / Rpc) at the broadcast sites below.
 
         // Sign a PSET so that each involved account signs only its own inputs.
         // The old federation shares signer fingerprints across accounts (they
@@ -1392,7 +1398,16 @@ async fn run_elements_migration(
                 sign_scoped(&mut pset, &owner);
                 finalize_p2wsh_pset(&mut pset).map_err(|e| e.to_string())?;
                 let tx = pset.extract_tx().map_err(|e| e.to_string())?;
-                let txid = chain.broadcast(&tx).map_err(|e| e.to_string())?;
+                let txid = broadcast_via_backend(
+                    el_backend,
+                    el_electrum_url.as_deref(),
+                    el_esplora_url.as_deref(),
+                    el_esplora_auth.as_ref(),
+                    lwk_net,
+                    (&rpc.0, &rpc.1, &rpc.2),
+                    &tx,
+                )
+                .map_err(|e| e.to_string())?;
 
                 // Capture the fee account's change (at its old-fed address) to
                 // feed the next transaction.
@@ -1446,7 +1461,16 @@ async fn run_elements_migration(
             sign_scoped(&mut pset, &owner);
             finalize_p2wsh_pset(&mut pset).map_err(|e| e.to_string())?;
             let tx = pset.extract_tx().map_err(|e| e.to_string())?;
-            let txid = chain.broadcast(&tx).map_err(|e| e.to_string())?;
+            let txid = broadcast_via_backend(
+                el_backend,
+                el_electrum_url.as_deref(),
+                el_esplora_url.as_deref(),
+                el_esplora_auth.as_ref(),
+                lwk_net,
+                (&rpc.0, &rpc.1, &rpc.2),
+                &tx,
+            )
+            .map_err(|e| e.to_string())?;
             results.push((txid.to_string(), report, false));
         }
 
@@ -2334,14 +2358,11 @@ async fn main() {
         bitcoin::consensus::Encodable::consensus_encode(&tx, &mut raw)
             .expect("consensus encode succeeds");
 
-        let raw_clone = raw.clone();
-        let rpc = fee_wallet.rpc().clone();
-        match tokio::task::spawn_blocking(move || {
-            bitcoincore_rpc::RpcApi::send_raw_transaction(&*rpc, &raw_clone[..])
-        })
-        .await
-        {
-            Ok(Ok(broadcast_txid)) => {
+        // Broadcast through the wallet's configured chain backend
+        // (Electrum / Esplora / Bitcoin Core RPC) rather than hardcoding RPC,
+        // so migrations work in nodeless deployments.
+        match fee_wallet.broadcast_raw(&raw).await {
+            Ok(broadcast_txid) => {
                 // Report per-output amounts from the plan markers.
                 let output_summary: Vec<String> = sweep_tx
                     .outputs
@@ -2353,12 +2374,8 @@ async fn main() {
                     output_summary.join(", ")
                 );
             }
-            Ok(Err(e)) => {
-                eprintln!("error: broadcast rejected for tx {}: {e}", tx_num + 1);
-                std::process::exit(1);
-            }
             Err(e) => {
-                eprintln!("error: broadcast task failed for tx {}: {e}", tx_num + 1);
+                eprintln!("error: broadcast rejected for tx {}: {e}", tx_num + 1);
                 std::process::exit(1);
             }
         }

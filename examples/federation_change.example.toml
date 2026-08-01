@@ -33,9 +33,9 @@ threshold = 3
 # This example rotates from [app-1, app-2, app-3] to [app-1, app-3, app-4]:
 # HSM #2 is removed, HSM #4 is added, threshold stays at 3-of-3.
 signers = [
-    "emvault-pkcs11-app-1",
-    "emvault-pkcs11-app-3",
-    "emvault-pkcs11-app-4",
+    "asterism-pkcs11-app-1",
+    "asterism-pkcs11-app-3",
+    "asterism-pkcs11-app-4",
 ]
 
 # ---------------------------------------------------------------------------
