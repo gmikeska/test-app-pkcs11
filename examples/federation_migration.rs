@@ -1755,16 +1755,46 @@ async fn main() {
     // -- Gather current federation state (from the first wallet) ------------
     let first_wallet = &user_wallets[0];
     let current_fed = first_wallet.federation();
+    // Resolve each current signer's *token* label dynamically by matching its
+    // fingerprint against this wallet's HSM signer pool (the same approach the
+    // web UI's federation view uses), so the summary reflects the actual
+    // on-chain federation rather than the HSM pool's positional order.
+    let fp_to_label: std::collections::HashMap<String, String> = {
+        let acct_idx = u32::try_from(first_wallet.account_idx()).unwrap_or(0);
+        let path = match wallet_manager.derivation_path_for(acct_idx) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: failed to derive path for the current federation: {e}");
+                std::process::exit(1);
+            }
+        };
+        match hsm.signers_for(first_wallet.user_id(), &path).await {
+            Ok(pool) => pool
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, ps)| {
+                    app_config
+                        .hsm_tokens
+                        .get(idx)
+                        .map(|t| (format!("{}", ps.fingerprint()), t.label.clone()))
+                })
+                .collect(),
+            Err(e) => {
+                eprintln!("error: failed to load HSM signer pool: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
     let current_signers: Vec<(String, String)> = current_fed
         .signers()
         .iter()
-        .enumerate()
-        .map(|(i, s)| {
+        .map(|s| {
             let id = s.id().as_str().to_string();
-            let label = app_config
-                .hsm_tokens
-                .get(i)
-                .map_or_else(|| format!("unknown-{i}"), |t| t.label.clone());
+            let fp = format!("{}", s.fingerprint());
+            let label = fp_to_label
+                .get(&fp)
+                .cloned()
+                .unwrap_or_else(|| format!("unknown ({id})"));
             (id, label)
         })
         .collect();

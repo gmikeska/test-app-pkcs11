@@ -1,12 +1,15 @@
 //! Process-wide configuration loaded from environment variables (a sibling
 //! `.env` file is loaded by `dotenvy` at startup if present).
 //!
-//! Three groups of variables are required:
+//! Variable groups:
 //!
 //! - **Web/server.** `APP_HOST`, `APP_PORT`, `APP_SESSION_SECRET`,
 //!   `DATABASE_URL`.
-//! - **Bitcoin Core RPC.** `BITCOIN_RPC_*`, `BITCOIN_NETWORK`,
-//!   `BITCOIN_WALLET_NAME`.
+//! - **Bitcoin/Elements RPC.** `BITCOIN_RPC_*` / `ELEMENTS_RPC_*` are only
+//!   required when that chain's backend is `rpc` (`APP_CHAIN_BACKEND` /
+//!   `ELEMENTS_CHAIN_BACKEND`); `ELEMENTS_RPC_*` is also required on
+//!   `elementsregtest`, where LWK network params are read from the node.
+//!   Nodeless backends (Electrum / Esplora / Waterfalls) never build the client.
 //! - **HSM federation.** `PKCS11_LIB`, `APP_HSM_{N}_LABEL`/`_PIN`/`_SO_PIN`
 //!   (scanned sequentially from N=1), and `APP_FED_THRESHOLD`.
 
@@ -258,17 +261,6 @@ impl AppConfig {
             None => default_bip48_coin_index(network),
         };
 
-        let rpc_host = require("BITCOIN_RPC_HOST")?;
-        let rpc_port: u16 =
-            require("BITCOIN_RPC_PORT")?
-                .parse()
-                .map_err(|e: std::num::ParseIntError| ConfigError::Parse {
-                    var: "BITCOIN_RPC_PORT",
-                    reason: e.to_string(),
-                })?;
-        let bitcoin_rpc_url = format!("http://{rpc_host}:{rpc_port}");
-        let bitcoin_rpc_user = require("BITCOIN_RPC_USER")?;
-        let bitcoin_rpc_password = require("BITCOIN_RPC_PASSWORD")?;
         let bitcoin_wallet_name =
             optional("BITCOIN_WALLET_NAME").unwrap_or_else(|| "emvault-pkcs11".to_string());
 
@@ -294,6 +286,27 @@ impl AppConfig {
                 var: "APP_ELECTRUM_URL",
             });
         }
+
+        // Bitcoin Core RPC credentials are only consumed by the `Rpc` backend;
+        // nodeless backends (Electrum / Esplora / Waterfalls) never build the
+        // client, so `BITCOIN_RPC_*` is optional unless `APP_CHAIN_BACKEND=rpc`.
+        let (bitcoin_rpc_url, bitcoin_rpc_user, bitcoin_rpc_password) =
+            if chain_backend == ChainBackend::Rpc {
+                let rpc_host = require("BITCOIN_RPC_HOST")?;
+                let rpc_port: u16 = require("BITCOIN_RPC_PORT")?.parse().map_err(
+                    |e: std::num::ParseIntError| ConfigError::Parse {
+                        var: "BITCOIN_RPC_PORT",
+                        reason: e.to_string(),
+                    },
+                )?;
+                (
+                    format!("http://{rpc_host}:{rpc_port}"),
+                    require("BITCOIN_RPC_USER")?,
+                    require("BITCOIN_RPC_PASSWORD")?,
+                )
+            } else {
+                (String::new(), String::new(), String::new())
+            };
 
         let pkcs11_library_path = PathBuf::from(require("PKCS11_LIB")?);
 
@@ -357,17 +370,6 @@ impl AppConfig {
             });
         }
 
-        let elements_rpc_host = require("ELEMENTS_RPC_HOST")?;
-        let elements_rpc_port: u16 =
-            require("ELEMENTS_RPC_PORT")?
-                .parse()
-                .map_err(|e: std::num::ParseIntError| ConfigError::Parse {
-                    var: "ELEMENTS_RPC_PORT",
-                    reason: e.to_string(),
-                })?;
-        let elements_rpc_url = format!("http://{elements_rpc_host}:{elements_rpc_port}");
-        let elements_rpc_user = require("ELEMENTS_RPC_USER")?;
-        let elements_rpc_password = require("ELEMENTS_RPC_PASSWORD")?;
         let elements_network_str = require("ELEMENTS_NETWORK")?;
         let elements_network = match elements_network_str.as_str() {
             "liquid" => ElementsNetwork::Liquid,
@@ -411,6 +413,30 @@ impl AppConfig {
                 var: "ELEMENTS_ESPLORA_URL",
             });
         }
+
+        // Elements daemon RPC credentials are only consumed by the `Rpc` backend,
+        // or on `elementsregtest` (where LWK network params — policy asset +
+        // genesis — are resolved from the node). Otherwise they're optional: the
+        // nodeless tip/scan/broadcast paths never dial elementsd.
+        let needs_elements_rpc = elements_chain_backend == ElementsChainBackend::Rpc
+            || elements_network == ElementsNetwork::ElementsRegtest;
+        let (elements_rpc_url, elements_rpc_user, elements_rpc_password) = if needs_elements_rpc {
+            let elements_rpc_host = require("ELEMENTS_RPC_HOST")?;
+            let elements_rpc_port: u16 =
+                require("ELEMENTS_RPC_PORT")?
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| ConfigError::Parse {
+                        var: "ELEMENTS_RPC_PORT",
+                        reason: e.to_string(),
+                    })?;
+            (
+                format!("http://{elements_rpc_host}:{elements_rpc_port}"),
+                require("ELEMENTS_RPC_USER")?,
+                require("ELEMENTS_RPC_PASSWORD")?,
+            )
+        } else {
+            (String::new(), String::new(), String::new())
+        };
 
         Ok(Self {
             bind: SocketAddr::new(host_ip, port),

@@ -141,6 +141,12 @@ pub enum WalletError {
     #[error("failed to construct bitcoind RPC client: {0}")]
     RpcClientInit(bitcoincore_rpc::Error),
 
+    /// An RPC-backend operation was reached without a configured RPC client.
+    /// Only possible if `APP_CHAIN_BACKEND=rpc` but the `BITCOIN_RPC_*` creds
+    /// were absent — the nodeless backends never take this path.
+    #[error("bitcoind RPC client is not configured (set BITCOIN_RPC_* or use a nodeless backend)")]
+    RpcClientMissing,
+
     /// JSON-encoding the merged BDK changeset failed.
     #[error("failed to JSON-encode wallet changeset: {0}")]
     EncodeChangeSet(#[source] serde_json::Error),
@@ -236,7 +242,8 @@ impl WalletError {
 /// Cache + factory for [`UserWallet`]s.
 pub struct WalletManager {
     pool: PgPool,
-    rpc: Arc<RpcClient>,
+    /// bitcoind JSON-RPC client — `Some` only when `APP_CHAIN_BACKEND=rpc`.
+    rpc: Option<Arc<RpcClient>>,
     network: Network,
     bip48_coin_index: u32,
     fed_threshold: u32,
@@ -263,12 +270,21 @@ impl WalletManager {
     /// [`WalletError::RpcClientInit`] if the bitcoind RPC client setup
     /// fails.
     pub fn new(pool: PgPool, config: &AppConfig, hsm: Arc<HsmFleet>) -> Result<Self, WalletError> {
-        let auth = Auth::UserPass(
-            config.bitcoin_rpc_user.clone(),
-            config.bitcoin_rpc_password.clone(),
-        );
-        let rpc =
-            RpcClient::new(&config.bitcoin_rpc_url, auth).map_err(WalletError::RpcClientInit)?;
+        // The bitcoind JSON-RPC client is only built for the `Rpc` backend;
+        // nodeless backends (Electrum / Esplora / Waterfalls) never touch it, so
+        // `BITCOIN_RPC_*` is optional unless `APP_CHAIN_BACKEND=rpc`.
+        let rpc = if config.chain_backend == ChainBackend::Rpc {
+            let auth = Auth::UserPass(
+                config.bitcoin_rpc_user.clone(),
+                config.bitcoin_rpc_password.clone(),
+            );
+            Some(Arc::new(
+                RpcClient::new(&config.bitcoin_rpc_url, auth)
+                    .map_err(WalletError::RpcClientInit)?,
+            ))
+        } else {
+            None
+        };
 
         // Nodeless backend selection. `connect` auto-detects public vs enterprise
         // from the ESPLORA_CLIENT_* env vars; the mode is carried on the backend.
@@ -310,7 +326,7 @@ impl WalletManager {
 
         Ok(Self {
             pool,
-            rpc: Arc::new(rpc),
+            rpc,
             network: config.network,
             bip48_coin_index: config.bip48_coin_index,
             fed_threshold: config.fed_threshold,
@@ -849,7 +865,8 @@ pub struct UserWallet {
     inner: AsyncMutex<Wallet>,
     aggregate: AsyncMutex<ChangeSet>,
     pool: PgPool,
-    rpc: Arc<RpcClient>,
+    /// bitcoind JSON-RPC client — `Some` only when `APP_CHAIN_BACKEND=rpc`.
+    rpc: Option<Arc<RpcClient>>,
     /// Shared nodeless backend (cloned from the manager); `None` = RPC path.
     esplora: Option<Arc<EsploraBackend>>,
     /// Shared Electrum backend (cloned from the manager); `None` unless selected.
@@ -940,8 +957,11 @@ impl UserWallet {
         let mut any_reorg = false;
         for vw_mutex in &self.version_wallets {
             let mut vw = vw_mutex.lock().await;
-            let result = chain_sync::emitter_sync(&mut vw, &*self.rpc)
-                .map_err(WalletError::from_chain_sync)?;
+            let result = chain_sync::emitter_sync(
+                &mut vw,
+                self.rpc.as_deref().ok_or(WalletError::RpcClientMissing)?,
+            )
+            .map_err(WalletError::from_chain_sync)?;
             any_reorg |= result.reorg_rebuilt;
         }
 
@@ -949,8 +969,11 @@ impl UserWallet {
             let mut wallet = self.inner.lock().await;
             // Pure-BDK emitter drive lives in `emvault::core::chain_sync` (E3b);
             // persistence (changeset merge + DB write) stays here.
-            let result = chain_sync::emitter_sync(&mut wallet, &*self.rpc)
-                .map_err(WalletError::from_chain_sync)?;
+            let result = chain_sync::emitter_sync(
+                &mut wallet,
+                self.rpc.as_deref().ok_or(WalletError::RpcClientMissing)?,
+            )
+            .map_err(WalletError::from_chain_sync)?;
             drop(wallet);
             (
                 SyncSummary {
@@ -1204,7 +1227,7 @@ impl UserWallet {
             return Ok(backend.broadcast(&tx).await?);
         }
         let raw_clone = raw_tx.to_vec();
-        let rpc = self.rpc.clone();
+        let rpc = self.rpc.clone().ok_or(WalletError::RpcClientMissing)?;
         tokio::task::spawn_blocking(move || rpc.send_raw_transaction(&raw_clone[..]))
             .await
             .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?
@@ -1760,9 +1783,9 @@ impl UserWallet {
         self.inner.lock().await
     }
 
-    /// Borrow the shared RPC client.
-    pub fn rpc(&self) -> &Arc<RpcClient> {
-        &self.rpc
+    /// Borrow the shared RPC client, when the `Rpc` backend is configured.
+    pub fn rpc(&self) -> Option<&Arc<RpcClient>> {
+        self.rpc.as_ref()
     }
 
     /// Borrow the DB pool.

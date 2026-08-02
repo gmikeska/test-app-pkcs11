@@ -137,6 +137,56 @@ pub fn broadcast_via_backend(
     }
 }
 
+/// Fetch the current chain-tip height through the configured backend.
+///
+/// The nodeless backends (Electrum / Esplora / Waterfalls) read their own tip
+/// endpoint — no elementsd — so this shares the same "no node unless `rpc`"
+/// property as [`broadcast_via_backend`]. Public so request handlers reuse one
+/// dispatch instead of hardcoding the RPC path.
+///
+/// # Errors
+///
+/// [`ElementsWalletError::Pipeline`] if the chosen backend can't be reached or
+/// the required URL for that backend is unset.
+pub fn tip_height_via_backend(
+    backend: ElementsChainBackend,
+    electrum_url: Option<&str>,
+    esplora_url: Option<&str>,
+    esplora_auth: Option<&TokenProvider>,
+    lwk: LwkNetwork,
+    rpc: (&str, &str, &str),
+) -> Result<u32, ElementsWalletError> {
+    match backend {
+        ElementsChainBackend::Electrum => {
+            let url = electrum_url.ok_or_else(|| pipeline_err("ELEMENTS_ELECTRUM_URL not set"))?;
+            let mut sync = NodelessSync::new_electrum(url).map_err(pipeline_err)?;
+            sync.tip_height().map_err(pipeline_err)
+        }
+        ElementsChainBackend::Esplora => {
+            let url = esplora_url.ok_or_else(|| pipeline_err("ELEMENTS_ESPLORA_URL not set"))?;
+            let mut sync = match esplora_auth {
+                Some(token) => NodelessSync::new_esplora_authenticated(url, lwk, token.clone()),
+                None => NodelessSync::new_esplora(url, lwk),
+            }
+            .map_err(pipeline_err)?;
+            sync.tip_height().map_err(pipeline_err)
+        }
+        ElementsChainBackend::Waterfalls => {
+            let url = esplora_url.ok_or_else(|| pipeline_err("ELEMENTS_ESPLORA_URL not set"))?;
+            let mut sync = match esplora_auth {
+                Some(token) => NodelessSync::new_waterfalls_authenticated(url, lwk, token.clone()),
+                None => NodelessSync::new_waterfalls(url, lwk),
+            }
+            .map_err(pipeline_err)?;
+            sync.tip_height().map_err(pipeline_err)
+        }
+        ElementsChainBackend::Rpc => {
+            let chain = RpcChainSource::new(rpc.0, rpc.1, rpc.2).map_err(pipeline_err)?;
+            chain.tip_height().map_err(pipeline_err)
+        }
+    }
+}
+
 fn pipeline_err<E: std::fmt::Display>(e: E) -> ElementsWalletError {
     ElementsWalletError::Pipeline(e.to_string())
 }
@@ -147,7 +197,8 @@ fn pipeline_err<E: std::fmt::Display>(e: E) -> ElementsWalletError {
 
 pub struct ElementsWalletManager {
     pool: PgPool,
-    rpc: Arc<ElementsRpc>,
+    /// elementsd JSON-RPC client — `Some` only when `ELEMENTS_CHAIN_BACKEND=rpc`.
+    rpc: Option<Arc<ElementsRpc>>,
     rpc_url: String,
     rpc_user: String,
     rpc_pass: String,
@@ -172,11 +223,19 @@ pub struct ElementsWalletManager {
 #[allow(dead_code)]
 impl ElementsWalletManager {
     pub fn new(pool: PgPool, config: &AppConfig, hsm: Arc<HsmFleet>) -> Self {
-        let rpc = Arc::new(ElementsRpc::new(
-            &config.elements_rpc_url,
-            &config.elements_rpc_user,
-            &config.elements_rpc_password,
-        ));
+        // The elementsd JSON-RPC client is only built for the `Rpc` backend;
+        // nodeless backends never dial it (tip/scan/broadcast are nodeless, and
+        // non-regtest network params are a static mapping), so `ELEMENTS_RPC_*`
+        // is optional unless `ELEMENTS_CHAIN_BACKEND=rpc`.
+        let rpc = if config.elements_chain_backend == ElementsChainBackend::Rpc {
+            Some(Arc::new(ElementsRpc::new(
+                &config.elements_rpc_url,
+                &config.elements_rpc_user,
+                &config.elements_rpc_password,
+            )))
+        } else {
+            None
+        };
         Self {
             pool,
             rpc,
@@ -201,8 +260,8 @@ impl ElementsWalletManager {
         self.network
     }
 
-    pub fn rpc(&self) -> &Arc<ElementsRpc> {
-        &self.rpc
+    pub fn rpc(&self) -> Option<&Arc<ElementsRpc>> {
+        self.rpc.as_ref()
     }
 
     /// Resolve (and cache) the concrete LWK network from the node.
@@ -210,18 +269,24 @@ impl ElementsWalletManager {
         if let Some(n) = *self.lwk_net.lock().await {
             return Ok(n);
         }
-        let (url, user, pass, net) = (
-            self.rpc_url.clone(),
-            self.rpc_user.clone(),
-            self.rpc_pass.clone(),
-            self.network,
-        );
-        let n = tokio::task::spawn_blocking(move || -> Result<LwkNetwork, ElementsWalletError> {
-            let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
-            node_lwk_network(&chain, net).map_err(pipeline_err)
-        })
-        .await
-        .expect("spawn_blocking join")?;
+        // Only `elementsregtest` needs the node (policy asset + genesis hash);
+        // every other network is a static mapping, so nodeless deployments never
+        // dial elementsd here.
+        let n = if self.network == ElementsNetwork::ElementsRegtest {
+            let (url, user, pass) = (
+                self.rpc_url.clone(),
+                self.rpc_user.clone(),
+                self.rpc_pass.clone(),
+            );
+            tokio::task::spawn_blocking(move || -> Result<LwkNetwork, ElementsWalletError> {
+                let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
+                node_lwk_network(&chain, ElementsNetwork::ElementsRegtest).map_err(pipeline_err)
+            })
+            .await
+            .expect("spawn_blocking join")?
+        } else {
+            self.network.to_lwk()
+        };
         *self.lwk_net.lock().await = Some(n);
         Ok(n)
     }
@@ -590,10 +655,21 @@ impl UserElementsWallet {
     }
 
     pub async fn tip_height(&self) -> Result<u64, ElementsWalletError> {
+        let backend = self.elements_backend;
+        let electrum_url = self.electrum_url.clone();
+        let esplora_url = self.esplora_url.clone();
+        let esplora_auth = self.esplora_auth.clone();
         let (url, user, pass) = self.rpc_cfg();
+        let lwk = self.lwk_network();
         let h = tokio::task::spawn_blocking(move || -> Result<u32, ElementsWalletError> {
-            let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
-            chain.tip_height().map_err(pipeline_err)
+            tip_height_via_backend(
+                backend,
+                electrum_url.as_deref(),
+                esplora_url.as_deref(),
+                esplora_auth.as_ref(),
+                lwk,
+                (&url, &user, &pass),
+            )
         })
         .await
         .expect("spawn_blocking join")?;
@@ -772,12 +848,12 @@ impl UserElementsWallet {
             })?;
         let store = PgWalletUtxoStore::new(self.pool.clone());
         let wid = self.wallet_key();
-        let (url, user, pass) = self.rpc_cfg();
+        // Chain tip via the configured backend (nodeless — no elementsd unless
+        // `ELEMENTS_CHAIN_BACKEND=rpc`).
+        let tip = u32::try_from(self.tip_height().await?).unwrap_or(u32::MAX);
 
         tokio::task::spawn_blocking(
             move || -> Result<ElementsAddressActivity, ElementsWalletError> {
-                let chain = RpcChainSource::new(&url, &user, &pass).map_err(pipeline_err)?;
-                let tip = chain.tip_height().map_err(pipeline_err)?;
                 let utxos = store.list_for_wallet(wid).map_err(pipeline_err)?;
 
                 let mut received = 0u64;
