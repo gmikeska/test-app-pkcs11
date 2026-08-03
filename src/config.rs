@@ -53,16 +53,40 @@ fn elements_esplora_token_from_env() -> Option<TokenProvider> {
 // (used via `#[from]` in `WalletError` and `ElementsWalletError`).
 pub use emvault::config::ConfigError;
 
+/// Which HSM vendor backs a federation token.
+///
+/// Selected per token by `APP_HSM_{N}_VENDOR` (default `dev`). `dev` is the
+/// SoftHSM shim (`DevBackend`); `securosys` is a real Securosys `CloudHSM`
+/// partition (`SecurosysBackend`). A federation may mix vendors freely.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HsmVendor {
+    /// SoftHSM dev shim (`libemvault_dev_hsm.so` + `DevBackend`).
+    #[default]
+    Dev,
+    /// Securosys `CloudHSM` (Primus provider + `SecurosysBackend`).
+    Securosys,
+}
+
 /// Configuration for a single federation HSM token.
 #[derive(Clone, Debug)]
 pub struct HsmTokenConfig {
     /// Human-readable token label. Doubles as the `SlotIdentifier::Label`
-    /// resolved against `SoftHSM` at session-open time.
+    /// resolved against the provider at session-open time.
     pub label: String,
     /// User PIN.
     pub pin: String,
-    /// Security-officer PIN (used by `init_dev_token`).
+    /// Security-officer PIN. Only used for `dev` tokens (`init_dev_token`);
+    /// empty for `securosys` (its partition is pre-provisioned).
     pub so_pin: String,
+    /// Which vendor backend serves this token.
+    pub vendor: HsmVendor,
+    /// Per-token PKCS#11 library. `None` ⇒ the app-wide `PKCS11_LIB` (the dev
+    /// shim). `securosys` tokens set this to `libprimusP11.so`.
+    pub library_path: Option<PathBuf>,
+    /// Seed for `derive_from_seed`. `None` ⇒ empty seed (the dev shim supplies
+    /// the seed for its slot). `securosys` tokens must set a real seed (its
+    /// SLIP-10 master gen rejects an empty seed).
+    pub seed: Option<Vec<u8>>,
 }
 
 /// Which chain backend the app syncs and broadcasts through.
@@ -511,10 +535,48 @@ fn discover_hsm_tokens() -> Result<Vec<HsmTokenConfig>, ConfigError> {
         };
         let pin_var: &'static str = Box::leak(format!("APP_HSM_{idx}_PIN").into_boxed_str());
         let so_pin_var: &'static str = Box::leak(format!("APP_HSM_{idx}_SO_PIN").into_boxed_str());
+        let vendor_var: &'static str = Box::leak(format!("APP_HSM_{idx}_VENDOR").into_boxed_str());
+        let lib_var: &'static str = Box::leak(format!("APP_HSM_{idx}_LIB").into_boxed_str());
+        let seed_var: &'static str = Box::leak(format!("APP_HSM_{idx}_SEED").into_boxed_str());
+
+        let vendor = match optional(vendor_var).as_deref() {
+            None | Some("dev") => HsmVendor::Dev,
+            Some("securosys") => HsmVendor::Securosys,
+            Some(other) => {
+                return Err(ConfigError::Parse {
+                    var: vendor_var,
+                    reason: format!("unknown HSM vendor '{other}' (expected dev|securosys)"),
+                });
+            }
+        };
+
+        // `dev` tokens are SoftHSM-initialized here, so they need a SO PIN;
+        // `securosys` partitions are pre-provisioned, so SO PIN is optional.
+        let so_pin = match vendor {
+            HsmVendor::Dev => require(so_pin_var)?,
+            HsmVendor::Securosys => optional(so_pin_var).unwrap_or_default(),
+        };
+
+        // `securosys` needs a real seed for SLIP-10 master generation; `dev`
+        // defaults to an empty seed (the shim supplies its slot's seed).
+        let seed = match optional(seed_var) {
+            Some(hex) => Some(hex_decode(&hex).map_err(|reason| ConfigError::Parse {
+                var: seed_var,
+                reason,
+            })?),
+            None if vendor == HsmVendor::Securosys => {
+                return Err(ConfigError::Missing { var: seed_var });
+            }
+            None => None,
+        };
+
         tokens.push(HsmTokenConfig {
             label,
             pin: require(pin_var)?,
-            so_pin: require(so_pin_var)?,
+            so_pin,
+            vendor,
+            library_path: optional(lib_var).map(PathBuf::from),
+            seed,
         });
     }
     Ok(tokens)

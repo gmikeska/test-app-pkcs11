@@ -35,11 +35,35 @@ use emvault::core::bitcoin::Network;
 use emvault::core::bitcoin::bip32::DerivationPath;
 use emvault::dev_signer::{DevBackend, DevConfig, init_dev_token};
 use emvault::pkcs11::config::SlotIdentifier;
-use emvault::pkcs11::{Pkcs11Config, Pkcs11Error, Pkcs11Session, Pkcs11Signer};
+use emvault::pkcs11::{HsmBackend, Pkcs11Config, Pkcs11Error, Pkcs11Session, Pkcs11Signer};
+use emvault_securosys::pkcs11::SecurosysBackend;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-use crate::config::{AppConfig, HsmTokenConfig};
+use crate::config::{AppConfig, HsmTokenConfig, HsmVendor};
+
+/// The PKCS#11 library a token loads through: its own `library_path`, else the
+/// app-wide dev shim (`default_lib`).
+fn token_lib(token: &HsmTokenConfig, default_lib: &std::path::Path) -> std::path::PathBuf {
+    token
+        .library_path
+        .clone()
+        .unwrap_or_else(|| default_lib.to_path_buf())
+}
+
+/// A fresh backend instance for `token` (one per PKCS#11 handle needed).
+fn token_backend(token: &HsmTokenConfig, lib: &std::path::Path) -> Box<dyn HsmBackend> {
+    match token.vendor {
+        HsmVendor::Dev => Box::new(DevBackend),
+        HsmVendor::Securosys => Box::new(SecurosysBackend::new(lib)),
+    }
+}
+
+/// Seed for `derive_from_seed`: the token's own seed, else empty (the dev shim
+/// supplies its slot's seed).
+fn token_seed(token: &HsmTokenConfig) -> &[u8] {
+    token.seed.as_deref().unwrap_or(&[])
+}
 
 /// Errors raised by the HSM fleet.
 #[derive(Debug, thiserror::Error)]
@@ -99,8 +123,17 @@ impl HsmFleet {
             shim_library_path: config.pkcs11_library_path.clone(),
         };
         for token in &config.hsm_tokens {
-            init_dev_token(&dev_cfg, &token.label, &token.so_pin, &token.pin)?;
-            tracing::info!(label = %token.label, "dev token initialized");
+            // Only the dev shim's SoftHSM tokens are initialized here; a
+            // `securosys` partition is pre-provisioned out of band.
+            match token.vendor {
+                HsmVendor::Dev => {
+                    init_dev_token(&dev_cfg, &token.label, &token.so_pin, &token.pin)?;
+                    tracing::info!(label = %token.label, "dev token initialized");
+                }
+                HsmVendor::Securosys => {
+                    tracing::info!(label = %token.label, "securosys token (pre-provisioned)");
+                }
+            }
         }
 
         Ok(Self {
@@ -203,12 +236,13 @@ fn derive_signers(
 ) -> Result<Vec<Pkcs11Signer>, HsmError> {
     let mut out: Vec<Pkcs11Signer> = Vec::with_capacity(tokens.len());
     for token in tokens {
+        let lib = token_lib(token, library_path);
         let cfg = Pkcs11Config::new(
-            library_path,
+            lib.clone(),
             SlotIdentifier::label(&token.label),
             token.pin.clone(),
             derivation_path.clone(),
-            Box::new(DevBackend),
+            token_backend(token, &lib),
         );
         let session = Pkcs11Session::open(&cfg, &SlotIdentifier::label(&token.label), &token.pin)?;
 
@@ -217,14 +251,14 @@ fn derive_signers(
             label,
             derivation_path.clone(),
             network,
-            Box::new(DevBackend),
+            token_backend(token, &lib),
         ) {
             Ok(s) => {
-                tracing::debug!(%label, token = %token.label, "loaded existing HSM key");
+                tracing::debug!(%label, token = %token.label, vendor = ?token.vendor, "loaded existing HSM key");
                 s
             }
             Err(Pkcs11Error::ObjectNotFound(_)) => {
-                tracing::info!(%label, token = %token.label, "deriving fresh HSM key");
+                tracing::info!(%label, token = %token.label, vendor = ?token.vendor, "deriving fresh HSM key");
                 let session =
                     Pkcs11Session::open(&cfg, &SlotIdentifier::label(&token.label), &token.pin)?;
                 Pkcs11Signer::derive_from_seed(
@@ -232,8 +266,8 @@ fn derive_signers(
                     label,
                     derivation_path,
                     network,
-                    Box::new(DevBackend),
-                    &[],
+                    token_backend(token, &lib),
+                    token_seed(token),
                 )?
             }
             Err(e) => return Err(e.into()),
@@ -249,12 +283,13 @@ fn delete_key_objects(
     label: &str,
 ) -> Result<(), HsmError> {
     for token in tokens {
+        let lib = token_lib(token, library_path);
         let cfg = Pkcs11Config::new(
-            library_path,
+            lib.clone(),
             SlotIdentifier::label(&token.label),
             token.pin.clone(),
             DerivationPath::default(),
-            Box::new(DevBackend),
+            token_backend(token, &lib),
         );
         let session = Pkcs11Session::open(&cfg, &SlotIdentifier::label(&token.label), &token.pin)?;
         emvault::pkcs11::key_ops::delete_key(&session, label)?;

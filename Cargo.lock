@@ -856,10 +856,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff765b99fc49f3116c9a908484486a2b92fd73c48da45c3a69716471c6cc56c6"
 dependencies = [
  "bitflags 2.13.0",
- "cryptoki-sys",
- "libloading",
+ "cryptoki-sys 0.5.0",
+ "libloading 0.8.9",
  "log",
  "secrecy",
+]
+
+[[package]]
+name = "cryptoki-sys"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d279ad423469b93e631f4bc53f277c7424cf01353c70eba685046d294dc042c7"
+dependencies = [
+ "libloading 0.7.4",
 ]
 
 [[package]]
@@ -868,7 +877,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1fd850498411e4057f1cba79e6e2bc7cbe960544c1046ab46d4685c403a1121"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1194,6 +1203,23 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "emvault-securosys"
+version = "0.1.0"
+dependencies = [
+ "bitcoin",
+ "cryptoki",
+ "cryptoki-sys 0.3.0",
+ "dotenvy",
+ "emvault-core",
+ "emvault-pkcs11",
+ "libloading 0.8.9",
+ "log",
+ "secrecy",
+ "serde",
  "thiserror 2.0.18",
 ]
 
@@ -2183,6 +2209,16 @@ name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "libloading"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b67380fd3b2fbe7527a606e18729d21c6f3951633d0500574c4dc22d2d638b9f"
+dependencies = [
+ "cfg-if",
+ "winapi",
+]
 
 [[package]]
 name = "libloading"
@@ -3981,6 +4017,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "emvault",
+ "emvault-securosys",
  "password-hash",
  "qrcode",
  "rand_core 0.6.4",

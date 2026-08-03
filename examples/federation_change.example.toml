@@ -30,12 +30,26 @@ threshold = 3
 # These labels must match APP_HSM_{N}_LABEL values from your .env file.
 # The tool validates that every listed token was discovered at startup.
 #
-# This example rotates from [app-1, app-2, app-3] to [app-1, app-3, app-4]:
-# HSM #2 is removed, HSM #4 is added, threshold stays at 3-of-3.
+# MULTI-VENDOR example: this new federation keeps two SoftHSM dev cosigners
+# (app-1, app-4) and rotates in a real **Securosys CloudHSM** partition
+# (YHRXBOTJLQWT). The vendor is chosen per token in .env; nothing changes here
+# beyond listing the Securosys token's label alongside the others.
+#
+# To make this "just work", inject one extra HSM token into .env (next free
+# APP_HSM index — the partition label is the token label). Run the tool as root
+# so the Primus provider can read /etc/primus:
+#
+#   APP_HSM_16_LABEL=YHRXBOTJLQWT              # Securosys partition = token label
+#   APP_HSM_16_VENDOR=securosys               # selects SecurosysBackend
+#   APP_HSM_16_LIB=/usr/lib/libprimusP11.so   # Primus PKCS#11 provider
+#   APP_HSM_16_PIN=<pkcs11-user-pin>
+#   APP_HSM_16_SEED=<64-byte-hex-slip10-seed> # required for securosys
+#
+# Dev (SoftHSM) tokens need none of VENDOR/LIB/SEED — they default to the shim.
 signers = [
     "asterism-pkcs11-app-1",
-    "asterism-pkcs11-app-3",
     "asterism-pkcs11-app-4",
+    "YHRXBOTJLQWT",
 ]
 
 # ---------------------------------------------------------------------------

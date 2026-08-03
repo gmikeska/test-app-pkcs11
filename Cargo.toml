@@ -21,6 +21,11 @@ publish = false
 # (D6); at that point set this to "0.6" and drop the patch below.
 emvault = { version = "0.7", features = ["pkcs11", "elements", "dev-signer", "esplora", "electrum", "elements-electrum", "elements-esplora"] }
 
+# Securosys CloudHSM backend — lets the federation include a real-HSM cosigner
+# (vendor-neutral fleet: `emvault::pkcs11::HsmBackend`). Path-pinned to the same
+# emvault-pkcs11 the umbrella re-exports, so `Pkcs11Signer`/`HsmBackend` types match.
+emvault-securosys = { version = "0.1", path = "../emvault-securosys" }
+
 # Chain + Elements stacks are NOT pinned here — their types cross the EmVault
 # API, so we consume them through the ecosystem's canonical re-exports:
 #   Bitcoin:  emvault::core::{bitcoin, miniscript, bdk_wallet,
