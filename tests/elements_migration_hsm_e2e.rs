@@ -55,7 +55,6 @@ use uuid::Uuid;
 use emvault::core::bitcoin::Network;
 use emvault::core::bitcoin::bip32::DerivationPath;
 use emvault::core::signer::Signer;
-use emvault::dev_signer::DevBackend;
 use emvault::elements::descriptor::{CtDescriptorBuilder, CtKeyMode, to_multipath_string};
 use emvault::elements::signer::ElementsSigner;
 use emvault::elements::sync::{
@@ -67,6 +66,7 @@ use emvault::elements::{
     captured_from_output, finalize_p2wsh_pset,
 };
 use emvault::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
+use emvault_dev_signer::DevBackend;
 
 use test_app_pkcs11::elements_sync::{PgBlockStore, PgWalletUtxoStore, RpcChainSource};
 

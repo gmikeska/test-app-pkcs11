@@ -1106,7 +1106,6 @@ name = "emvault"
 version = "0.7.0"
 dependencies = [
  "emvault-core",
- "emvault-dev-signer",
  "emvault-elements",
  "emvault-pkcs11",
  "emvault-xpub",
@@ -4017,6 +4016,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "emvault",
+ "emvault-dev-signer",
  "emvault-securosys",
  "password-hash",
  "qrcode",

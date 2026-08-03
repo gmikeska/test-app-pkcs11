@@ -61,8 +61,8 @@ use emvault::core::federation::Federation;
 use emvault::core::network::NetworkType;
 
 use emvault::core::bitcoincore_rpc::{Auth, Client, RpcApi};
-use emvault::dev_signer::DevBackend;
 use emvault::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
+use emvault_dev_signer::DevBackend;
 use serde_json::json;
 use test_app_pkcs11::wallet::NetworkPatchedSigner;
 

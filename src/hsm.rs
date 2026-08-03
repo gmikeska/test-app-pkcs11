@@ -2,7 +2,7 @@
 //!
 //! ## Token initialization
 //!
-//! At startup, [`HsmFleet::new`] calls [`emvault::dev_signer::init_dev_token`]
+//! At startup, [`HsmFleet::new`] calls [`emvault_dev_signer::init_dev_token`]
 //! for each discovered token. The helper is idempotent — already
 //! initialized tokens are left alone.
 //!
@@ -19,7 +19,7 @@
 //!    (`Pkcs11Signer::derive_from_seed` with an empty seed — the shim
 //!    looks up the slot's preconfigured BIP-39 mnemonic).
 //!
-//! [`emvault::dev_signer::setup_dev_federation`] would be the obvious
+//! [`emvault_dev_signer::setup_dev_federation`] would be the obvious
 //! shortcut, but it hardcodes `Network::Testnet`. We bypass it so the
 //! signers honour the `BITCOIN_NETWORK` from `.env` (typically
 //! `Network::Regtest`).
@@ -33,9 +33,9 @@ use std::sync::Arc;
 
 use emvault::core::bitcoin::Network;
 use emvault::core::bitcoin::bip32::DerivationPath;
-use emvault::dev_signer::{DevBackend, DevConfig, init_dev_token};
 use emvault::pkcs11::config::SlotIdentifier;
 use emvault::pkcs11::{HsmBackend, Pkcs11Config, Pkcs11Error, Pkcs11Session, Pkcs11Signer};
+use emvault_dev_signer::{DevBackend, DevConfig, init_dev_token};
 use emvault_securosys::pkcs11::SecurosysBackend;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
@@ -71,7 +71,7 @@ pub enum HsmError {
     /// Token initialization failure (programmatic `pkcs11-tool
     /// --init-token` equivalent).
     #[error("dev token initialization failed: {0}")]
-    InitToken(#[from] emvault::dev_signer::DevSetupError),
+    InitToken(#[from] emvault_dev_signer::DevSetupError),
 
     /// Underlying [`emvault::pkcs11`] error (session open, key derive,
     /// xpub read, etc.).

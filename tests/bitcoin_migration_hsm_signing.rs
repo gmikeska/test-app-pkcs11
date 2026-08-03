@@ -50,8 +50,8 @@ use emvault::core::descriptor::{KeyMode, to_multipath_string};
 use emvault::core::federation::Federation;
 use emvault::core::network::NetworkType;
 
-use emvault::dev_signer::DevBackend;
 use emvault::pkcs11::{Pkcs11Config, Pkcs11Session, Pkcs11Signer, SlotIdentifier, key_ops};
+use emvault_dev_signer::DevBackend;
 use test_app_pkcs11::wallet::NetworkPatchedSigner;
 
 const NETWORK: Network = Network::Regtest;
