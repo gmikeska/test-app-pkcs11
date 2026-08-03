@@ -1094,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "emvault"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "emvault-core",
  "emvault-dev-signer",
@@ -1106,7 +1106,7 @@ dependencies = [
 
 [[package]]
 name = "emvault-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bdk_bitcoind_rpc",
  "bdk_wallet",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "emvault-dev-signer"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bitcoin",
  "cryptoki",
@@ -1142,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "emvault-electrum"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bdk_electrum",
  "bdk_wallet",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "emvault-elements"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bitcoin",
  "bitcoincore-rpc",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "emvault-esplora"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bdk_wallet",
  "bitcoin",
@@ -1181,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "emvault-pkcs11"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bdk_wallet",
  "bitcoin",
@@ -1199,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "emvault-xpub"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bip39",
  "bitcoin",
@@ -1870,7 +1870,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "system-configuration 0.7.0",
  "tokio",
  "tower-service",
@@ -2766,7 +2766,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2804,9 +2804,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4761,7 +4761,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
