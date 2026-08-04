@@ -242,7 +242,6 @@ fn derive_signers(
             SlotIdentifier::label(&token.label),
             token.pin.clone(),
             derivation_path.clone(),
-            token_backend(token, &lib),
         );
         let session = Pkcs11Session::open(&cfg, &SlotIdentifier::label(&token.label), &token.pin)?;
 
@@ -289,7 +288,6 @@ fn delete_key_objects(
             SlotIdentifier::label(&token.label),
             token.pin.clone(),
             DerivationPath::default(),
-            token_backend(token, &lib),
         );
         let session = Pkcs11Session::open(&cfg, &SlotIdentifier::label(&token.label), &token.pin)?;
         emvault::pkcs11::key_ops::delete_key(&session, label)?;

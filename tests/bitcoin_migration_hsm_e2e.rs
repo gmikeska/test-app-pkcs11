@@ -173,7 +173,6 @@ impl HsmFed {
                     SlotIdentifier::label(token_label),
                     pin.clone(),
                     path.clone(),
-                    Box::new(DevBackend),
                 );
                 let session = Pkcs11Session::open(&cfg, &SlotIdentifier::label(token_label), pin)
                     .expect("open dev HSM session");

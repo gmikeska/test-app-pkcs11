@@ -136,7 +136,6 @@ fn hsm_account(env: &DevEnv, key_tag: &str, acct: i32, blinding_byte: u8) -> Hsm
                 SlotIdentifier::label(token_label),
                 pin.clone(),
                 path.clone(),
-                Box::new(DevBackend),
             );
             let session = Pkcs11Session::open(&cfg, &SlotIdentifier::label(token_label), pin)
                 .expect("open dev HSM session");
