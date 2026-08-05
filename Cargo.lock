@@ -1207,8 +1207,9 @@ dependencies = [
 
 [[package]]
 name = "emvault-securosys"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
+ "base64 0.22.1",
  "bitcoin",
  "cryptoki",
  "cryptoki-sys 0.3.0",
@@ -1217,8 +1218,10 @@ dependencies = [
  "emvault-pkcs11",
  "libloading 0.8.9",
  "log",
+ "reqwest 0.12.28",
  "secrecy",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

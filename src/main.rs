@@ -118,10 +118,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Eager-seed wallets for the three seeded users so the first request
-    // is responsive (cryptoki BIP-32 derivation across 3 tokens for a
-    // fresh user is several seconds).
-    seed_test_wallets(&pool, &wallet_manager).await;
-    seed_test_elements_wallets(&pool, &elements_wallet_manager).await;
+    // is responsive (cryptoki BIP-32 derivation across the token pool for a
+    // fresh user is several seconds). Skippable via `APP_SKIP_EAGER_SEED=1`
+    // for fast startup (each user then provisions on their first request).
+    if std::env::var("APP_SKIP_EAGER_SEED").is_err() {
+        seed_test_wallets(&pool, &wallet_manager).await;
+        seed_test_elements_wallets(&pool, &elements_wallet_manager).await;
+    } else {
+        tracing::info!("APP_SKIP_EAGER_SEED set — skipping eager wallet seed");
+    }
 
     // Background block-scan ingestion for all Elements wallets (one task,
     // node-friendly: each block is fetched once and matched against every

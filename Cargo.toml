@@ -27,7 +27,7 @@ emvault = { version = "0.7", features = ["pkcs11", "elements", "esplora", "elect
 # feature or facade change required. Both path-pin the same emvault-pkcs11 the
 # umbrella re-exports, so `Pkcs11Signer`/`HsmBackend` types unify.
 emvault-dev-signer = { version = "0.7.0", path = "../emvault-dev-signer" }
-emvault-securosys  = { version = "0.1",   path = "../emvault-securosys" }
+emvault-securosys  = { version = "0.8",   path = "../emvault-securosys", features = ["tsb"] }
 
 # Chain + Elements stacks are NOT pinned here — their types cross the EmVault
 # API, so we consume them through the ecosystem's canonical re-exports:

@@ -28,7 +28,7 @@ use emvault::core::bitcoin::{
 };
 use emvault::core::bitcoincore_rpc::{self, Auth, Client as RpcClient, RpcApi};
 use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
-use emvault::core::descriptor::{KeyMode, to_multipath_string};
+use emvault::core::descriptor::{KeyMode, ScriptType, available_script_types, to_multipath_string};
 use emvault::core::electrum::{ElectrumBackend, ElectrumError, WatchPool};
 use emvault::core::error::PsbtError;
 use emvault::core::esplora::{EsploraBackend, EsploraSyncError, SyncMode};
@@ -196,6 +196,14 @@ pub enum WalletError {
     #[error("federation construction failed: {0}")]
     Federation(#[from] emvault::core::error::FederationError),
 
+    /// The configured `APP_SCRIPT_TYPE` isn't signable by this federation's
+    /// signer set (e.g. taproot requested but a cosigner lacks taproot support).
+    #[error("configured script type {requested:?} is not available for this signer set")]
+    ScriptTypeUnavailable {
+        /// The requested-but-ineligible script type.
+        requested: ScriptType,
+    },
+
     /// `UnsignedPsbt::new` / `SigningCoordinator` rejected the PSBT.
     #[error("PSBT pipeline error: {0}")]
     Psbt(#[from] emvault::core::error::PsbtError),
@@ -248,6 +256,8 @@ pub struct WalletManager {
     bip48_coin_index: u32,
     fed_threshold: u32,
     fed_signer_indices: Vec<usize>,
+    /// Descriptor script type for new federations (`wsh` or `tr`).
+    fed_script_type: ScriptType,
     hsm: Arc<HsmFleet>,
     /// Nodeless chain backend, when `APP_CHAIN_BACKEND` selects an Esplora mode.
     /// `None` = Bitcoin Core RPC (the default emitter path).
@@ -331,6 +341,7 @@ impl WalletManager {
             bip48_coin_index: config.bip48_coin_index,
             fed_threshold: config.fed_threshold,
             fed_signer_indices: config.fed_signer_indices.clone(),
+            fed_script_type: config.fed_script_type,
             hsm,
             esplora,
             electrum,
@@ -454,11 +465,21 @@ impl WalletManager {
             .iter()
             .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), self.network))
             .collect();
-        let fed = Federation::with_key_mode(
+        // Gate the configured script type against what this signer set can
+        // actually sign — a taproot federation needs every cosigner
+        // taproot-capable. (All-HSM sets are, but keep the check honest.)
+        let eligible = available_script_types(&patched);
+        if !eligible.contains(&self.fed_script_type) {
+            return Err(WalletError::ScriptTypeUnavailable {
+                requested: self.fed_script_type,
+            });
+        }
+        let fed = Federation::with_config(
             self.fed_threshold,
             patched,
             NetworkType::Bitcoin(self.network),
             KeyMode::Ranged,
+            self.fed_script_type,
         )?;
         let multipath = to_multipath_string(
             fed.try_descriptor()
@@ -599,11 +620,20 @@ impl WalletManager {
             matched.push(NetworkPatchedSigner::new(signer.clone(), network));
         }
 
-        Federation::with_key_mode(
+        // Reconstruct with the SAME script type the stored descriptor was
+        // built as — a taproot (`tr(...)`) version must rebuild as taproot, not
+        // silently fall back to wsh (which would derive the wrong addresses).
+        let script_type = if version.descriptor.trim_start().starts_with("tr(") {
+            ScriptType::Tr
+        } else {
+            ScriptType::Wsh
+        };
+        Federation::with_config(
             threshold,
             matched,
             NetworkType::Bitcoin(network),
             KeyMode::Ranged,
+            script_type,
         )
         .map_err(|e| WalletError::CreateWallet(e.to_string()))
     }
@@ -682,11 +712,12 @@ impl WalletManager {
                 .iter()
                 .map(|&idx| NetworkPatchedSigner::new(signers_arc[idx].clone(), self.network))
                 .collect();
-            Federation::with_key_mode(
+            Federation::with_config(
                 self.fed_threshold,
                 patched_owned,
                 NetworkType::Bitcoin(self.network),
                 KeyMode::Ranged,
+                self.fed_script_type,
             )?
         };
 

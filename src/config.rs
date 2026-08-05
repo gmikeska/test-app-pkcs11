@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use emvault::config::{hex_decode, optional, require};
+use emvault::core::ScriptType;
 use emvault::core::bitcoin::Network;
 use emvault::core::bitcoin::bip32::{ChildNumber, DerivationPath};
 use emvault::elements::ElementsNetwork;
@@ -56,11 +57,11 @@ pub use emvault::config::ConfigError;
 /// Which HSM vendor backs a federation token.
 ///
 /// Selected per token by `APP_HSM_{N}_VENDOR` (default `dev`). `dev` is the
-/// SoftHSM shim (`DevBackend`); `securosys` is a real Securosys `CloudHSM`
+/// `SoftHSM` shim (`DevBackend`); `securosys` is a real Securosys `CloudHSM`
 /// partition (`SecurosysBackend`). A federation may mix vendors freely.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HsmVendor {
-    /// SoftHSM dev shim (`libemvault_dev_hsm.so` + `DevBackend`).
+    /// `SoftHSM` dev shim (`libemvault_dev_hsm.so` + `DevBackend`).
     #[default]
     Dev,
     /// Securosys `CloudHSM` (Primus provider + `SecurosysBackend`).
@@ -203,6 +204,10 @@ pub struct AppConfig {
     /// When set, only these tokens participate in new wallet federations.
     /// The full HSM pool remains available for migration tools.
     pub fed_signer_indices: Vec<usize>,
+    /// Default descriptor script type for new federations
+    /// (`APP_SCRIPT_TYPE=taproot|segwit`, default `segwit`). Migrations may
+    /// override this per-run; see the migration example's `script_type` config.
+    pub fed_script_type: ScriptType,
 
     // -- Elements chain config --
     /// Elements daemon JSON-RPC base URL.
@@ -351,6 +356,19 @@ impl AppConfig {
                 })?,
             None => n,
         };
+        let fed_script_type = match optional("APP_SCRIPT_TYPE") {
+            Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+                "taproot" | "tr" | "p2tr" => ScriptType::Tr,
+                "segwit" | "wsh" | "p2wsh" => ScriptType::Wsh,
+                other => {
+                    return Err(ConfigError::Parse {
+                        var: "APP_SCRIPT_TYPE",
+                        reason: format!("expected 'taproot' or 'segwit', got '{other}'"),
+                    });
+                }
+            },
+            None => ScriptType::Wsh,
+        };
         let fed_signer_indices: Vec<usize> = match optional("APP_FED_SIGNERS") {
             Some(s) => {
                 let mut indices = Vec::new();
@@ -479,6 +497,7 @@ impl AppConfig {
             hsm_tokens,
             fed_threshold,
             fed_signer_indices,
+            fed_script_type,
             elements_rpc_url,
             elements_rpc_user,
             elements_rpc_password,

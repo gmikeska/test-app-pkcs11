@@ -44,7 +44,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use emvault::core::bitcoin::Amount;
-use emvault::core::descriptor::KeyMode;
+use emvault::core::descriptor::{KeyMode, ScriptType};
 use emvault::core::signer::Signer;
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -72,6 +72,30 @@ struct MigrationConfig {
 struct NewFederationConfig {
     threshold: u32,
     signers: Vec<String>,
+    /// Optional per-migration override of the descriptor script type
+    /// (`"taproot"` | `"segwit"`). When absent, the app's default
+    /// (`APP_SCRIPT_TYPE`, via `AppConfig::fed_script_type`) is used — so a
+    /// migration can move a `wsh` v0 vault onto a `tr` v1 vault by setting this.
+    #[serde(default)]
+    script_type: Option<String>,
+}
+
+/// Resolve the next version's script type: the migration config's override if
+/// present, else the app-wide default. Exits on an unrecognised value.
+fn resolve_migration_script_type(cfg: &MigrationConfig, app_config: &AppConfig) -> ScriptType {
+    match cfg.federation.script_type.as_deref() {
+        None => app_config.fed_script_type,
+        Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "taproot" | "tr" | "p2tr" => ScriptType::Tr,
+            "segwit" | "wsh" | "p2wsh" => ScriptType::Wsh,
+            other => {
+                eprintln!(
+                    "error: [federation].script_type must be 'taproot' or 'segwit', got '{other}'"
+                );
+                std::process::exit(1);
+            }
+        },
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1876,11 +1900,12 @@ async fn main() {
                 .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
                 .collect();
 
-            let new_fed = match emvault::core::Federation::with_key_mode(
+            let new_fed = match emvault::core::Federation::with_config(
                 cfg.federation.threshold,
                 new_signers,
                 emvault::core::network::NetworkType::Bitcoin(app_config.network),
                 KeyMode::Ranged,
+                resolve_migration_script_type(&cfg, &app_config),
             ) {
                 Ok(f) => f,
                 Err(e) => {
@@ -2047,11 +2072,12 @@ async fn main() {
                 .map(|&idx| NetworkPatchedSigner::new(all_signers[idx].clone(), app_config.network))
                 .collect();
 
-            let new_federation = match emvault::core::Federation::with_key_mode(
+            let new_federation = match emvault::core::Federation::with_config(
                 cfg.federation.threshold,
                 new_signers,
                 emvault::core::network::NetworkType::Bitcoin(app_config.network),
                 KeyMode::Ranged,
+                resolve_migration_script_type(&cfg, &app_config),
             ) {
                 Ok(f) => f,
                 Err(e) => {
