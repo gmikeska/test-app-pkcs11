@@ -742,8 +742,13 @@ fn display_elements_batched_plan(
         })
         .collect();
 
-    match ElementsAccountForAccountBatchedSweep::new(fee_idx, small_threshold_sat)
-        .plan(&account_sets, fee_rate_sat_per_vb)
+    // Preview policy asset matches the synthetic UTXOs' `AssetId::default()`.
+    match ElementsAccountForAccountBatchedSweep::new(
+        fee_idx,
+        small_threshold_sat,
+        elements::AssetId::default(),
+    )
+    .plan(&account_sets, fee_rate_sat_per_vb)
     {
         Ok(plan) => {
             let total = plan.sweep_transactions.len();
@@ -1163,6 +1168,10 @@ async fn run_elements_migration(
     // `account-for-account-batched` → one tx per large account + a small bundle,
     // fee account last. Pure amount math (no node).
     let fee_idx_u32 = u32::try_from(fee_idx).unwrap_or(0);
+    // The chain's policy (L-BTC) asset — the pool the migration fee is paid
+    // from. Sourced from the (possibly custom-regtest) LWK network so it matches
+    // the node, exactly as the asset spend/send path does.
+    let policy_asset = *lwk_net.policy_asset();
     let account_sets: Vec<ElementsAccountUtxoSet> = exec_accounts
         .iter()
         .map(|a| ElementsAccountUtxoSet {
@@ -1176,10 +1185,11 @@ async fn run_elements_migration(
             ElementsAccountForAccountBatchedSweep::new(
                 fee_idx_u32,
                 cfg.migration.small_account_threshold,
+                policy_asset,
             )
             .plan(&account_sets, cfg.migration.fee_rate_sat_per_vb)
         } else {
-            ElementsAccountForAccountSweep::new(fee_idx_u32)
+            ElementsAccountForAccountSweep::new(fee_idx_u32, policy_asset)
                 .plan(&account_sets, cfg.migration.fee_rate_sat_per_vb)
         };
         match result {
@@ -1300,48 +1310,60 @@ async fn run_elements_migration(
             let mut fee_seed_used = false;
 
             for txp in &plan.sweep_transactions {
-                // Customer (account_idx, amount) pairs for this tx, taken from
-                // the crate plan's outputs (the fee-change output is resolved by
-                // the executor per `is_fee_final`, below).
-                let customers: Vec<(i32, u64)> = txp
-                    .outputs
-                    .iter()
-                    .filter_map(|o| match o {
-                        ElementsSweepOutput::Customer {
-                            account_idx,
-                            amount_sat,
-                            ..
-                        } => Some((i32::try_from(*account_idx).unwrap_or(0), *amount_sat)),
-                        ElementsSweepOutput::FeeChange { .. } => None,
-                    })
-                    .collect();
-
-                let mut inputs: Vec<(emvault::elements::CapturedUtxo, &ElementsWollet)> =
-                    Vec::new();
-                let mut recipients: Vec<(elements::Address, u64)> = Vec::new();
-                let mut report: Vec<(i32, u64)> = Vec::new();
-                let mut owner: std::collections::HashMap<elements::OutPoint, i32> =
-                    std::collections::HashMap::new();
-
-                for (cidx, amt) in &customers {
-                    let a = exec_accounts
-                        .iter()
-                        .find(|a| a.account_idx == *cidx)
-                        .ok_or("planned customer account missing from exec set")?;
-                    let w = wollet_of(*cidx);
-                    for u in &a.utxos {
-                        owner.insert(u.outpoint, *cidx);
-                        inputs.push((u.clone(), w));
-                    }
-                    recipients.push((a.dest.clone(), *amt));
-                    report.push((*cidx, *amt));
-                }
-
+                // Resolve the fee destination first: the fee account's own
+                // non-policy assets (in the final tx) are paid to it.
                 let fee_dest = if txp.is_fee_final {
                     &fee_new_dest
                 } else {
                     &fee_old_addr
                 };
+
+                // One recipient per (account, asset) Customer output; each
+                // account's inputs are added exactly once (an account now has
+                // multiple outputs — one per asset). The fee account's policy
+                // change is produced by the L-BTC drain in `build_migration_pset`;
+                // its non-policy assets get explicit recipients to `fee_dest`.
+                let mut inputs: Vec<(emvault::elements::CapturedUtxo, &ElementsWollet)> =
+                    Vec::new();
+                let mut recipients: Vec<(elements::Address, u64, elements::AssetId)> = Vec::new();
+                let mut report: Vec<(i32, u64)> = Vec::new();
+                let mut owner: std::collections::HashMap<elements::OutPoint, i32> =
+                    std::collections::HashMap::new();
+                let mut added_accounts: std::collections::HashSet<i32> =
+                    std::collections::HashSet::new();
+
+                for o in &txp.outputs {
+                    match o {
+                        ElementsSweepOutput::Customer {
+                            account_idx,
+                            amount_sat,
+                            asset,
+                            ..
+                        } => {
+                            let cidx = i32::try_from(*account_idx).unwrap_or(0);
+                            let a = exec_accounts
+                                .iter()
+                                .find(|a| a.account_idx == cidx)
+                                .ok_or("planned customer account missing from exec set")?;
+                            if added_accounts.insert(cidx) {
+                                let w = wollet_of(cidx);
+                                for u in &a.utxos {
+                                    owner.insert(u.outpoint, cidx);
+                                    inputs.push((u.clone(), w));
+                                }
+                            }
+                            recipients.push((a.dest.clone(), *amount_sat, *asset));
+                            report.push((cidx, *amount_sat));
+                        }
+                        ElementsSweepOutput::FeeChange {
+                            amount_sat, asset, ..
+                        } => {
+                            if *asset != policy_asset {
+                                recipients.push((fee_dest.clone(), *amount_sat, *asset));
+                            }
+                        }
+                    }
+                }
 
                 if txp.is_fee_final {
                     // Remaining real fee UTXOs (skip the chain seed if used)
@@ -1415,35 +1437,49 @@ async fn run_elements_migration(
                 .sweep_transactions
                 .first()
                 .ok_or("account-for-account plan produced no transaction")?;
-            let mut customers: Vec<(elements::Address, u64)> = Vec::new();
+            // Fee destination = the fee account's new-federation address.
+            let fee_dest = exec_accounts
+                .iter()
+                .find(|a| a.is_fee)
+                .map(|a| a.dest.clone())
+                .ok_or("fee account has no UTXOs to pay the migration fee")?;
+
+            // One recipient per (account, asset): customer outputs plus the fee
+            // account's own non-policy assets (its L-BTC change comes from the
+            // drain in `build_migration_pset`).
+            let mut customers: Vec<(elements::Address, u64, elements::AssetId)> = Vec::new();
             let mut report: Vec<(i32, u64)> = Vec::new();
             for o in &sweep.outputs {
-                if let ElementsSweepOutput::Customer {
-                    account_idx,
-                    address,
-                    amount_sat,
-                } = o
-                {
-                    customers.push((address.clone(), *amount_sat));
-                    report.push((i32::try_from(*account_idx).unwrap_or(0), *amount_sat));
+                match o {
+                    ElementsSweepOutput::Customer {
+                        account_idx,
+                        address,
+                        amount_sat,
+                        asset,
+                    } => {
+                        customers.push((address.clone(), *amount_sat, *asset));
+                        report.push((i32::try_from(*account_idx).unwrap_or(0), *amount_sat));
+                    }
+                    ElementsSweepOutput::FeeChange {
+                        amount_sat, asset, ..
+                    } => {
+                        if *asset != policy_asset {
+                            customers.push((fee_dest.clone(), *amount_sat, *asset));
+                        }
+                    }
                 }
             }
 
             let mut inputs: Vec<(emvault::elements::CapturedUtxo, &ElementsWollet)> = Vec::new();
             let mut owner: std::collections::HashMap<elements::OutPoint, i32> =
                 std::collections::HashMap::new();
-            let mut fee_dest: Option<elements::Address> = None;
             for a in &exec_accounts {
                 let w = wollet_of(a.account_idx);
                 for u in &a.utxos {
                     owner.insert(u.outpoint, a.account_idx);
                     inputs.push((u.clone(), w));
                 }
-                if a.is_fee {
-                    fee_dest = Some(a.dest.clone());
-                }
             }
-            let fee_dest = fee_dest.ok_or("fee account has no UTXOs to pay the migration fee")?;
             let fee_wollet = wollet_of(fee_idx);
 
             let blinded =

@@ -280,7 +280,10 @@ async fn elements_migration_fee_account_pays_e2e() {
         let blinded = build_migration_pset(
             &w_fee,
             &inputs,
-            &[(c1_dest.clone(), c1_bal), (c2_dest.clone(), c2_bal)],
+            &[
+                (c1_dest.clone(), c1_bal, policy),
+                (c2_dest.clone(), c2_bal, policy),
+            ],
             &fee_dest,
             2000.0,
         )
@@ -686,7 +689,7 @@ async fn elements_batched_migration_e2e() {
             let blinded = build_migration_pset(
                 &w_fee,
                 &inputs,
-                &[(cl_dest.clone(), LARGE)],
+                &[(cl_dest.clone(), LARGE, policy)],
                 &fee_old_addr,
                 2000.0,
             )
@@ -713,7 +716,10 @@ async fn elements_batched_migration_e2e() {
             let blinded = build_migration_pset(
                 &w_fee,
                 &inputs,
-                &[(cs1_dest.clone(), SMALL1), (cs2_dest.clone(), SMALL2)],
+                &[
+                    (cs1_dest.clone(), SMALL1, policy),
+                    (cs2_dest.clone(), SMALL2, policy),
+                ],
                 &fee_old_addr,
                 2000.0,
             )

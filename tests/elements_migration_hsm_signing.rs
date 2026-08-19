@@ -313,7 +313,10 @@ fn elements_a2a_hsm_signing_offline() {
     let blinded = build_migration_pset(
         &fee.wollet,
         &inputs,
-        &[(c1_dest.clone(), LBTC_SAT), (c2_dest.clone(), LBTC_SAT)],
+        &[
+            (c1_dest.clone(), LBTC_SAT, lbtc()),
+            (c2_dest.clone(), LBTC_SAT, lbtc()),
+        ],
         &fee_dest,
         2000.0,
     )
@@ -418,7 +421,7 @@ fn elements_batched_hsm_signing_offline() {
     let blinded = build_migration_pset(
         &fee.wollet,
         &inputs,
-        &[(cl_dest.clone(), LARGE)],
+        &[(cl_dest.clone(), LARGE, lbtc())],
         &fee_old,
         2000.0,
     )
@@ -454,7 +457,10 @@ fn elements_batched_hsm_signing_offline() {
     let blinded = build_migration_pset(
         &fee.wollet,
         &inputs,
-        &[(cs1_dest.clone(), SMALL1), (cs2_dest.clone(), SMALL2)],
+        &[
+            (cs1_dest.clone(), SMALL1, lbtc()),
+            (cs2_dest.clone(), SMALL2, lbtc()),
+        ],
         &fee_old,
         2000.0,
     )

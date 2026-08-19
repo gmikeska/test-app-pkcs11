@@ -375,6 +375,7 @@ async fn elements_a2a_migration_hsm_e2e() {
     let key_tag = format!("{:x}", std::process::id());
 
     let (net, lwk) = live_network(&env);
+    let policy = *lwk.policy_asset();
     let pool = PgPool::connect(&env.database_url).await.unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
     let tag = Uuid::new_v4();
@@ -484,7 +485,10 @@ async fn elements_a2a_migration_hsm_e2e() {
         let blinded = build_migration_pset(
             &w_fee,
             &inputs,
-            &[(c1_dest.clone(), c1_bal), (c2_dest.clone(), c2_bal)],
+            &[
+                (c1_dest.clone(), c1_bal, policy),
+                (c2_dest.clone(), c2_bal, policy),
+            ],
             &fee_dest,
             2000.0,
         )
@@ -584,6 +588,7 @@ async fn elements_batched_migration_hsm_e2e() {
     let key_tag = format!("{:x}b", std::process::id());
 
     let (net, lwk) = live_network(&env);
+    let policy = *lwk.policy_asset();
     let pool = PgPool::connect(&env.database_url).await.unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
     let tag = Uuid::new_v4();
@@ -738,7 +743,7 @@ async fn elements_batched_migration_hsm_e2e() {
             let blinded = build_migration_pset(
                 &w_fee,
                 &inputs,
-                &[(cl_dest.clone(), LARGE)],
+                &[(cl_dest.clone(), LARGE, policy)],
                 &fee_old_addr,
                 2000.0,
             )
@@ -781,7 +786,10 @@ async fn elements_batched_migration_hsm_e2e() {
             let blinded = build_migration_pset(
                 &w_fee,
                 &inputs,
-                &[(cs1_dest.clone(), SMALL1), (cs2_dest.clone(), SMALL2)],
+                &[
+                    (cs1_dest.clone(), SMALL1, policy),
+                    (cs2_dest.clone(), SMALL2, policy),
+                ],
                 &fee_old_addr,
                 2000.0,
             )
