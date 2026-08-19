@@ -24,7 +24,8 @@ use emvault::elements::nodeless::{NodelessSync, TokenProvider};
 use emvault::elements::signer::ElementsSigner;
 use emvault::elements::sync::{ElementsChainSource, KeychainKind, WalletId, WalletUtxoStore};
 use emvault::elements::{
-    ElementsNetwork, ElementsWollet, LwkNetwork, build_spend_pset, finalize_p2wsh_pset,
+    ElementsNetwork, ElementsWollet, LwkNetwork, build_asset_spend_pset, build_spend_pset,
+    finalize_p2wsh_pset,
 };
 use sqlx::PgPool;
 use tokio::sync::Mutex as AsyncMutex;
@@ -559,6 +560,17 @@ pub struct ElementsBroadcastTransaction {
     pub fee_sat: i64,
 }
 
+/// One asset's captured-UTXO balance, for the per-asset receive rollup.
+#[derive(Debug, Clone)]
+pub struct AssetBalance {
+    /// Asset id (hex).
+    pub asset_id: String,
+    /// Total spendable amount in the asset's base units (satoshi-equivalent).
+    pub sat: u64,
+    /// `sat` scaled by 1e8 for display (Elements assets use 8 decimals).
+    pub amount: f64,
+}
+
 pub struct UserElementsWallet {
     user_id: Uuid,
     wallet_id: Uuid,
@@ -698,6 +710,41 @@ impl UserElementsWallet {
             untrusted_pending: 0.0,
             immature: 0.0,
         })
+    }
+
+    /// Per-asset balances from captured UTXOs: one [`AssetBalance`] per distinct
+    /// asset, sorted by descending amount. Unlike [`Self::balance`] (which sums
+    /// every asset into a single L-BTC figure), this keeps issued assets
+    /// distinct so they're visible on the receive page.
+    pub async fn asset_balances(&self) -> Result<Vec<AssetBalance>, ElementsWalletError> {
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        let rows = tokio::task::spawn_blocking(
+            move || -> Result<Vec<(String, u64)>, ElementsWalletError> {
+                let mut by_asset: std::collections::BTreeMap<String, u64> =
+                    std::collections::BTreeMap::new();
+                for u in store.list_unspent(wid).map_err(pipeline_err)? {
+                    *by_asset.entry(u.asset().to_string()).or_default() += u.value();
+                }
+                Ok(by_asset.into_iter().collect())
+            },
+        )
+        .await
+        .expect("spawn_blocking join")?;
+        let mut out: Vec<AssetBalance> = rows
+            .into_iter()
+            .map(|(asset_id, sat)| {
+                #[allow(clippy::cast_precision_loss)]
+                let amount = sat as f64 / 100_000_000.0;
+                AssetBalance {
+                    asset_id,
+                    sat,
+                    amount,
+                }
+            })
+            .collect();
+        out.sort_by_key(|b| std::cmp::Reverse(b.sat));
+        Ok(out)
     }
 
     pub async fn reveal_addresses(
@@ -982,6 +1029,137 @@ impl UserElementsWallet {
 
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let amount_sat_i = (amount_btc * 100_000_000.0).round() as i64;
+
+        db::insert_elements_transaction(
+            &self.pool,
+            &db::NewElementsTransaction {
+                wallet_id: self.wallet_id,
+                txid: &txid,
+                recipient,
+                amount_sat: amount_sat_i,
+                fee_sat,
+                raw_tx_hex: &raw_hex,
+                label: label.as_deref(),
+            },
+        )
+        .await?;
+
+        Ok(ElementsBroadcastTransaction {
+            txid,
+            recipient: recipient.to_string(),
+            amount_sat: amount_sat_i,
+            fee_sat,
+        })
+    }
+
+    /// Build, HSM-sign, and broadcast a spend of `amount` units of `asset_id`
+    /// (a Liquid asset other than L-BTC) to `recipient`. All captured UTXOs are
+    /// offered to the builder; LWK selects the asset for the recipient and
+    /// L-BTC to cover the mining fee, returning asset + L-BTC change to the
+    /// wallet's internal chain.
+    ///
+    /// # Errors
+    /// As for [`Self::build_sign_and_broadcast`], plus
+    /// [`ElementsWalletError::BuildPset`] if `asset_id` is malformed or the
+    /// wallet lacks enough of the asset (or L-BTC for the fee).
+    #[allow(clippy::too_many_lines)]
+    pub async fn build_sign_and_broadcast_asset(
+        &self,
+        recipient: &str,
+        asset_id: &str,
+        amount: f64,
+        fee_rate_sat_vb: u64,
+        label: Option<String>,
+    ) -> Result<ElementsBroadcastTransaction, ElementsWalletError> {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let amount_sat = (amount * 100_000_000.0).round() as u64;
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        let fee_rate_kvb = (fee_rate_sat_vb as f64 * 1000.0) as f32;
+
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        let (url, user, pass) = self.rpc_cfg();
+        let desc = self.descriptor.clone();
+        let mbk = self.mbk;
+        let net = self.network;
+        let lwk = self.lwk_net;
+        let signers: Vec<_> = self.signers.iter().cloned().collect();
+        let recipient_owned = recipient.to_string();
+        let asset_owned = asset_id.to_string();
+        let elements_backend = self.elements_backend;
+        let electrum_url = self.electrum_url.clone();
+        let esplora_url = self.esplora_url.clone();
+        let esplora_auth = self.esplora_auth.clone();
+
+        let (txid, fee_sat, raw_hex) = tokio::task::spawn_blocking(
+            move || -> Result<(String, i64, String), ElementsWalletError> {
+                let wollet = ElementsWollet::from_descriptor_str(&desc, mbk, net, lwk)
+                    .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+                let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
+                if utxos.is_empty() {
+                    return Err(ElementsWalletError::BuildPset("no spendable UTXOs".into()));
+                }
+                let recipient_addr =
+                    elements::Address::from_str(&recipient_owned).map_err(|e| {
+                        ElementsWalletError::BadAddress {
+                            addr: recipient_owned.clone(),
+                            reason: e.to_string(),
+                        }
+                    })?;
+                let asset = elements::AssetId::from_str(&asset_owned)
+                    .map_err(|e| ElementsWalletError::BuildPset(format!("bad asset id: {e}")))?;
+
+                let blinded = build_asset_spend_pset(
+                    &wollet,
+                    &utxos,
+                    &recipient_addr,
+                    asset,
+                    amount_sat,
+                    fee_rate_kvb,
+                )
+                .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
+                let mut pset = blinded.into_pset();
+
+                let mut total_signed = 0usize;
+                for signer in &signers {
+                    total_signed += signer
+                        .sign_pset(&mut pset)
+                        .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
+                }
+                tracing::debug!(total_signed, "asset PSET signed by HSM federation");
+
+                finalize_p2wsh_pset(&mut pset)
+                    .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
+                let tx = pset
+                    .extract_tx()
+                    .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
+
+                let fee_sat = tx
+                    .output
+                    .iter()
+                    .find(|o| o.script_pubkey.is_empty())
+                    .and_then(|o| o.value.explicit())
+                    .and_then(|v| i64::try_from(v).ok())
+                    .unwrap_or(0);
+
+                let raw_hex = elements::encode::serialize_hex(&tx);
+                let txid = broadcast_via_backend(
+                    elements_backend,
+                    electrum_url.as_deref(),
+                    esplora_url.as_deref(),
+                    esplora_auth.as_ref(),
+                    lwk,
+                    (&url, &user, &pass),
+                    &tx,
+                )?;
+                Ok((txid.to_string(), fee_sat, raw_hex))
+            },
+        )
+        .await
+        .expect("spawn_blocking join")?;
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let amount_sat_i = (amount * 100_000_000.0).round() as i64;
 
         db::insert_elements_transaction(
             &self.pool,

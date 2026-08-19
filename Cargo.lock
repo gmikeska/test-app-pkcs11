@@ -1103,18 +1103,39 @@ dependencies = [
 
 [[package]]
 name = "emvault"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
- "emvault-core",
+ "emvault-core 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "emvault-elements",
- "emvault-pkcs11",
+ "emvault-pkcs11 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "emvault-xpub",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "emvault-core"
-version = "0.7.0"
+version = "0.8.0"
+dependencies = [
+ "bdk_bitcoind_rpc",
+ "bdk_wallet",
+ "bitcoin",
+ "bitcoincore-rpc",
+ "getrandom 0.3.4",
+ "hex",
+ "miniscript",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "emvault-core"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c43bf95e8a3ffbb832df99050013e9e90d22a0f5ed28eba076a37cb0fb91756e"
 dependencies = [
  "bdk_bitcoind_rpc",
  "bdk_wallet",
@@ -1122,6 +1143,7 @@ dependencies = [
  "bitcoincore-rpc",
  "emvault-electrum",
  "emvault-esplora",
+ "getrandom 0.3.4",
  "hex",
  "miniscript",
  "serde",
@@ -1134,13 +1156,13 @@ dependencies = [
 
 [[package]]
 name = "emvault-dev-signer"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bitcoin",
  "cryptoki",
  "dotenvy",
- "emvault-core",
- "emvault-pkcs11",
+ "emvault-core 0.8.0",
+ "emvault-pkcs11 0.8.0",
  "hex",
  "log",
  "serde",
@@ -1150,7 +1172,9 @@ dependencies = [
 
 [[package]]
 name = "emvault-electrum"
-version = "0.7.0"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f7209064721ffb077e0c320ff46863be077e1291b9418c498643ab3c797ecf2"
 dependencies = [
  "bdk_electrum",
  "bdk_wallet",
@@ -1162,13 +1186,15 @@ dependencies = [
 
 [[package]]
 name = "emvault-elements"
-version = "0.7.0"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c40088a47d96a66c841bbc88322f056a3602a431cf7dd5e85753a0b5b96a17b"
 dependencies = [
  "bitcoin",
  "bitcoincore-rpc",
  "elements 0.25.3",
  "elements-miniscript",
- "emvault-core",
+ "emvault-core 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "lwk_common",
  "lwk_wollet",
  "serde",
@@ -1178,7 +1204,9 @@ dependencies = [
 
 [[package]]
 name = "emvault-esplora"
-version = "0.7.0"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22780c67d4b3765655939d4fc0168dc23dd956898f1c50d3105a29218c8fcfc2"
 dependencies = [
  "bdk_wallet",
  "bitcoin",
@@ -1189,13 +1217,31 @@ dependencies = [
 
 [[package]]
 name = "emvault-pkcs11"
-version = "0.7.0"
+version = "0.8.0"
+dependencies = [
+ "bdk_wallet",
+ "bitcoin",
+ "cryptoki",
+ "emvault-core 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "hex",
+ "miniscript",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "emvault-pkcs11"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2115bdfdc764cb4c0a2a36c0dd299863dc1252c1f38486f93a5a38c9f166ffcd"
 dependencies = [
  "bdk_wallet",
  "bitcoin",
  "cryptoki",
  "elements 0.25.3",
- "emvault-core",
+ "emvault-core 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "emvault-elements",
  "hex",
  "miniscript",
@@ -1214,8 +1260,8 @@ dependencies = [
  "cryptoki",
  "cryptoki-sys 0.3.0",
  "dotenvy",
- "emvault-core",
- "emvault-pkcs11",
+ "emvault-core 0.8.0",
+ "emvault-pkcs11 0.8.0",
  "libloading 0.8.9",
  "log",
  "reqwest 0.12.28",
@@ -1227,11 +1273,13 @@ dependencies = [
 
 [[package]]
 name = "emvault-xpub"
-version = "0.7.0"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f06b524ab5037cecc291c44a838cfa4b7cd547f636f64b9296a99d0ed548475f"
 dependencies = [
  "bip39",
  "bitcoin",
- "emvault-core",
+ "emvault-core 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "miniscript",
  "serde",
  "thiserror 2.0.18",
@@ -4007,7 +4055,7 @@ dependencies = [
 
 [[package]]
 name = "test-app-pkcs11"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "askama",

@@ -10,6 +10,28 @@
 .fed-panel.active{display:block}
 </style>
 <section class="card">
+  <h2>Holdings by asset</h2>
+  {% if asset_balances.is_empty() %}
+    <p class="muted">No captured UTXOs yet &mdash; receive to an address below.</p>
+  {% else %}
+    <table class="data">
+      <thead>
+        <tr><th>Asset ID</th><th>Balance</th></tr>
+      </thead>
+      <tbody>
+        {% for b in asset_balances %}
+          <tr>
+            <td><code class="break">{{ b.asset_id }}</code></td>
+            <td>{{ b.amount }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <small class="muted">The policy asset (L-BTC) sits alongside any issued assets; amounts use 8 decimals.</small>
+  {% endif %}
+</section>
+
+<section class="card">
   <h2>Receive addresses (Confidential)</h2>
   <p class="muted">First 20 confidential addresses on the external keychain. Click any address to view receipts.</p>
 

@@ -85,8 +85,15 @@ pub struct ElementsFederationAddressGroup {
 struct ReceiveTemplate {
     header: ElementsWalletHeader,
     balance: ElementsBalanceView,
+    asset_balances: Vec<AssetBalanceView>,
     federation_groups: Vec<ElementsFederationAddressGroup>,
     flash: Option<FlashBanner>,
+}
+
+/// One asset's balance row on the receive page.
+struct AssetBalanceView {
+    asset_id: String,
+    amount: String,
 }
 
 #[derive(Template, WebTemplate)]
@@ -286,6 +293,16 @@ pub async fn receive(
         has_pending,
     };
 
+    let asset_balances = uw
+        .asset_balances()
+        .await?
+        .into_iter()
+        .map(|b| AssetBalanceView {
+            asset_id: b.asset_id,
+            amount: format!("{:.8}", b.amount),
+        })
+        .collect();
+
     Ok(ReceiveTemplate {
         header: ElementsWalletHeader {
             email: user.email,
@@ -297,6 +314,7 @@ pub async fn receive(
             policy: elements_policy_label(&state),
         },
         balance: balance_view,
+        asset_balances,
         federation_groups,
         flash: None,
     }
@@ -356,6 +374,11 @@ pub struct SendForm {
     /// field is then ignored and the wallet is swept to the recipient.
     #[serde(default)]
     pub send_max: Option<String>,
+    /// Optional Liquid asset id (hex). When present and non-empty, `amount_btc`
+    /// is interpreted as units of that asset (L-BTC still pays the fee) rather
+    /// than L-BTC. Empty/absent → a plain L-BTC send.
+    #[serde(default)]
+    pub asset_id: Option<String>,
 }
 
 pub async fn send_post(
@@ -390,13 +413,29 @@ pub async fn send_post(
         if amount <= 0.0 {
             return Err(AppError::BadRequest("amount must be positive".to_string()));
         }
-        uw.build_sign_and_broadcast(
-            form.recipient_address.trim(),
-            amount,
-            form.fee_rate_sat_vb,
-            label,
-        )
-        .await?
+        let asset_id = form
+            .asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(asset) = asset_id {
+            uw.build_sign_and_broadcast_asset(
+                form.recipient_address.trim(),
+                asset,
+                amount,
+                form.fee_rate_sat_vb,
+                label,
+            )
+            .await?
+        } else {
+            uw.build_sign_and_broadcast(
+                form.recipient_address.trim(),
+                amount,
+                form.fee_rate_sat_vb,
+                label,
+            )
+            .await?
+        }
     };
 
     tracing::info!(

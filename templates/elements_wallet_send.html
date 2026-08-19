@@ -11,7 +11,14 @@
              placeholder="el1qq&hellip; / ert1q&hellip;">
     </label>
     <label>
-      <span>Amount (L-BTC)</span>
+      <span>Asset ID (optional &mdash; blank sends L-BTC)</span>
+      <input type="text" name="asset_id" autocomplete="off" spellcheck="false"
+             pattern="[0-9a-fA-F]{64}" title="64 hex characters"
+             placeholder="e31e269c&hellip; (blank = L-BTC)">
+      <small class="muted">Set a Liquid asset id to send that asset (amount is in asset units); the L-BTC fee is drawn automatically. <strong>Max</strong> applies to L-BTC only.</small>
+    </label>
+    <label>
+      <span>Amount (L-BTC or asset units)</span>
       <div class="amount-row" style="display:flex; gap:.5rem; align-items:center;">
         <input type="text" id="amount_btc" name="amount_btc" required autocomplete="off"
                placeholder="0.0005" pattern="^\d+(\.\d{1,8})?$" style="flex:1;">
