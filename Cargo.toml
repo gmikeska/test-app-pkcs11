@@ -110,13 +110,20 @@ doc_markdown = "allow"
 doc_overindented_list_items = "allow"
 
 # ── Construction-site override ───────────────────────────────────────────────
-# The chain-stack re-exports (e.g. emvault::core::{bdk_wallet, bdk_bitcoind_rpc,
-# bitcoincore_rpc}) are not in the published 0.1.1 yet, so build the apps against
-# the local ecosystem tree. Patching the `emvault` facade cascades to the local
-# emvault-core/-xpub/-elements via its path deps. Remove once those land on
-# crates.io and the version bump is published.
+# Unpublished crate features (e.g. emvault-elements asset send/migration, the
+# chain-stack re-exports) mean we build against the local ecosystem tree. Since
+# the inter-crate deps are version-only (each repo's CI resolves against
+# crates.io), each crate is patched to its local path explicitly — the `emvault`
+# facade alone no longer cascades. This is cargo's recommended `[patch]` (vs the
+# old `.cargo/config.toml` `paths` override, which warned about altering the
+# dependency graph). Remove once these land on crates.io + the version bump ships.
 [patch.crates-io]
-emvault = { path = "../emvault" }
+emvault            = { path = "../emvault" }
+emvault-core       = { path = "../emvault-core" }
+emvault-pkcs11     = { path = "../emvault-pkcs11" }
+emvault-elements   = { path = "../emvault-elements" }
+emvault-electrum   = { path = "../../emvault-electrum" }
+emvault-esplora    = { path = "../../emvault-esplora" }
 # esplora-rs 0.3.0 (unpublished) carries the waterfalls `TxSeen.v: -1` spend
 # sentinel fix; patched in until Greg publishes 0.3.0. Remove on publish.
 esplora-rs = { path = "../../esplora-rs" }
