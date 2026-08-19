@@ -400,11 +400,28 @@ pub async fn send_post(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    // "Send Max" drains the whole balance to the recipient (fee out of the
-    // swept amount); otherwise send the requested amount.
+    let asset_id = form
+        .asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    // "Send Max": L-BTC drains the wallet (fee out of the swept amount); an
+    // asset drains its full balance (fee paid separately in L-BTC). Otherwise
+    // send the requested amount.
     let result = if matches!(form.send_max.as_deref(), Some("true")) {
-        uw.sweep_to(form.recipient_address.trim(), form.fee_rate_sat_vb, label)
+        if let Some(asset) = asset_id {
+            uw.build_sign_and_broadcast_asset_max(
+                form.recipient_address.trim(),
+                asset,
+                form.fee_rate_sat_vb,
+                label,
+            )
             .await?
+        } else {
+            uw.sweep_to(form.recipient_address.trim(), form.fee_rate_sat_vb, label)
+                .await?
+        }
     } else {
         let amount: f64 =
             form.amount_btc.trim().parse().map_err(|_| {
@@ -413,11 +430,6 @@ pub async fn send_post(
         if amount <= 0.0 {
             return Err(AppError::BadRequest("amount must be positive".to_string()));
         }
-        let asset_id = form
-            .asset_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
         if let Some(asset) = asset_id {
             uw.build_sign_and_broadcast_asset(
                 form.recipient_address.trim(),
@@ -456,6 +468,10 @@ pub struct MaxSpendQuery {
     pub recipient_address: String,
     /// Fee rate (sat/vB) used to size the drain.
     pub fee_rate_sat_vb: u64,
+    /// Optional Liquid asset id. When present, the "max" is the full asset
+    /// balance (the L-BTC fee is separate, so nothing is subtracted).
+    #[serde(default)]
+    pub asset_id: Option<String>,
 }
 
 /// JSON reply for [`max_spend`]: the net drainable amount.
@@ -485,9 +501,19 @@ pub async fn max_spend(
         ));
     }
     let uw = state.elements_wallet_manager.load_or_init(user.id).await?;
-    let max_sat = uw
-        .compute_drain_amount(q.recipient_address.trim(), q.fee_rate_sat_vb)
-        .await?;
+    let asset_id = q
+        .asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    // Asset max = full asset balance (fee is separate L-BTC); L-BTC max =
+    // balance − fee via a priced sweep.
+    let max_sat = if let Some(asset) = asset_id {
+        uw.asset_total_sat(asset).await?
+    } else {
+        uw.compute_drain_amount(q.recipient_address.trim(), q.fee_rate_sat_vb)
+            .await?
+    };
     #[allow(clippy::cast_precision_loss)]
     let max_btc = format!("{:.8}", max_sat as f64 / 100_000_000.0);
     Ok(Json(MaxSpendResponse { max_sat, max_btc }))

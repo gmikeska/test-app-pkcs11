@@ -1183,6 +1183,165 @@ impl UserElementsWallet {
         })
     }
 
+    /// Total spendable balance (base units / sat-equivalent) of `asset_id`
+    /// across captured UTXOs — used to preview an asset "Max" send.
+    ///
+    /// # Errors
+    /// [`ElementsWalletError::BuildPset`] if `asset_id` is malformed.
+    pub async fn asset_total_sat(&self, asset_id: &str) -> Result<u64, ElementsWalletError> {
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        let asset = elements::AssetId::from_str(asset_id)
+            .map_err(|e| ElementsWalletError::BuildPset(format!("bad asset id: {e}")))?;
+        tokio::task::spawn_blocking(move || -> Result<u64, ElementsWalletError> {
+            Ok(store
+                .list_unspent(wid)
+                .map_err(pipeline_err)?
+                .iter()
+                .filter(|u| u.asset() == asset)
+                .map(emvault::elements::CapturedUtxo::value)
+                .sum())
+        })
+        .await
+        .expect("spawn_blocking join")
+    }
+
+    /// Drain the **entire** balance of `asset_id` to `recipient` (asset "Max").
+    /// Unlike an L-BTC sweep, the Liquid fee is paid separately in L-BTC, so the
+    /// full asset balance goes to the recipient (nothing subtracted); the
+    /// wallet's L-BTC UTXOs cover the fee.
+    ///
+    /// # Errors
+    /// As for [`Self::build_sign_and_broadcast_asset`]; also
+    /// [`ElementsWalletError::BuildPset`] if the wallet holds none of the asset.
+    #[allow(clippy::too_many_lines)]
+    pub async fn build_sign_and_broadcast_asset_max(
+        &self,
+        recipient: &str,
+        asset_id: &str,
+        fee_rate_sat_vb: u64,
+        label: Option<String>,
+    ) -> Result<ElementsBroadcastTransaction, ElementsWalletError> {
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        let fee_rate_kvb = (fee_rate_sat_vb as f64 * 1000.0) as f32;
+
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        let (url, user, pass) = self.rpc_cfg();
+        let desc = self.descriptor.clone();
+        let mbk = self.mbk;
+        let net = self.network;
+        let lwk = self.lwk_net;
+        let signers: Vec<_> = self.signers.iter().cloned().collect();
+        let recipient_owned = recipient.to_string();
+        let asset_owned = asset_id.to_string();
+        let elements_backend = self.elements_backend;
+        let electrum_url = self.electrum_url.clone();
+        let esplora_url = self.esplora_url.clone();
+        let esplora_auth = self.esplora_auth.clone();
+
+        let (txid, fee_sat, raw_hex, amount_sat) = tokio::task::spawn_blocking(
+            move || -> Result<(String, i64, String, i64), ElementsWalletError> {
+                let wollet = ElementsWollet::from_descriptor_str(&desc, mbk, net, lwk)
+                    .map_err(|e| ElementsWalletError::Descriptor(e.to_string()))?;
+                let utxos = store.list_unspent(wid).map_err(pipeline_err)?;
+                if utxos.is_empty() {
+                    return Err(ElementsWalletError::BuildPset("no spendable UTXOs".into()));
+                }
+                let recipient_addr =
+                    elements::Address::from_str(&recipient_owned).map_err(|e| {
+                        ElementsWalletError::BadAddress {
+                            addr: recipient_owned.clone(),
+                            reason: e.to_string(),
+                        }
+                    })?;
+                let asset = elements::AssetId::from_str(&asset_owned)
+                    .map_err(|e| ElementsWalletError::BuildPset(format!("bad asset id: {e}")))?;
+
+                // Asset "Max" = the full asset balance (fee is paid in L-BTC).
+                let total: u64 = utxos
+                    .iter()
+                    .filter(|u| u.asset() == asset)
+                    .map(emvault::elements::CapturedUtxo::value)
+                    .sum();
+                if total == 0 {
+                    return Err(ElementsWalletError::BuildPset(
+                        "wallet holds none of that asset".into(),
+                    ));
+                }
+
+                let blinded = build_asset_spend_pset(
+                    &wollet,
+                    &utxos,
+                    &recipient_addr,
+                    asset,
+                    total,
+                    fee_rate_kvb,
+                )
+                .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
+                let mut pset = blinded.into_pset();
+
+                let mut total_signed = 0usize;
+                for signer in &signers {
+                    total_signed += signer
+                        .sign_pset(&mut pset)
+                        .map_err(|e| ElementsWalletError::Sign(e.to_string()))?;
+                }
+                tracing::debug!(total_signed, "asset-max PSET signed by HSM federation");
+
+                finalize_p2wsh_pset(&mut pset)
+                    .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
+                let tx = pset
+                    .extract_tx()
+                    .map_err(|e| ElementsWalletError::Finalize(e.to_string()))?;
+
+                let fee_sat = tx
+                    .output
+                    .iter()
+                    .find(|o| o.script_pubkey.is_empty())
+                    .and_then(|o| o.value.explicit())
+                    .and_then(|v| i64::try_from(v).ok())
+                    .unwrap_or(0);
+
+                let raw_hex = elements::encode::serialize_hex(&tx);
+                let txid = broadcast_via_backend(
+                    elements_backend,
+                    electrum_url.as_deref(),
+                    esplora_url.as_deref(),
+                    esplora_auth.as_ref(),
+                    lwk,
+                    (&url, &user, &pass),
+                    &tx,
+                )?;
+                let amount_sat = i64::try_from(total).unwrap_or(i64::MAX);
+                Ok((txid.to_string(), fee_sat, raw_hex, amount_sat))
+            },
+        )
+        .await
+        .expect("spawn_blocking join")?;
+
+        db::insert_elements_transaction(
+            &self.pool,
+            &db::NewElementsTransaction {
+                wallet_id: self.wallet_id,
+                txid: &txid,
+                recipient,
+                amount_sat,
+                fee_sat,
+                raw_tx_hex: &raw_hex,
+                label: label.as_deref(),
+            },
+        )
+        .await?;
+
+        Ok(ElementsBroadcastTransaction {
+            txid,
+            recipient: recipient.to_string(),
+            amount_sat,
+            fee_sat,
+        })
+    }
+
     /// Sweep all captured UTXOs to `recipient` (drains the wallet).
     /// Preview a Send-Max drain: the net amount (`total − fee`) a full-balance
     /// sweep to `recipient` would deliver, without signing or broadcasting.

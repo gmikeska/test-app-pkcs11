@@ -15,7 +15,7 @@
       <input type="text" name="asset_id" autocomplete="off" spellcheck="false"
              pattern="[0-9a-fA-F]{64}" title="64 hex characters"
              placeholder="e31e269c&hellip; (blank = L-BTC)">
-      <small class="muted">Set a Liquid asset id to send that asset (amount is in asset units); the L-BTC fee is drawn automatically. <strong>Max</strong> applies to L-BTC only.</small>
+      <small class="muted">Set a Liquid asset id to send that asset (amount is in asset units); the L-BTC fee is drawn automatically. <strong>Max</strong> fills the full asset balance (fee is separate).</small>
     </label>
     <label>
       <span>Amount (L-BTC or asset units)</span>
@@ -60,12 +60,15 @@
         var feeRate = (fee && fee.value || '').trim();
         if (!address) { if (recip) recip.focus(); return; }
         if (!feeRate) { if (fee) fee.focus(); return; }
+        var assetEl = form.querySelector('[name="asset_id"]');
+        var assetId = (assetEl && assetEl.value || '').trim();
         var orig = btn.textContent;
         btn.disabled = true; btn.textContent = '…';
         try {
           var url = '/elements/wallet/max-spend'
                   + '?recipient_address=' + encodeURIComponent(address)
-                  + '&fee_rate_sat_vb=' + encodeURIComponent(feeRate);
+                  + '&fee_rate_sat_vb=' + encodeURIComponent(feeRate)
+                  + (assetId ? '&asset_id=' + encodeURIComponent(assetId) : '');
           var res = await fetch(url, { headers: { 'Accept': 'application/json' } });
           if (!res.ok) { alert('Could not compute max: ' + (await res.text())); return; }
           var data = await res.json();
