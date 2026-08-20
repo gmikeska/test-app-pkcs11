@@ -47,7 +47,7 @@ threshold = 3
 #
 # Dev (SoftHSM) tokens need none of VENDOR/LIB/SEED — they default to the shim.
 signers = [
-    "asterism-pkcs11-app-1",
+    "asterism-pkcs11-app-3",
     "asterism-pkcs11-app-4",
     "YHRXBOTJLQWT",
 ]
