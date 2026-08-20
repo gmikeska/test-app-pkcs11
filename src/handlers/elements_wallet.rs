@@ -601,28 +601,21 @@ pub async fn federation(
         db::list_federation_versions_for_elements_wallet(&state.db, uw.wallet_id()).await?;
     let version_count = versions.len();
 
-    let signer_count = versions
-        .last()
-        .map_or(state.config.fed_signer_indices.len(), |v| {
-            usize::try_from(v.signer_count).unwrap_or(0)
-        });
-    let current_signers: Vec<ElementsSignerView> = state
-        .config
-        .fed_signer_indices
-        .iter()
-        .take(signer_count)
-        .filter_map(|&idx| state.config.hsm_tokens.get(idx))
-        .map(|t| ElementsSignerView {
-            id: t.label.clone(),
-            label: t.label.clone(),
-        })
-        .collect();
-
+    // Current federation signers, resolved from the ACTUAL live wallet
+    // descriptor rather than the `.env` default — otherwise a migrated wallet
+    // keeps showing its boot-time signer set. Each descriptor origin
+    // fingerprint is mapped back to its HSM token label via the fleet; the
+    // per-token master fingerprints are stable across users/accounts, so any
+    // signer set works for the lookup.
+    let signers =
+        current_federation_signers(&state, user.id, uw.account_idx(), uw.descriptor()).await;
     let current = ElementsFederationVersionView {
         version_index: version_count.saturating_sub(1) as i32,
-        threshold: state.config.fed_threshold as i32,
-        signer_count: current_signers.len() as i32,
-        signers: current_signers,
+        threshold: versions
+            .last()
+            .map_or(state.config.fed_threshold as i32, |v| v.threshold),
+        signer_count: signers.len() as i32,
+        signers,
     };
 
     let history: Vec<ElementsFederationHistoryView> = versions
@@ -682,6 +675,67 @@ pub async fn federation(
         flash: None,
     }
     .into_response())
+}
+
+/// Resolve the signers of a wallet's **current** federation from its live
+/// descriptor (rather than the `.env` default), each origin fingerprint mapped
+/// back to its HSM token label via the fleet. Per-token master fingerprints are
+/// stable across users/accounts, so any signer set answers the lookup; on any
+/// derivation error the fingerprints are shown verbatim.
+async fn current_federation_signers(
+    state: &AppState,
+    user_id: uuid::Uuid,
+    account_idx: i32,
+    descriptor: &str,
+) -> Vec<ElementsSignerView> {
+    use emvault::core::signer::Signer as _;
+    let acct = u32::try_from(account_idx).unwrap_or(0);
+    let fp_to_label: std::collections::HashMap<bitcoin::bip32::Fingerprint, String> =
+        match state.elements_wallet_manager.derivation_path_for(acct) {
+            Ok(path) => match state.hsm.signers_for(user_id, &path).await {
+                Ok(set) => state
+                    .config
+                    .hsm_tokens
+                    .iter()
+                    .zip(set.iter())
+                    .map(|(t, s)| (s.fingerprint(), t.label.clone()))
+                    .collect(),
+                Err(_) => std::collections::HashMap::new(),
+            },
+            Err(_) => std::collections::HashMap::new(),
+        };
+    origin_fingerprints(descriptor)
+        .into_iter()
+        .map(|fp| {
+            let label = fp_to_label
+                .get(&fp)
+                .cloned()
+                .unwrap_or_else(|| fp.to_string());
+            ElementsSignerView {
+                id: label.clone(),
+                label,
+            }
+        })
+        .collect()
+}
+
+/// Extract the BIP32 key-origin fingerprints (`[abcd1234/…]`) from a descriptor
+/// string, in order of appearance. The SLIP-77 blinding key (`slip77(<hex>)`,
+/// no `[` bracket) is intentionally skipped, so only the multisig cosigner
+/// fingerprints are returned.
+fn origin_fingerprints(descriptor: &str) -> Vec<bitcoin::bip32::Fingerprint> {
+    use std::str::FromStr;
+    descriptor
+        .split('[')
+        .skip(1)
+        .filter_map(|seg| {
+            let hex = seg.split(['/', ']']).next()?;
+            let is_fp = hex.len() == 8 && hex.bytes().all(|c| c.is_ascii_hexdigit());
+            is_fp
+                .then(|| bitcoin::bip32::Fingerprint::from_str(hex).ok())
+                .flatten()
+        })
+        .collect()
 }
 
 fn truncate_descriptor(desc: &str, max_len: usize) -> String {
