@@ -365,7 +365,7 @@ pub async fn receive(
         has_pending,
     };
 
-    let asset_balances = uw
+    let mut asset_balances: Vec<AssetBalanceView> = uw
         .asset_balances()
         .await?
         .into_iter()
@@ -375,6 +375,8 @@ pub async fn receive(
             amount: format!("{:.8}", b.amount),
         })
         .collect();
+    // L-BTC (policy asset) first; issued assets keep their descending-amount order.
+    asset_balances.sort_by_key(|b| !b.is_policy);
 
     Ok(ReceiveTemplate {
         header: ElementsWalletHeader {

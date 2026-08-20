@@ -725,14 +725,20 @@ impl UserElementsWallet {
 
     /// Balance from captured UTXOs (all confirmed → "trusted"). Mempool is not
     /// tracked, so `untrusted_pending`/`immature` are zero.
+    /// The **L-BTC (policy asset) only** balance — issued assets are excluded
+    /// (see [`Self::asset_balances`] for those). This drives the "Balance
+    /// (L-BTC)" card, which must reflect L-BTC alone, not a cross-asset sum.
     pub async fn balance(&self) -> Result<ElementsBalances, ElementsWalletError> {
         let store = PgWalletUtxoStore::new(self.pool.clone());
         let wid = self.wallet_key();
+        let lwk = self.lwk_net;
         let sats = tokio::task::spawn_blocking(move || -> Result<u64, ElementsWalletError> {
+            let policy = *lwk.policy_asset();
             Ok(store
                 .list_unspent(wid)
                 .map_err(pipeline_err)?
                 .iter()
+                .filter(|u| u.asset() == policy)
                 .map(emvault::elements::CapturedUtxo::value)
                 .sum())
         })
