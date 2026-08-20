@@ -571,6 +571,41 @@ pub struct AssetBalance {
     pub amount: f64,
 }
 
+/// One asset's per-address rows within a federation version — drives the asset
+/// sub-tabs on the receive page. `addresses`/`change_addresses` carry *this
+/// asset's* received/unspent balances only (no cross-asset summing).
+#[derive(Debug, Clone)]
+pub struct AssetAddressGroup {
+    /// Asset id (hex).
+    pub asset_id: String,
+    /// Whether this is the network policy asset (L-BTC).
+    pub is_policy: bool,
+    /// External (receive) addresses annotated with this asset's balances.
+    pub addresses: Vec<ElementsRevealedAddress>,
+    /// Internal (change) addresses annotated with this asset's balances.
+    pub change_addresses: Vec<ElementsRevealedAddress>,
+}
+
+/// Per-asset address rows for a single federation version.
+#[derive(Debug, Clone)]
+pub struct VersionAssetGroup {
+    pub version_index: usize,
+    pub wallet_handle: String,
+    /// One entry per asset (policy asset first, then issued assets by id).
+    pub assets: Vec<AssetAddressGroup>,
+}
+
+/// One asset's activity at a single address — drives the asset tabs on the
+/// address-detail page.
+#[derive(Debug, Clone)]
+pub struct AddressAssetActivity {
+    pub asset_id: String,
+    pub is_policy: bool,
+    pub total_received: f64,
+    pub unspent: f64,
+    pub receipts: Vec<ElementsAddressReceipt>,
+}
+
 pub struct UserElementsWallet {
     user_id: Uuid,
     wallet_id: Uuid,
@@ -883,6 +918,207 @@ impl UserElementsWallet {
     /// Per-address activity from captured UTXOs (spent and unspent), so
     /// "total received" reflects history even after the funds were spent (e.g.
     /// migrated to a new federation).
+    /// Like [`reveal_addresses_all_versions`] but split per asset (policy asset
+    /// first, then issued assets), so the receive page can show an asset tab
+    /// with correctly-attributed per-address balances instead of one summed
+    /// "L-BTC" figure.
+    pub async fn reveal_addresses_all_versions_by_asset(
+        &self,
+        count: u32,
+    ) -> Result<Vec<VersionAssetGroup>, ElementsWalletError> {
+        let versions =
+            db::list_federation_versions_for_elements_wallet(&self.pool, self.wallet_id).await?;
+        let specs: Vec<(usize, String, String, [u8; 32])> = if versions.is_empty() {
+            vec![(
+                0,
+                self.daemon_wallet_name.clone(),
+                self.descriptor.clone(),
+                self.mbk,
+            )]
+        } else {
+            versions
+                .iter()
+                .map(|v| {
+                    let mbk = v
+                        .blinding_key
+                        .as_deref()
+                        .and_then(parse_mbk_hex)
+                        .unwrap_or(self.mbk);
+                    (
+                        usize::try_from(v.version_index).unwrap_or(0),
+                        v.wallet_handle.clone(),
+                        v.descriptor.clone(),
+                        mbk,
+                    )
+                })
+                .collect()
+        };
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        let net = self.network;
+        let lwk = self.lwk_net;
+        tokio::task::spawn_blocking(
+            move || -> Result<Vec<VersionAssetGroup>, ElementsWalletError> {
+                let utxos = store.list_for_wallet(wid).map_err(pipeline_err)?;
+                let per_asset = balances_by_spk_per_asset(&utxos);
+                let policy = lwk.policy_asset().to_string();
+                let assets = ordered_assets(&per_asset, &policy);
+                let empty: SpkBalances = (HashMap::new(), HashMap::new());
+                let mut groups = Vec::with_capacity(specs.len());
+                for (vidx, handle, desc, mbk) in &specs {
+                    let mut asset_groups = Vec::with_capacity(assets.len());
+                    for asset in &assets {
+                        let (recv, unspent) = per_asset.get(asset).unwrap_or(&empty);
+                        let addrs = derive_with_balances(
+                            desc,
+                            *mbk,
+                            net,
+                            lwk,
+                            count,
+                            KeychainKind::External,
+                            recv,
+                            unspent,
+                        )?;
+                        asset_groups.push(AssetAddressGroup {
+                            is_policy: *asset == policy,
+                            asset_id: asset.clone(),
+                            addresses: addrs,
+                            change_addresses: Vec::new(),
+                        });
+                    }
+                    groups.push(VersionAssetGroup {
+                        version_index: *vidx,
+                        wallet_handle: handle.clone(),
+                        assets: asset_groups,
+                    });
+                }
+                Ok(groups)
+            },
+        )
+        .await
+        .expect("spawn_blocking join")
+    }
+
+    /// Per-asset change (internal) addresses for a single version descriptor.
+    /// The `addresses` field of each returned group carries the change rows.
+    pub async fn change_addresses_by_asset(
+        &self,
+        count: u32,
+        descriptor: &str,
+    ) -> Result<Vec<AssetAddressGroup>, ElementsWalletError> {
+        let descriptor = descriptor.to_string();
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        let net = self.network;
+        let lwk = self.lwk_net;
+        tokio::task::spawn_blocking(
+            move || -> Result<Vec<AssetAddressGroup>, ElementsWalletError> {
+                let utxos = store.list_for_wallet(wid).map_err(pipeline_err)?;
+                let per_asset = balances_by_spk_per_asset(&utxos);
+                let policy = lwk.policy_asset().to_string();
+                let assets = ordered_assets(&per_asset, &policy);
+                let empty: SpkBalances = (HashMap::new(), HashMap::new());
+                let mut out = Vec::with_capacity(assets.len());
+                for asset in &assets {
+                    let (recv, unspent) = per_asset.get(asset).unwrap_or(&empty);
+                    let addrs = derive_with_balances(
+                        &descriptor,
+                        [0u8; 32],
+                        net,
+                        lwk,
+                        count,
+                        KeychainKind::Internal,
+                        recv,
+                        unspent,
+                    )?;
+                    out.push(AssetAddressGroup {
+                        is_policy: *asset == policy,
+                        asset_id: asset.clone(),
+                        addresses: addrs,
+                        change_addresses: Vec::new(),
+                    });
+                }
+                Ok(out)
+            },
+        )
+        .await
+        .expect("spawn_blocking join")
+    }
+
+    /// Per-asset variant of [`address_history`] — one entry per asset that has
+    /// activity at `address` (policy asset first), with that asset's receipts
+    /// and totals only.
+    pub async fn address_history_by_asset(
+        &self,
+        address: &str,
+    ) -> Result<Vec<AddressAssetActivity>, ElementsWalletError> {
+        let target_spk = elements::Address::from_str(address)
+            .map(|a| a.script_pubkey())
+            .map_err(|e| ElementsWalletError::BadAddress {
+                addr: address.to_string(),
+                reason: e.to_string(),
+            })?;
+        let store = PgWalletUtxoStore::new(self.pool.clone());
+        let wid = self.wallet_key();
+        let lwk = self.lwk_net;
+        let tip = u32::try_from(self.tip_height().await?).unwrap_or(u32::MAX);
+        tokio::task::spawn_blocking(
+            move || -> Result<Vec<AddressAssetActivity>, ElementsWalletError> {
+                let utxos = store.list_for_wallet(wid).map_err(pipeline_err)?;
+                let policy = lwk.policy_asset().to_string();
+                let mut by_asset: std::collections::BTreeMap<
+                    String,
+                    (u64, u64, Vec<ElementsAddressReceipt>),
+                > = std::collections::BTreeMap::new();
+                for u in utxos.iter().filter(|u| *u.script_pubkey() == target_spk) {
+                    let confs = tip.saturating_sub(u.height).saturating_add(1);
+                    #[allow(clippy::cast_precision_loss)]
+                    let amount = u.value() as f64 / 100_000_000.0;
+                    let entry = by_asset.entry(u.asset().to_string()).or_default();
+                    entry.0 += u.value();
+                    if !u.is_spent {
+                        entry.1 += u.value();
+                    }
+                    entry.2.push(ElementsAddressReceipt {
+                        txid: u.outpoint.txid.to_string(),
+                        vout: u.outpoint.vout,
+                        amount,
+                        confirmations: confs,
+                        is_spent: u.is_spent,
+                    });
+                }
+                let mut order: Vec<String> = Vec::new();
+                if by_asset.contains_key(&policy) {
+                    order.push(policy.clone());
+                }
+                for k in by_asset.keys() {
+                    if *k != policy {
+                        order.push(k.clone());
+                    }
+                }
+                let mut out = Vec::with_capacity(order.len());
+                for asset in order {
+                    if let Some((recv, unspent, receipts)) = by_asset.remove(&asset) {
+                        #[allow(clippy::cast_precision_loss)]
+                        let total_received = recv as f64 / 100_000_000.0;
+                        #[allow(clippy::cast_precision_loss)]
+                        let unspent_f = unspent as f64 / 100_000_000.0;
+                        out.push(AddressAssetActivity {
+                            is_policy: asset == policy,
+                            asset_id: asset,
+                            total_received,
+                            unspent: unspent_f,
+                            receipts,
+                        });
+                    }
+                }
+                Ok(out)
+            },
+        )
+        .await
+        .expect("spawn_blocking join")
+    }
+
     pub async fn address_history(
         &self,
         address: &str,
@@ -1609,6 +1845,44 @@ fn balances_by_spk(
         }
     }
     (received, unspent)
+}
+
+type SpkBalances = (
+    HashMap<elements::Script, u64>,
+    HashMap<elements::Script, u64>,
+);
+
+/// Per-asset variant of [`balances_by_spk`]: `asset_id -> (received, unspent)`
+/// script→sat maps, so per-address balances never sum across assets.
+fn balances_by_spk_per_asset(
+    utxos: &[emvault::elements::CapturedUtxo],
+) -> std::collections::BTreeMap<String, SpkBalances> {
+    let mut out: std::collections::BTreeMap<String, SpkBalances> =
+        std::collections::BTreeMap::new();
+    for u in utxos {
+        let spk = u.script_pubkey().clone();
+        let entry = out.entry(u.asset().to_string()).or_default();
+        *entry.0.entry(spk.clone()).or_default() += u.value();
+        if !u.is_spent {
+            *entry.1.entry(spk).or_default() += u.value();
+        }
+    }
+    out
+}
+
+/// Ordered asset-id list for the tabs: the policy asset (L-BTC) first, then any
+/// issued assets in id order (the `BTreeMap` keys are already sorted).
+fn ordered_assets(
+    per_asset: &std::collections::BTreeMap<String, SpkBalances>,
+    policy: &str,
+) -> Vec<String> {
+    let mut assets = vec![policy.to_string()];
+    for k in per_asset.keys() {
+        if k != policy {
+            assets.push(k.clone());
+        }
+    }
+    assets
 }
 
 /// Derive `count` addresses for a descriptor and annotate each with its

@@ -72,6 +72,20 @@ pub struct ElementsFederationAddressGroup {
     pub version: usize,
     pub label: String,
     pub is_current: bool,
+    /// One entry per asset (policy asset first) — the asset sub-tabs.
+    pub assets: Vec<ElementsAssetGroupView>,
+}
+
+/// One asset's address rows within a federation version (an asset sub-tab).
+#[derive(Debug, Serialize, Clone)]
+pub struct ElementsAssetGroupView {
+    /// Full asset id (used for the panel id + the `?asset=` deep link).
+    pub asset_id: String,
+    /// Tab title: "L-BTC" for the policy asset, else the first 4 id chars.
+    pub asset_label: String,
+    pub is_policy: bool,
+    /// Whether this asset's tab is active by default (the policy asset).
+    pub is_active: bool,
     pub addresses: Vec<ElementsAddressView>,
     pub change_addresses: Vec<ElementsAddressView>,
 }
@@ -93,6 +107,8 @@ struct ReceiveTemplate {
 /// One asset's balance row on the receive page.
 struct AssetBalanceView {
     asset_id: String,
+    /// Whether this is the policy asset (rendered as "L-BTC").
+    is_policy: bool,
     amount: String,
 }
 
@@ -111,7 +127,22 @@ struct AddressTemplate {
     header: ElementsWalletHeader,
     email: String,
     address: ElementsAddressDetailView,
-    receipts: Vec<ElementsReceiptView>,
+    /// One entry per asset with activity at this address (the asset tabs).
+    asset_activities: Vec<AddressAssetActivityView>,
+}
+
+/// One asset's activity panel on the address-detail page (an asset tab).
+#[derive(Debug, Serialize, Clone)]
+pub struct AddressAssetActivityView {
+    pub asset_id: String,
+    pub asset_label: String,
+    pub is_policy: bool,
+    /// Whether this tab is active (from `?asset=`, else the policy asset).
+    pub is_active: bool,
+    pub total_received_btc: String,
+    pub unspent_btc: String,
+    pub receipt_count: usize,
+    pub receipts: Vec<ElementsReceiptView>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -143,9 +174,6 @@ pub struct ElementsAddressDetailView {
     pub qr_uri: String,
     pub qr_svg: String,
     pub derivation_index: Option<u32>,
-    pub total_received_btc: String,
-    pub unspent_btc: String,
-    pub receipt_count: usize,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -221,6 +249,7 @@ pub struct ElementsFederationHistoryView {
 // Handlers
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)]
 pub async fn receive(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
@@ -240,45 +269,76 @@ pub async fn receive(
         }
     };
 
-    let version_groups = uw.reveal_addresses_all_versions(REVEAL_COUNT).await?;
+    let policy_asset = uw.lwk_network().policy_asset().to_string();
+    let asset_label = |asset_id: &str, is_policy: bool| -> String {
+        if is_policy {
+            "L-BTC".to_string()
+        } else {
+            asset_id.chars().take(4).collect()
+        }
+    };
+
+    let version_groups = uw
+        .reveal_addresses_all_versions_by_asset(REVEAL_COUNT)
+        .await?;
     let total_versions = version_groups.len();
 
     let versions_for_change =
         db::list_federation_versions_for_elements_wallet(&state.db, uw.wallet_id()).await?;
 
     let mut federation_groups: Vec<ElementsFederationAddressGroup> = Vec::new();
-    for (version_idx, daemon_wallet, addrs) in version_groups.into_iter().rev() {
-        let is_current = version_idx == total_versions - 1;
+    for vg in version_groups.into_iter().rev() {
+        let is_current = vg.version_index == total_versions - 1;
         let label = if is_current {
-            format!("v{} (current)", version_idx + 1)
+            format!("v{} (current)", vg.version_index + 1)
         } else {
-            format!("v{}", version_idx + 1)
+            format!("v{}", vg.version_index + 1)
         };
 
-        let addresses: Vec<_> = addrs.into_iter().map(&to_view).collect();
-
-        let change_addresses = if is_current {
+        // Per-asset change addresses (current version only), keyed by asset id.
+        let mut change_by_asset: std::collections::HashMap<String, Vec<ElementsAddressView>> =
+            std::collections::HashMap::new();
+        if is_current {
             let desc = versions_for_change
                 .iter()
-                .find(|v| v.wallet_handle == daemon_wallet)
+                .find(|v| v.wallet_handle == vg.wallet_handle)
                 .map_or(uw.descriptor(), |v| v.descriptor.as_str());
-            uw.change_addresses_for_version(REVEAL_COUNT, desc, &daemon_wallet)
+            for ag in uw
+                .change_addresses_by_asset(REVEAL_COUNT, desc)
                 .await
                 .unwrap_or_default()
-                .into_iter()
-                .filter(|a| a.unspent > 0.000_000_01)
-                .map(&to_view)
-                .collect()
-        } else {
-            Vec::new()
-        };
+            {
+                let views: Vec<ElementsAddressView> = ag
+                    .addresses
+                    .into_iter()
+                    .filter(|a| a.unspent > 0.000_000_01)
+                    .map(&to_view)
+                    .collect();
+                change_by_asset.insert(ag.asset_id, views);
+            }
+        }
+
+        let assets: Vec<ElementsAssetGroupView> = vg
+            .assets
+            .into_iter()
+            .map(|ag| {
+                let change_addresses = change_by_asset.remove(&ag.asset_id).unwrap_or_default();
+                ElementsAssetGroupView {
+                    asset_label: asset_label(&ag.asset_id, ag.is_policy),
+                    is_active: ag.is_policy,
+                    is_policy: ag.is_policy,
+                    addresses: ag.addresses.into_iter().map(&to_view).collect(),
+                    change_addresses,
+                    asset_id: ag.asset_id,
+                }
+            })
+            .collect();
 
         federation_groups.push(ElementsFederationAddressGroup {
-            version: version_idx,
+            version: vg.version_index,
             label,
             is_current,
-            addresses,
-            change_addresses,
+            assets,
         });
     }
 
@@ -298,6 +358,7 @@ pub async fn receive(
         .await?
         .into_iter()
         .map(|b| AssetBalanceView {
+            is_policy: b.asset_id == policy_asset,
             asset_id: b.asset_id,
             amount: format!("{:.8}", b.amount),
         })
@@ -519,10 +580,19 @@ pub async fn max_spend(
     Ok(Json(MaxSpendResponse { max_sat, max_btc }))
 }
 
+/// Query string for the address-detail page: which asset tab to preselect.
+#[derive(Debug, Deserialize)]
+pub struct AddressAssetQuery {
+    /// Full asset id of the tab to open; defaults to the policy asset.
+    #[serde(default)]
+    pub asset: Option<String>,
+}
+
 pub async fn address_show(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
     Path(address_raw): Path<String>,
+    Query(q): Query<AddressAssetQuery>,
 ) -> Result<Response, AppError> {
     let uw = state.elements_wallet_manager.load_or_init(user.id).await?;
     let tip_height = uw.tip_height().await?;
@@ -535,8 +605,6 @@ pub async fn address_show(
         .find(|a| a.address == address_raw)
         .map(|a| a.index);
 
-    let activity = uw.address_history(&address_raw).await?;
-
     let qr_uri = format!("liquidnetwork:{address_raw}");
     let qr_svg = QrCode::new(qr_uri.as_bytes())
         .map_err(|e| AppError::BadRequest(format!("Failed to encode QR: {e}")))?
@@ -547,14 +615,48 @@ pub async fn address_show(
         .light_color(svg::Color("#f4f6fb"))
         .build();
 
-    let receipt_count = activity.receipts.len();
-    let total_received = activity.total_received;
-    let unspent = activity.unspent;
-    let receipts: Vec<ElementsReceiptView> = activity
-        .receipts
+    let mut asset_activities: Vec<AddressAssetActivityView> = uw
+        .address_history_by_asset(&address_raw)
+        .await?
         .into_iter()
-        .map(ElementsReceiptView::from)
+        .map(|a| {
+            let is_active = match q.asset.as_deref() {
+                Some(sel) => sel == a.asset_id,
+                None => a.is_policy,
+            };
+            AddressAssetActivityView {
+                asset_label: if a.is_policy {
+                    "L-BTC".to_string()
+                } else {
+                    a.asset_id.chars().take(4).collect()
+                },
+                is_policy: a.is_policy,
+                is_active,
+                total_received_btc: format!(
+                    "{:.8}",
+                    if a.total_received <= 0.0 {
+                        0.0
+                    } else {
+                        a.total_received
+                    }
+                ),
+                unspent_btc: format!("{:.8}", if a.unspent <= 0.0 { 0.0 } else { a.unspent }),
+                receipt_count: a.receipts.len(),
+                receipts: a
+                    .receipts
+                    .into_iter()
+                    .map(ElementsReceiptView::from)
+                    .collect(),
+                asset_id: a.asset_id,
+            }
+        })
         .collect();
+    // Guarantee exactly one active tab even if `?asset=` names an asset with no
+    // activity at this address (or the policy asset has none here).
+    let none_active = !asset_activities.iter().any(|v| v.is_active);
+    if let (true, Some(first)) = (none_active, asset_activities.first_mut()) {
+        first.is_active = true;
+    }
 
     Ok(AddressTemplate {
         header: ElementsWalletHeader {
@@ -572,18 +674,8 @@ pub async fn address_show(
             qr_uri,
             qr_svg,
             derivation_index,
-            total_received_btc: format!(
-                "{:.8}",
-                if total_received <= 0.0 {
-                    0.0
-                } else {
-                    total_received
-                }
-            ),
-            unspent_btc: format!("{:.8}", if unspent <= 0.0 { 0.0 } else { unspent }),
-            receipt_count,
         },
-        receipts,
+        asset_activities,
     }
     .into_response())
 }

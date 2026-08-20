@@ -8,6 +8,12 @@
 .fed-tab.active{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
 .fed-panel{display:none}
 .fed-panel.active{display:block}
+.asset-tabs{display:flex;gap:2px;margin:10px 0 0;padding:0;flex-wrap:wrap;border-bottom:1px solid var(--border)}
+.asset-tab{padding:5px 12px;font-size:.8rem;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;transform:translateY(1px);cursor:pointer;user-select:none;font-family:var(--mono,monospace)}
+.asset-tab:hover{color:var(--text)}
+.asset-tab.active{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
+.asset-panel{display:none}
+.asset-panel.active{display:block}
 </style>
 <section class="card">
   <h2>Holdings by asset</h2>
@@ -16,24 +22,30 @@
   {% else %}
     <table class="data">
       <thead>
-        <tr><th>Asset ID</th><th>Balance</th></tr>
+        <tr><th>Asset</th><th>Balance</th></tr>
       </thead>
       <tbody>
         {% for b in asset_balances %}
           <tr>
-            <td><code class="break">{{ b.asset_id }}</code></td>
+            <td>
+              {% if b.is_policy %}
+                <strong>L-BTC</strong>
+              {% else %}
+                <code class="break">{{ b.asset_id }}</code>
+              {% endif %}
+            </td>
             <td>{{ b.amount }}</td>
           </tr>
         {% endfor %}
       </tbody>
     </table>
-    <small class="muted">The policy asset (L-BTC) sits alongside any issued assets; amounts use 8 decimals.</small>
+    <small class="muted">The policy asset is shown as L-BTC; issued assets by their id. Amounts use 8 decimals.</small>
   {% endif %}
 </section>
 
 <section class="card">
   <h2>Receive addresses (Confidential)</h2>
-  <p class="muted">First 20 confidential addresses on the external keychain. Click any address to view receipts.</p>
+  <p class="muted">First 20 confidential addresses on the external keychain. Pick a federation version, then an asset. Click any address to view its receipts for that asset.</p>
 
   {% if federation_groups.len() > 1 %}
   <nav class="fed-tabs" role="tablist">
@@ -41,7 +53,6 @@
       <button class="fed-tab{% if g.is_current %} active{% endif %}"
               role="tab"
               aria-selected="{% if g.is_current %}true{% else %}false{% endif %}"
-              aria-controls="fed-panel-{{ g.version }}"
               data-fed-version="{{ g.version }}"
               onclick="switchFedTab({{ g.version }})">{{ g.label }}</button>
     {% endfor %}
@@ -52,61 +63,79 @@
   <div class="fed-panel{% if g.is_current %} active{% endif %}"
        id="fed-panel-{{ g.version }}"
        role="tabpanel">
-    {% if g.addresses.is_empty() %}
-      <p class="muted">No addresses derived yet.</p>
-    {% else %}
+
+    <nav class="asset-tabs" role="tablist">
+      {% for asset in g.assets %}
+        <button class="asset-tab{% if asset.is_active %} active{% endif %}"
+                role="tab"
+                data-fedv="{{ g.version }}"
+                data-asset="{{ asset.asset_id }}"
+                onclick="switchAssetTab({{ g.version }}, '{{ asset.asset_id }}')">{{ asset.asset_label }}</button>
+      {% endfor %}
+    </nav>
+
+    {% for asset in g.assets %}
+    <div class="asset-panel{% if asset.is_active %} active{% endif %}"
+         data-fedv="{{ g.version }}"
+         data-asset="{{ asset.asset_id }}"
+         role="tabpanel">
+      {% if asset.addresses.is_empty() %}
+        <p class="muted">No addresses derived yet.</p>
+      {% else %}
+        <table class="data">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Address</th>
+              <th>Received ({{ asset.asset_label }})</th>
+              <th>Unspent ({{ asset.asset_label }})</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for a in asset.addresses %}
+              <tr>
+                <td>{{ a.index }}</td>
+                <td>
+                  <a href="/elements/wallet/addresses/{{ a.address }}?asset={{ asset.asset_id }}" title="{{ a.address }}">
+                    <code>{{ a.address_short }}</code>
+                  </a>
+                </td>
+                <td>{{ a.received_btc }}</td>
+                <td>{{ a.unspent_btc }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+
+      {% if !asset.change_addresses.is_empty() %}
+      <h3 style="margin-top: 1.5rem;">Change addresses</h3>
+      <p class="muted">Internal keychain addresses holding {{ asset.asset_label }} change.</p>
       <table class="data">
         <thead>
           <tr>
             <th>#</th>
             <th>Address</th>
-            <th>Received (L-BTC)</th>
-            <th>Unspent (L-BTC)</th>
+            <th>Unspent ({{ asset.asset_label }})</th>
           </tr>
         </thead>
         <tbody>
-          {% for a in g.addresses %}
+          {% for a in asset.change_addresses %}
             <tr>
               <td>{{ a.index }}</td>
               <td>
-                <a href="/elements/wallet/addresses/{{ a.address }}" title="{{ a.address }}">
+                <a href="/elements/wallet/addresses/{{ a.address }}?asset={{ asset.asset_id }}" title="{{ a.address }}">
                   <code>{{ a.address_short }}</code>
                 </a>
               </td>
-              <td>{{ a.received_btc }}</td>
               <td>{{ a.unspent_btc }}</td>
             </tr>
           {% endfor %}
         </tbody>
       </table>
-    {% endif %}
-
-    {% if !g.change_addresses.is_empty() %}
-    <h3 style="margin-top: 1.5rem;">Change addresses</h3>
-    <p class="muted">Internal keychain addresses holding change from sent transactions.</p>
-    <table class="data">
-      <thead>
-        <tr>
-          <th>#</th>
-          <th>Address</th>
-          <th>Unspent (L-BTC)</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for a in g.change_addresses %}
-          <tr>
-            <td>{{ a.index }}</td>
-            <td>
-              <a href="/elements/wallet/addresses/{{ a.address }}" title="{{ a.address }}">
-                <code>{{ a.address_short }}</code>
-              </a>
-            </td>
-            <td>{{ a.unspent_btc }}</td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    {% endif %}
+      {% endif %}
+    </div>
+    {% endfor %}
   </div>
   {% endfor %}
 </section>
@@ -120,6 +149,14 @@ function switchFedTab(version) {
   });
   document.querySelectorAll('.fed-panel').forEach(function(p) {
     p.classList.toggle('active', p.id === 'fed-panel-' + version);
+  });
+}
+function switchAssetTab(version, asset) {
+  document.querySelectorAll('.asset-tab[data-fedv="' + version + '"]').forEach(function(t) {
+    t.classList.toggle('active', t.getAttribute('data-asset') === asset);
+  });
+  document.querySelectorAll('.asset-panel[data-fedv="' + version + '"]').forEach(function(p) {
+    p.classList.toggle('active', p.getAttribute('data-asset') === asset);
   });
 }
 </script>

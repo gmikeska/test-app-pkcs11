@@ -10,6 +10,14 @@
 {% endblock %}
 
 {% block content %}
+<style>
+.asset-tabs{display:flex;gap:2px;margin:12px 0 0;padding:0;flex-wrap:wrap;border-bottom:1px solid var(--border)}
+.asset-tab{padding:5px 12px;font-size:.8rem;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;transform:translateY(1px);cursor:pointer;user-select:none;font-family:var(--mono,monospace)}
+.asset-tab:hover{color:var(--text)}
+.asset-tab.active{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
+.asset-panel{display:none}
+.asset-panel.active{display:block}
+</style>
 <section class="card">
   <div class="crumbs">
     <a href="/elements/wallet/receive">&larr; Back to receive</a>
@@ -33,9 +41,6 @@
         {% when None %}
           <dt>Derivation index</dt><dd>&mdash;</dd>
       {% endmatch %}
-      <dt>Total received</dt><dd>{{ address.total_received_btc }} L-BTC</dd>
-      <dt>Unspent</dt><dd>{{ address.unspent_btc }} L-BTC</dd>
-      <dt>Receipts</dt><dd>{{ address.receipt_count }}</dd>
       <dt>URI</dt><dd><code class="break">{{ address.qr_uri }}</code></dd>
       <dt>Chain tip</dt><dd>{{ header.tip_height }}</dd>
     </dl>
@@ -43,38 +48,73 @@
 </section>
 
 <section class="card">
-  <h2>Receipts</h2>
-  {% if receipts.is_empty() %}
-    <p class="muted">No transactions have paid this address yet. Send L-BTC to <code class="break">{{ address.address }}</code> from your Elements regtest node, mine a block, and reload.</p>
+  <h2>Activity by asset</h2>
+  {% if asset_activities.is_empty() %}
+    <p class="muted">No transactions have paid this address yet. Send to <code class="break">{{ address.address }}</code> from your Elements regtest node, mine a block, and reload.</p>
   {% else %}
-    <table class="data">
-      <thead>
-        <tr>
-          <th>Txid</th>
-          <th>Vout</th>
-          <th>Amount (L-BTC)</th>
-          <th>Status</th>
-          <th>State</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for r in receipts %}
+    <nav class="asset-tabs" role="tablist">
+      {% for aa in asset_activities %}
+        <button class="asset-tab{% if aa.is_active %} active{% endif %}"
+                role="tab"
+                data-asset="{{ aa.asset_id }}"
+                onclick="switchAssetTab('{{ aa.asset_id }}')">{{ aa.asset_label }}</button>
+      {% endfor %}
+    </nav>
+
+    {% for aa in asset_activities %}
+    <div class="asset-panel{% if aa.is_active %} active{% endif %}"
+         data-asset="{{ aa.asset_id }}"
+         role="tabpanel">
+      <dl class="kv-grid" style="margin-top: 14px;">
+        {% if !aa.is_policy %}
+          <dt>Asset id</dt><dd><code class="break">{{ aa.asset_id }}</code></dd>
+        {% endif %}
+        <dt>Total received</dt><dd>{{ aa.total_received_btc }} {{ aa.asset_label }}</dd>
+        <dt>Unspent</dt><dd>{{ aa.unspent_btc }} {{ aa.asset_label }}</dd>
+        <dt>Receipts</dt><dd>{{ aa.receipt_count }}</dd>
+      </dl>
+
+      <table class="data" style="margin-top: 1rem;">
+        <thead>
           <tr>
-            <td><code class="break">{{ r.txid }}</code></td>
-            <td>{{ r.vout }}</td>
-            <td>{{ r.amount_btc }}</td>
-            <td>{{ r.status }}</td>
-            <td>
-              {% if r.is_spent %}
-                <span class="tag-spent">spent</span>
-              {% else %}
-                <span class="tag-unspent">unspent</span>
-              {% endif %}
-            </td>
+            <th>Txid</th>
+            <th>Vout</th>
+            <th>Amount ({{ aa.asset_label }})</th>
+            <th>Status</th>
+            <th>State</th>
           </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {% for r in aa.receipts %}
+            <tr>
+              <td><code class="break">{{ r.txid }}</code></td>
+              <td>{{ r.vout }}</td>
+              <td>{{ r.amount_btc }}</td>
+              <td>{{ r.status }}</td>
+              <td>
+                {% if r.is_spent %}
+                  <span class="tag-spent">spent</span>
+                {% else %}
+                  <span class="tag-unspent">unspent</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endfor %}
   {% endif %}
 </section>
+
+<script>
+function switchAssetTab(asset) {
+  document.querySelectorAll('.asset-tab').forEach(function(t) {
+    t.classList.toggle('active', t.getAttribute('data-asset') === asset);
+  });
+  document.querySelectorAll('.asset-panel').forEach(function(p) {
+    p.classList.toggle('active', p.getAttribute('data-asset') === asset);
+  });
+}
+</script>
 {% endblock %}
