@@ -2,7 +2,7 @@
 
 {% block tab_body %}
 <section class="card">
-  <h2>Send L-BTC</h2>
+  <h2>Send</h2>
   <p class="muted">Build a PSET, sign with all 3 emulated HSMs, and broadcast in one click. Confidential transactions preserve amount privacy on the Elements sidechain.</p>
   <form method="post" action="/elements/wallet/send" class="stack-form">
     <label>
@@ -11,11 +11,13 @@
              placeholder="el1qq&hellip; / ert1q&hellip;">
     </label>
     <label>
-      <span>Asset ID (optional &mdash; blank sends L-BTC)</span>
-      <input type="text" name="asset_id" autocomplete="off" spellcheck="false"
-             pattern="[0-9a-fA-F]{64}" title="64 hex characters"
-             placeholder="e31e269c&hellip; (blank = L-BTC)">
-      <small class="muted">Set a Liquid asset id to send that asset (amount is in asset units); the L-BTC fee is drawn automatically. <strong>Max</strong> fills the full asset balance (fee is separate).</small>
+      <span>Asset</span>
+      <select name="asset_id" id="asset_id" style="width:100%; padding:9px 10px; border-radius:6px; border:1px solid var(--border); background:var(--panel-2); color:inherit; font:inherit;">
+        {% for o in asset_options %}
+          <option value="{{ o.value }}"{% if o.value.is_empty() %} selected{% endif %}>{{ o.label }}</option>
+        {% endfor %}
+      </select>
+      <small class="muted">Defaults to L-BTC. For an issued asset the amount is in asset units and the L-BTC fee is drawn separately; <strong>Max</strong> fills the full asset balance.</small>
     </label>
     <label>
       <span>Amount (L-BTC or asset units)</span>

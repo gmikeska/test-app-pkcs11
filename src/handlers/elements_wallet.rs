@@ -118,7 +118,19 @@ struct SendTemplate {
     header: ElementsWalletHeader,
     balance: ElementsBalanceView,
     transactions: Vec<ElementsTransactionListView>,
+    /// Asset dropdown options — L-BTC first (empty value = L-BTC send), then
+    /// each held issued asset by id.
+    asset_options: Vec<SendAssetOption>,
     flash: Option<FlashBanner>,
+}
+
+/// One option in the send-page asset dropdown.
+#[derive(Debug, Serialize, Clone)]
+pub struct SendAssetOption {
+    /// Form value: empty string for L-BTC (the policy asset), else the asset id.
+    pub value: String,
+    /// Display label: "L-BTC" for the policy asset, else the asset id.
+    pub label: String,
 }
 
 #[derive(Template, WebTemplate)]
@@ -396,6 +408,22 @@ pub async fn send_get(
         .map(ElementsTransactionListView::from)
         .collect();
 
+    // Asset dropdown: L-BTC first (empty value ⇒ plain L-BTC send), then each
+    // held issued asset (by id). The policy asset is folded into the L-BTC row.
+    let policy_asset = uw.lwk_network().policy_asset().to_string();
+    let mut asset_options = vec![SendAssetOption {
+        value: String::new(),
+        label: "L-BTC".to_string(),
+    }];
+    for b in uw.asset_balances().await? {
+        if b.asset_id != policy_asset {
+            asset_options.push(SendAssetOption {
+                value: b.asset_id.clone(),
+                label: b.asset_id,
+            });
+        }
+    }
+
     let total = balances.trusted + balances.untrusted_pending + balances.immature;
     let has_pending = (balances.untrusted_pending + balances.immature) > 0.000_000_01;
     let balance_view = ElementsBalanceView {
@@ -419,6 +447,7 @@ pub async fn send_get(
         },
         balance: balance_view,
         transactions: txs,
+        asset_options,
         flash: None,
     }
     .into_response())
