@@ -5,6 +5,27 @@ documented here. This is the app's first CHANGELOG; the `0.2.0` entry summarizes
 the current cycle (which tracks the emvault suite **0.8.0** / Bitcoin Taproot
 release). Earlier history lives in git.
 
+## [0.3.0] - 2026-08-21
+
+Tracks emvault suite **0.9.0** (asset-aware Elements migration).
+
+### Added
+- **Liquid asset support in the Elements view** — per-asset display, an asset
+  selector on the send page, and **Send-Max for assets** (drains the full asset
+  balance; the network fee is paid separately in L-BTC).
+- **Asset-aware Elements federation migration executor** — per-asset recipients plus
+  fee-account assets, so a migration carries L-BTC and every issued asset forward.
+
+### Fixed
+- **L-BTC-only balance card + L-BTC-first holdings** — the balance card reflects only
+  L-BTC; other assets are read from Holdings by asset.
+- Show the correct (successor) federation after a migration.
+
+### Changed
+- Consume the full local emvault crate set via `[patch.crates-io]` (inter-crate deps
+  are version-only now, so the facade patch no longer cascades). Bumped to
+  **emvault 0.9**.
+
 ## [0.2.0] - 2026-08-16
 
 Tracks emvault suite **0.8.0** (Bitcoin Taproot).

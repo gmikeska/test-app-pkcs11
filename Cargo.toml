@@ -1,6 +1,6 @@
 [package]
 name = "test-app-pkcs11"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Test web app exercising emvault-pkcs11: customer-facing wallets backed by a 3-of-3 federation of emulated HSMs."
 license = "MIT OR Apache-2.0"
@@ -19,15 +19,15 @@ publish = false
 # `[patch.crates-io]` backend tree (which carries `evicted_txids` + `reorg_rebuilt`
 # + rebuild-on-reorg) is consumed. Greg lands the single emvault 0.6.0 republish
 # (D6); at that point set this to "0.6" and drop the patch below.
-emvault = { version = "0.8", features = ["pkcs11", "elements", "esplora", "electrum", "elements-electrum", "elements-esplora"] }
+emvault = { version = "0.9", features = ["pkcs11", "elements", "esplora", "electrum", "elements-electrum", "elements-esplora"] }
 
 # Vendor HSM backends are **direct** dependencies, not routed through the
 # `emvault` umbrella. Each is just a crate implementing `emvault::pkcs11::HsmBackend`,
 # so a third party can drop in their own backend the same way — no umbrella
 # feature or facade change required. Both path-pin the same emvault-pkcs11 the
 # umbrella re-exports, so `Pkcs11Signer`/`HsmBackend` types unify.
-emvault-dev-signer = { version = "0.8.0", path = "../emvault-dev-signer" }
-emvault-securosys  = { version = "0.8",   path = "../emvault-securosys", features = ["tsb"] }
+emvault-dev-signer = { version = "0.9.0", path = "../emvault-dev-signer" }
+emvault-securosys  = { version = "0.9",   path = "../emvault-securosys", features = ["tsb"] }
 
 # Chain + Elements stacks are NOT pinned here — their types cross the EmVault
 # API, so we consume them through the ecosystem's canonical re-exports:
@@ -94,7 +94,7 @@ toml = "0.8"
 # end-to-end integration test (node + Postgres backed). Cargo unions this with
 # the normal `emvault` dep, so the test build gets pkcs11 + elements +
 # dev-signer + test-utils.
-emvault = { version = "0.8", features = ["test-utils"] }
+emvault = { version = "0.9", features = ["test-utils"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
