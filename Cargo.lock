@@ -1229,6 +1229,8 @@ dependencies = [
 [[package]]
 name = "emvault-xpub"
 version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1da334707f52d81dbf68d4d11ec166ecd15b9d84ae1a670f65ea64c64397bfa3"
 dependencies = [
  "bip39",
  "bitcoin",
