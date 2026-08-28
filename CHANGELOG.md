@@ -5,6 +5,18 @@ documented here. This is the app's first CHANGELOG; the `0.2.0` entry summarizes
 the current cycle (which tracks the emvault suite **0.8.0** / Bitcoin Taproot
 release). Earlier history lives in git.
 
+## [0.4.0] - 2026-08-28
+
+Tracks emvault suite **0.10.0** (Taproot signing/verification + config-auth
+security hardening — F1/F4/F2).
+
+### Added
+- **Dev-HSM Taproot `SigningCoordinator` gate** (`tests/taproot_hsm_signing_offline.rs`):
+  a node-free 2-of-3 `tr(NUMS, multi_a)` federation signed by three real dev
+  SoftHSM Schnorr signers, driven through the coordinator to prove the F1 fix at
+  runtime — one signature credits exactly one signer and is not complete, two
+  reach threshold, and the PSBT finalizes to a real Taproot script-path witness.
+
 ## [0.3.0] - 2026-08-21
 
 Tracks emvault suite **0.9.0** (asset-aware Elements migration).
