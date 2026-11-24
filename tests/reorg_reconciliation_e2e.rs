@@ -128,17 +128,58 @@ fn set_env(key: &str, val: &str) {
     unsafe { std::env::set_var(key, val) };
 }
 
+/// Remove an env var (edition-2024 `remove_var` is `unsafe`). Same
+/// single-threaded precondition as [`set_env`].
+fn remove_env(key: &str) {
+    unsafe { std::env::remove_var(key) };
+}
+
+/// Trim the discovered HSM pool to tokens 1-3 — exactly the three this gate's
+/// federation uses (`APP_FED_SIGNERS=1,2,3`, which is 1-based in the env).
+///
+/// # ▶ Why this is load-bearing, not tidying
+///
+/// `HsmFleet::signers_for` derives a signer on **every** token in the pool and
+/// only then does `fed_signer_indices` pick the federation's three
+/// (`src/wallet.rs:462-467`). `.env` declares `APP_HSM_16` as a **securosys**
+/// partition at `/usr/lib/libprimusP11.so`, and no Securosys HSM is reachable
+/// here — so the 16th `Pkcs11Session::open` gets `CKR_GENERAL_ERROR` out of
+/// `C_Initialize` and provisioning dies *after* 15 successful dev-token
+/// derivations.
+///
+/// ▶ **The symptom points at the wrong component.** It surfaces as
+/// `Hsm(Pkcs11(Initialize(Pkcs11(GeneralError, Initialize))))` with **nothing**
+/// in the dev-shim's log, because the module that refused is not the shim. The
+/// count is the tell: exactly 15 `base-key` derivations, then the error.
+///
+/// ▶ **Unsetting these from the shell does not work.** `dotenvy::from_path`
+/// above sets any variable that is not currently set, so it puts back exactly
+/// what a shell `unset` removed. The removal has to happen *after* that call —
+/// which is why this is a function here and not a note in a runbook.
+///
+/// `discover_hsm_tokens` breaks at the first absent `APP_HSM_{n}_LABEL`
+/// (`src/config.rs:552`), so clearing label 4 upward leaves tokens 1-3. Trimming
+/// also drops 12 unnecessary derivations from the gate's runtime.
+fn trim_hsm_pool_to_federation_tokens() {
+    for idx in 4..=32u32 {
+        remove_env(&format!("APP_HSM_{idx}_LABEL"));
+    }
+}
+
 /// Point `AppConfig::from_env` at the gv-regtest bitcoind on the **RPC backend**
 /// with a fast 2-of-3 federation, overriding the `.env` defaults.
 fn configure_regtest_rpc_env() {
     let _ = dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/.env"));
-    // The restarted gv-regtest Postgres binds the docker-bridge iface at
-    // host.docker.internal:5546 (the app `.env` still names the old
-    // 127.0.0.1:5432 endpoint). Override to the live container.
-    set_env(
-        "DATABASE_URL",
-        "postgres://asterism:asterism@host.docker.internal:5546/asterism_pkcs11",
-    );
+    // ▶ DATABASE_URL is deliberately NOT overridden — it comes from `.env`.
+    //
+    // This used to pin `asterism:asterism@host.docker.internal:5546/asterism_pkcs11`
+    // to work around a `.env` that still named `127.0.0.1:5432`. `.env` now names
+    // the right endpoint (`host.docker.internal:5544`, container
+    // `emv-asterism-pg-5544`), so the override stopped being a fix and became the
+    // bug: `:5546` is `gv-dev-pg-5546`, a *GroupVault* dev database, which answers
+    // the asterism credentials with `28P01 password authentication failed`. When
+    // that container is simply stopped it instead reads as `PoolTimedOut`, which
+    // looks like "no database anywhere" rather than "wrong database".
     set_env("BITCOIN_NETWORK", "regtest");
     set_env("APP_CHAIN_BACKEND", "rpc"); // emitter path, esplora disabled
     set_env("BITCOIN_RPC_HOST", "host.docker.internal");
@@ -147,6 +188,9 @@ fn configure_regtest_rpc_env() {
     set_env("BITCOIN_RPC_PASSWORD", "regtest");
     set_env("BITCOIN_WALLET_NAME", "miner");
     set_env("APP_FED_SIGNERS", "1,2,3");
+    // Must run after `dotenvy` above and after APP_FED_SIGNERS is set: the pool
+    // it trims has to end up matching the federation this gate asks for.
+    trim_hsm_pool_to_federation_tokens();
     set_env("APP_FED_THRESHOLD", "2");
 }
 
@@ -253,9 +297,22 @@ async fn rpc_reorg_reverts_completed_migration() {
         signed["complete"].as_bool().unwrap_or(false),
         "miner must sign the double-spend of U: {signed}"
     );
+    // ▶ `maxfeerate: 0` waives the fee-RATE ceiling, and it is required here.
+    //
+    // `EVICT_FEE_SATS` is a flat 0.01 BTC deliberately chosen to dwarf D's fee so
+    // D' wins the RBF. On a 1-in-1-out transaction of roughly 200 vB that is a
+    // fee *rate* near 50 BTC/kvB, and `sendrawtransaction`'s `maxfeerate`
+    // defaults to **0.10 BTC/kvB** — so bitcoind rejects it with
+    // `-25 Fee exceeds maximum configured by user`.
+    //
+    // ▶ The error message names `-maxtxfee` first, which sends you looking at
+    // node configuration and absolute fees. It is not that: 0.01 BTC is well
+    // under the 0.1 BTC `-maxtxfee` default. The binding limit is the per-call
+    // rate, and the overpay is the point of the test rather than a mistake to
+    // tune down.
     let d_prime = rpc(
         "sendrawtransaction",
-        json!([signed["hex"].as_str().unwrap()]),
+        json!([signed["hex"].as_str().unwrap(), 0]),
         None,
     );
     eprintln!("broadcast D' (evicts D): {}", d_prime.as_str().unwrap());
