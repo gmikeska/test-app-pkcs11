@@ -772,7 +772,13 @@ mod account_idx_tests {
     /// the Elements test pass for the wrong reason, never fail wrongly: the
     /// assertion is "the index was not reissued", and an unrelated higher index
     /// still satisfies it.
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// ▶ A `tokio::sync::Mutex`, not `std::sync::Mutex`, because these tests
+    /// hold it across `.await`. A std guard held across an await point can
+    /// park the runtime thread while the lock is still taken
+    /// (`clippy::await_holding_lock` flags exactly this); the async-aware
+    /// mutex yields instead.
+    static SERIAL: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     async fn test_pool() -> Option<PgPool> {
         let url = std::env::var("TEST_DATABASE_URL")
@@ -825,7 +831,7 @@ mod account_idx_tests {
             eprintln!("skipping: no TEST_DATABASE_URL/DATABASE_URL");
             return;
         };
-        let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _serial = SERIAL.lock().await;
 
         let user = seed_user(&pool).await;
         let issued = next_account_idx(&pool).await.expect("first allocation");
@@ -872,7 +878,7 @@ mod account_idx_tests {
             eprintln!("skipping: no TEST_DATABASE_URL/DATABASE_URL");
             return;
         };
-        let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _serial = SERIAL.lock().await;
 
         let user = seed_user(&pool).await;
         let issued = next_elements_account_idx(&pool)
