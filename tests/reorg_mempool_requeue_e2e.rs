@@ -18,7 +18,10 @@
 //!
 //! ## Harness (gv-regtest)
 //!   * regtest bitcoind — JSON-RPC `host.docker.internal:18543` (`regtest`/`regtest`)
-//!   * Postgres — `DATABASE_URL` from `.env` (host.docker.internal:5546)
+//!   * Postgres — `DATABASE_URL` from `.env` (host.docker.internal:5544,
+//!     container `emv-asterism-pg-5544`). NOT `:5546` — that is `gv-dev-pg-5546`,
+//!     a GroupVault database, and naming it here is what made the old hardcoded
+//!     override look correct.
 //!   * dev-HSM — `PKCS11_LIB` + `APP_HSM_{1,2,3}_*` from `.env`, `SOFTHSM2_CONF` set
 //!
 //! No Electrum/Esplora server needed — the RPC path reads bitcoind directly.
@@ -250,6 +253,7 @@ async fn rpc_reorg_mempool_requeue_does_not_revert() {
         .address
         .clone();
     eprintln!("funding v0 address: {addr}");
+
     let d_txid_str = rpc(
         "sendtoaddress",
         json!([addr, btc(FUND_SATS)]),

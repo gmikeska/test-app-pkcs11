@@ -11,6 +11,33 @@ Tracks emvault suite **0.12.0** (the `Pkcs11Signer::sign_sighash` seam; suite 0.
 yanked). Version aligned to the suite number rather than continuing the app's own 0.x line.
 
 ### Fixed
+- **Account indices were recycled after a wallet was deleted, so two users could share one
+  on-chain wallet** (EMV-8; `src/db.rs`, migration `0010_monotonic_account_index.sql`).
+  `next_account_idx` and `next_elements_account_idx` were
+  `SELECT COALESCE(MAX(account_idx) + 1, 0)` over the live table — a high-water mark of
+  **surviving** rows, not an allocator. Deleting a wallet freed its index, and the next user
+  provisioned derived `m/48'/{coin}'/{account_idx}'/2'` to the *same* HSM keys, the same
+  `wsh(sortedmulti(..))` descriptor and the same addresses: able to spend whatever was still
+  sitting there, and to silently receive any later deposit meant for the previous holder.
+  ▶ **`UNIQUE (account_idx)` never fired and never could** — it constrains rows that *exist*, and
+  the violated invariant is over rows that **ever existed**; deleting before re-inserting slips
+  past it without the constraint being consulted. Measured: two users, two wallet rows,
+  `account_idx=110` both times, byte-identical descriptor and address, one shared wallet.
+  Both allocators are now Postgres sequences — `nextval` is monotonic, survives deletes, and is
+  not rolled back by a failed transaction, so reuse is unrepresentable rather than unlikely. The
+  migration seeds each sequence above its table's maximum **plus a margin**, because indices held
+  by already-deleted rows cannot be recovered from the surviving table. Two new tests pin the
+  invariant per chain (allocate → delete via user CASCADE → allocate → assert differs); both
+  failed before the change, at index 111 and 1462310.
+  ▶ On Elements the consequence was slightly worse: `daemon_wallet_name` is
+  `format!("elements-user-{account_idx}")` and `UNIQUE`, so a reused index also reused a
+  user-visible label — and that constraint is defeated by the same ordering. Two guards, neither
+  able to see the violation.
+- **A failed migration made database tests report success** (`src/db.rs`). The copied `test_pool`
+  idiom ended every fallible step with `.ok()?`, so a broken migration returned `None`, the test
+  printed "no DATABASE_URL" and reported **ok**. That path produced a green run for the two new
+  allocator tests while migration `0010` was in fact failing. Absent database still skips; present
+  but unmigratable now panics with the migration error.
 - **The emvault requirements were stale at `"0.10"` and the build was broken.** With the local
   tree at 0.12.0, `emvault-dev-signer = "^0.10.0"` could not resolve against its own path dep
   and `cargo check` failed outright. Requirements now read `"0.12"`.
@@ -50,21 +77,23 @@ yanked). Version aligned to the suite number rather than continuing the app's ow
   0.1 BTC default, and the binding limit is the per-call rate.
 
 ### Known issues
-- **`rpc_reorg_reverts_completed_migration` still fails** (EMV-8), now much further along — through
-  provisioning, signing and the RBF eviction — on `v0 must see the funding UTXO`: balance
-  `1000000000` SAT against an expected `500000000`, exactly double the single 5 BTC deposit. Not
-  address reuse: the observed runs revealed different v0 addresses and `db::next_account_idx` is
-  `COALESCE(MAX(account_idx)+1, 0)`, so each run gets a fresh index and descriptor.
 - **`elements_sync::tests::pg_stores_honor_contracts` is not hermetic** (EMV-7). It shares the
-  `asterism_pkcs11` database rather than taking an isolated one, and fails intermittently on
-  leftover rows — asserting `block_hash_at(99) == None` against a real stored hash. It has both
-  passed and failed on this build; the deciding factor is database residue, not code.
+  `asterism_pkcs11` database rather than taking an isolated one, and has both passed and failed on
+  this build — the deciding factor is database residue, not code. It passes in the run recorded
+  above.
 - **One unreachable vendor token fails every *fresh* wallet provisioning, the server included**
-  (EMV-9). EMV-6's fix is test-side; the pool-wide derivation above is unchanged, so on a box
-  without the Securosys HSM any genuinely new user cannot be provisioned. ▶ The running server
-  looks healthy only because `ensure_wallet_for_user` (`src/wallet.rs:430`) returns early for the
-  seeded users, who already have wallets — a boot log with **zero** `base-key` lines is not
-  evidence that provisioning works.
+  (EMV-9). `HsmFleet::signers_for` derives across the whole token pool before
+  `fed_signer_indices` narrows to the federation, so on a box without the Securosys HSM a
+  genuinely new user cannot be provisioned. ▶ The running server looks healthy only because
+  `ensure_wallet_for_user` (`src/wallet.rs:430`) returns early for the seeded users, who already
+  have wallets — a boot log with **zero** `base-key` lines is not evidence that provisioning works.
+- **`UNIQUE (descriptor)` is not yet enforced** (EMV-11). Drafted in migration `0010` and removed:
+  it fails with `Key (descriptor)=(desc) is duplicated` because `elements_sync`'s `seed_wallet`
+  fixture inserts the literal `descriptor = 'desc'` for every row and those accumulate in the
+  shared database. ▶ It would not have caught EMV-8 — a live-rows guard cannot see
+  delete-then-insert — but it does catch an identical signer set assembling one descriptor
+  (GroupVault F13 proper). Blocked on the fixtures using distinct descriptors and the existing
+  duplicates being resolved; the new allocator tests already use distinct ones.
 
 ## [0.4.0] - 2026-08-28
 
